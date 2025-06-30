@@ -99,6 +99,11 @@ class Channels
 
     bool setDefaultPresetCryptoForHash(ChannelHash channelHash);
 
+    /**
+     * Validate a channel, fixing any errors as needed
+     */
+    meshtastic_Channel &fixupChannel(ChannelIndex chIndex);
+
     int16_t getHash(ChannelIndex i) { return hashes[i]; }
 
   private:
@@ -117,11 +122,6 @@ class Channels
      * called by fixupChannel when a new channel is set
      */
     int16_t generateHash(ChannelIndex channelNum);
-
-    /**
-     * Validate a channel, fixing any errors as needed
-     */
-    meshtastic_Channel &fixupChannel(ChannelIndex chIndex);
 
     /**
      * Writes the default lora config
