@@ -736,6 +736,11 @@ void setup()
 #endif
 #endif
 
+    LOG_DEBUG("Forcing OLED to 64x128");
+    // Hack: force this
+    screen_model = meshtastic_Config_DisplayConfig_OledType_OLED_SH1107;
+    screen_geometry = GEOMETRY_64_128;
+
 #if !MESHTASTIC_EXCLUDE_I2C
 #if !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_ACCELEROMETER
     if (acc_info.type != ScanI2C::DeviceType::NONE) {
