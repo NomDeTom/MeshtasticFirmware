@@ -736,10 +736,9 @@ void setup()
 #endif
 #endif
 
-    LOG_DEBUG("Forcing OLED to 64x128");
-    // Hack: force this
-    screen_model = meshtastic_Config_DisplayConfig_OledType_OLED_SH1107;
-    screen_geometry = GEOMETRY_64_128;
+    if (screen_model == meshtastic_Config_DisplayConfig_OledType_OLED_SH1107_ROTATED) {
+        screen_geometry = GEOMETRY_64_128;
+    }
 
 #if !MESHTASTIC_EXCLUDE_I2C
 #if !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_ACCELEROMETER
@@ -798,7 +797,7 @@ void setup()
     SPI.begin();
 #endif
 #else
-        // ESP32
+    // ESP32
 #if defined(HW_SPI1_DEVICE)
     SPI1.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
     LOG_DEBUG("SPI1.begin(SCK=%d, MISO=%d, MOSI=%d, NSS=%d)", LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);

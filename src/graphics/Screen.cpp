@@ -653,8 +653,16 @@ void Screen::setup()
 
     // Detect OLED subtype (if supported by board variant)
 #ifdef AutoOLEDWire_h
-    if (isAUTOOled)
-        static_cast<AutoOLEDWire *>(dispdev)->setDetected(model);
+    if (isAUTOOled) {
+        if (model == meshtastic_Config_DisplayConfig_OledType_OLED_SH1107_128_128) {
+            static_cast<AutoOLEDWire *>(dispdev)->setDetected(meshtastic_Config_DisplayConfig_OledType_OLED_SH1107);
+        } else if (model == meshtastic_Config_DisplayConfig_OledType_OLED_SH1107_ROTATED) {
+            static_cast<AutoOLEDWire *>(dispdev)->setDetected(meshtastic_Config_DisplayConfig_OledType_OLED_SH1107);
+            dispdev->setRotation(ROTATE_90);
+        } else {
+            static_cast<AutoOLEDWire *>(dispdev)->setDetected(model);
+        }
+    }
 #endif
 
 #if defined(USE_SH1107_128_64) || defined(USE_SH1107)
