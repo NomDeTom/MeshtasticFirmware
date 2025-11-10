@@ -36,11 +36,11 @@ extern "C" {
 #define USE_RF95
 #define USE_SX1268
 
-#define LORA_DIO0 (1)
+#define LORA_DIO0 (1) // Busy
 #define LORA_RESET (0)
 #define LORA_DIO1 (2)
 #define LORA_RXEN RADIOLIB_NC // Not used
-// #define LORA_BUSY (9) // Pin 9 is used by the button
+#define LORA_BUSY LORA_DIO0 
 #define LORA_SCK (4)
 #define LORA_MISO (3)
 #define LORA_MOSI (10)
