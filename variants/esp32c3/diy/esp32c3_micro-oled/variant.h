@@ -9,6 +9,22 @@
 extern "C" {
 #endif // __cplusplus
 
+/*
+ESP32C3 MICRO OLED PIN ASSIGNMENT
+
+| Pin    | Function   | RF95 | Pin     | Function     | RF95 |
+| ------ | ---------- | ---- | ------- | ------------ | ---- |
+| 5v     |            |      | GPIO10  | MOSI         | MOSI |
+| Gnd    |            |      | GPIO09  | BUTTON_PIN   |      |
+| 3v3    |            |      | GPIO08  | LED_Pin      |      |
+| GPIO20 |            |      | GPIO07  | CS           | NSS  |
+| GPIO21 |            |      | GPIO06  | SCL          |      |
+| GPIO02 | DIO1/IRQ   | DIO1 | GPIO05  | SDA          |      |
+| GPIO01 | BUSY       | DIO0 | GPIO04  | SCK          | SCK  |
+| GPIO00 | NRST       | RST  | GPIO03  | MISO         | MISO |
+
+*/
+
 // LED
 #define LED_PIN 8      // LED
 #define LED_STATE_ON 1 // State when LED is lit
