@@ -188,6 +188,13 @@ const RegionInfo regions[] = {
     RDEF(BR_902, 902.0f, 907.5f, 100, 0, 30, true, false, false),
 
     /*
+        Europe Narrow Band
+        869.4 - 869.65 MHz , 500mW power limit, 10% duty cycle
+        A new preset to try and get around interference in the middle of the band
+     */
+    RDEF(EU_NARROW, 869.4f, 869.65f, 10, 0.015, 27, false, false, false),
+
+    /*
        2.4 GHZ WLAN Band equivalent. Only for SX128x chips.
     */
     RDEF(LORA_24, 2400.0f, 2483.5f, 100, 0, 10, true, false, true),
@@ -503,7 +510,27 @@ void RadioInterface::applyModemConfig()
                 cr = 5;
                 sf = 10;
                 break;
-            default: // Config_LoRaConfig_ModemPreset_LONG_FAST is default. Gracefully use this is preset is something illegal.
+            case meshtastic_Config_LoRaConfig_ModemPreset_NARROW_TURBO:
+                bw = (myRegion->wideLora) ? 203.125 : 62.5;
+                cr = 8;
+                sf = 5;
+                break;
+            case meshtastic_Config_LoRaConfig_ModemPreset_NARROW_FAST:
+                bw = (myRegion->wideLora) ? 203.125 : 62.5;
+                cr = 8;
+                sf = 6;
+                break;
+            case meshtastic_Config_LoRaConfig_ModemPreset_NARROW_MODERATE:
+                bw = (myRegion->wideLora) ? 203.125 : 62.5;
+                cr = 8;
+                sf = 7;
+                break;
+            case meshtastic_Config_LoRaConfig_ModemPreset_NARROW_SLOW:
+                bw = (myRegion->wideLora) ? 203.125 : 62.5;
+                cr = 8;
+                sf = 8;
+                break;
+            default: // Config_LoRaConfig_ModemPreset_LONG_FAST is default. Gracefully use this if preset is something illegal.
                 bw = (myRegion->wideLora) ? 812.5 : 250;
                 cr = 5;
                 sf = 11;
