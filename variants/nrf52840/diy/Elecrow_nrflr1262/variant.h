@@ -16,8 +16,8 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#ifndef _VARIANT_WIO_SDK_WM1110_
-#define _VARIANT_WIO_SDK_WM1110_
+#ifndef _VARIANT_Elecrow_lr1262_
+#define _VARIANT_Elecrow_lr1262_
 
 /** Master clock frequency */
 #define VARIANT_MCK (64000000ul)
@@ -78,13 +78,13 @@ extern "C" {
 
 #define SPI_INTERFACES_COUNT 1
 
-#define PIN_SPI_MISO (32 + 15) // P1.15 47
-#define PIN_SPI_MOSI (32 + 14) // P1.14 46
-#define PIN_SPI_SCK (32 + 13)  // P1.13 45
-#define PIN_SPI_NSS (32 + 12)  // P1.12 44
+#define LORA_MISO (32 + 15) // P1.15 47
+#define LORA_MOSI (32 + 14) // P1.14 46
+#define LORA_SCK (32 + 13)  // P1.13 45
+#define LORA_CS (32 + 12)  // P1.12 44
 
 #define LORA_RESET (32 + 10) // P1.10 42 // RST
-#define LORA_DIO1 (32 + 8)   // P1.08 40 // IRQ
+#define LORA_DIO1 (32 + 6)   // P1.08 40 // IRQ
 #define LORA_DIO2 (32 + 11)  // P1.11 43 // BUSY
 #define LORA_SCK PIN_SPI_SCK
 #define LORA_MISO PIN_SPI_MISO
@@ -92,20 +92,18 @@ extern "C" {
 #define LORA_CS PIN_SPI_NSS
 
 // supported modules list
-#define USE_LR1110
+#define USE_SX1262
 
-#define LR1110_IRQ_PIN LORA_DIO1
-#define LR1110_NRESET_PIN LORA_RESET
-#define LR1110_BUSY_PIN LORA_DIO2
-#define LR1110_SPI_NSS_PIN LORA_CS
-#define LR1110_SPI_SCK_PIN LORA_SCK
-#define LR1110_SPI_MOSI_PIN LORA_MOSI
-#define LR1110_SPI_MISO_PIN LORA_MISO
+#define SX1262_IRQ_PIN LORA_DIO1
+#define SX1262_NRESET_PIN LORA_RESET
+#define SX1262_BUSY_PIN LORA_DIO2
+#define SX1262_SPI_NSS_PIN LORA_CS
+#define SX1262_SPI_SCK_PIN LORA_SCK
+#define SX1262_SPI_MOSI_PIN LORA_MOSI
+#define SX1262_SPI_MISO_PIN LORA_MISO
 
-#define LR11X0_DIO3_TCXO_VOLTAGE 1.6
-#define LR11X0_DIO_AS_RF_SWITCH
-
-#define LR1110_GNSS_ANT_PIN (32 + 5) // P1.05 37
+#define SX1262_DIO3_TCXO_VOLTAGE 1.6
+#define SX1262_DIO_AS_RF_SWITCH
 
 #define NRF_USE_SERIAL_DFU
 
