@@ -30,6 +30,7 @@
  *----------------------------------------------------------------------------*/
 
 #include "WVariant.h"
+#define elecrow-lr1262
 
 #ifdef USE_TINYUSB
 #error TinyUSB must be disabled by platformio before using this variant
