@@ -15,7 +15,7 @@
     ],
     "usb_product": "LEle",
     "mcu": "nrf52840",
-    "variant": "elecrow-lr1262",
+    "variant": "elecrow_lr1262",
     "bsp": {
       "name": "adafruit"
     },
