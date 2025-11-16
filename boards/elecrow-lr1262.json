@@ -16,6 +16,7 @@
     "usb_product": "ELECROW nRF52840",
     "mcu": "nrf52840",
     "variant": "elecrow_lr1262",
+    "variants_dir": "variants",
     "bsp": {
       "name": "adafruit"
     },
