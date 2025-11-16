@@ -16,8 +16,8 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#ifndef _VARIANT_Elecrow_lr1262_
-#define _VARIANT_Elecrow_lr1262_
+#ifndef _VARIANT_elecrow_lr1262_
+#define _VARIANT_elecrow_lr1262_
 
 /** Master clock frequency */
 #define VARIANT_MCK (64000000ul)
@@ -115,4 +115,4 @@ extern "C" {
  *        Arduino objects - C++ only
  *----------------------------------------------------------------------------*/
 
-#endif // _VARIANT_WIO_SDK_WM1110_
+#endif
