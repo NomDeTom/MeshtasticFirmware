@@ -47,8 +47,8 @@ L76K GPS Module Information : https://www.seeedstudio.com/L76K-GNSS-Module-for-S
 */
 #define GPS_L76K
 #ifdef GPS_L76K
-#define GPS_RX_PIN 44
-#define GPS_TX_PIN 43
+#define GPS_RX_PIN 5
+#define GPS_TX_PIN 6
 #define HAS_GPS 1
 #define GPS_BAUDRATE 9600
 #define GPS_THREAD_INTERVAL 50
@@ -60,8 +60,8 @@ L76K GPS Module Information : https://www.seeedstudio.com/L76K-GNSS-Module-for-S
 // XIAO S3 Expansion board  has 1.3 inch OLED Screen
 #define USCREEN_SSD1306
 
-#define I2C_SDA 5
-#define I2C_SCL 6
+#define I2C_SDA 43
+#define I2C_SCL 44
 
 // XIAO S3 LORA module
 #define USE_SX1262
