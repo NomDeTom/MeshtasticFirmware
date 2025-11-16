@@ -1,7 +1,7 @@
 {
   "build": {
     "arduino": {
-      "ldscript": "nrf52840_s140_v7.ld"
+      "ldscript": "nrf52840_s140_v6.ld"
     },
     "core": "nRF5",
     "cpu": "cortex-m4",
@@ -13,7 +13,7 @@
       ["0x239A", "0x002A"],
       ["0x239A", "0x802A"]
     ],
-    "usb_product": "LEle",
+    "usb_product": "ELECROW nRF52840",
     "mcu": "nrf52840",
     "variant": "elecrow_lr1262",
     "bsp": {
@@ -26,7 +26,8 @@
       "sd_fwid": "0x00B6"
     },
     "bootloader": {
-      "settings_addr": "0xFF000" 
+      "settings_addr": "0xFF000"
+    }
   },
   "connectivity": ["bluetooth"],
   "debug": {
