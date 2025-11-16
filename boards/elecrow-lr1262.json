@@ -22,12 +22,12 @@
     "softdevice": {
       "sd_flags": "-DS140",
       "sd_name": "s140",
-      "sd_version": "6.3.0",
-      "sd_fwid": "0x0123"
+      "sd_version": "6.1.1",
+      "sd_fwid": "0x00B6"
     },
     "bootloader": {
       "settings_addr": "0xFF000"
-    }
+    
   },
   "connectivity": ["bluetooth"],
   "debug": {
