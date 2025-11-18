@@ -107,7 +107,7 @@ extern "C" {
 #define SX126X_TXEN RADIOLIB_NC
 #define SX126X_RXEN RADIOLIB_NC
 
-#define SX1262_DIO3_TCXO_VOLTAGE 1.6
+#define SX1262_DIO3_TCXO_VOLTAGE 3.3 // Taken from elecrow example
 #define SX1262_DIO2_AS_RF_SWITCH
 
 #define NRF_USE_SERIAL_DFU
