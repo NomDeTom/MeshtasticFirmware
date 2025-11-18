@@ -50,31 +50,21 @@ extern "C" {
 
 #define WIRE_INTERFACES_COUNT 1
 
-#define PIN_3V3_EN (0 + 7) // P0.7, Power to Sensors
-
-#define PIN_WIRE_SDA (0 + 27) // P0.27
-#define PIN_WIRE_SCL (0 + 26) // P0.26
-
-#define PIN_LED1 (0 + 13) // P0.13
-#define PIN_LED2 (0 + 14) // P0.14
-
-#define LED_BUILTIN PIN_LED1
-
-#define LED_GREEN PIN_LED1
-#define LED_BLUE PIN_LED2 // Actually red
-
-#define LED_STATE_ON 1 // State when LED is lit
-
-#define BUTTON_PIN (0 + 23) // P0.23
+#define PIN_WIRE_SDA (32 + 4) // P1.04
+#define PIN_WIRE_SCL (0 + 11) // P0.11
 
 /*
  * Serial interfaces
  */
-#define PIN_SERIAL1_RX (0 + 22) // P0.22
-#define PIN_SERIAL1_TX (0 + 24) // P0.24
+#define PIN_GPS_TX (0 + 22) // P0.22
+#define PIN_GPS_RX (0 + 20) // P0.20
 
-#define PIN_SERIAL2_RX (0 + 6) // P0.06
-#define PIN_SERIAL2_TX (0 + 8) // P0.08
+#define GPS_UBLOX
+// define GPS_DEBUG
+
+// UART interfaces
+#define PIN_SERIAL1_RX PIN_GPS_TX
+#define PIN_SERIAL1_TX PIN_GPS_RX
 
 #define SPI_INTERFACES_COUNT 1
 
