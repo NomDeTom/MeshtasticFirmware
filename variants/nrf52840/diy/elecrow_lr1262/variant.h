@@ -36,7 +36,7 @@
 #endif
 
 // We use the hardware serial port for the serial console
-#define Serial Serial1
+// #define Serial Serial1
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,14 +48,30 @@ extern "C" {
 #define NUM_ANALOG_INPUTS (6)
 #define NUM_ANALOG_OUTPUTS (0)
 
+// WIRE IC AND IIC PINS
 #define WIRE_INTERFACES_COUNT 1
 
 #define PIN_WIRE_SDA (32 + 4) // P1.04
 #define PIN_WIRE_SCL (0 + 11) // P0.11
 
-/*
- * Serial interfaces
- */
+// Power Enable
+// #define PIN_3V3_EN (0 + 7) // P0.7, Power to Sensors // disabled for now
+
+// LEDs
+#define PIN_LED1 (0 + 13) // P0.13
+#define PIN_LED2 (0 + 14) // P0.14
+
+#define LED_BUILTIN PIN_LED1
+
+#define LED_GREEN PIN_LED1
+#define LED_BLUE PIN_LED2 // Actually red
+
+#define LED_STATE_ON 1 // State when LED is lit
+
+// Button
+#define BUTTON_PIN (0 + 23) // P0.23
+
+// GPS
 #define PIN_GPS_TX (0 + 22) // P0.22
 #define PIN_GPS_RX (0 + 20) // P0.20
 
@@ -66,6 +82,7 @@ extern "C" {
 #define PIN_SERIAL1_RX PIN_GPS_TX
 #define PIN_SERIAL1_TX PIN_GPS_RX
 
+// Serial interfaces
 #define SPI_INTERFACES_COUNT 1
 
 #define PIN_SPI_MISO (32 + 15) // P1.15 47
@@ -81,7 +98,7 @@ extern "C" {
 #define LORA_MOSI PIN_SPI_MOSI
 #define LORA_CS PIN_SPI_NSS
 
-// supported modules list
+// LORA MODULES
 #define USE_SX1262
 
 #define SX126X_DIO1 LORA_DIO1
