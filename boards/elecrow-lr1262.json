@@ -5,9 +5,10 @@
     },
     "core": "nRF5",
     "cpu": "cortex-m4",
-    "extra_flags": "-DNRF52840_XXAA",
+    "extra_flags": "-DARDUINO_NRF52840_FEATHER -DNRF52840_XXAA",
     "f_cpu": "64000000L",
     "hwids": [
+      ["0x239A", "0x00B3"],
       ["0x239A", "0x8029"],
       ["0x239A", "0x0029"],
       ["0x239A", "0x002A"],
@@ -16,7 +17,6 @@
     "usb_product": "ELECROW nRF52840",
     "mcu": "nrf52840",
     "variant": "elecrow_lr1262",
-    "variants_dir": "variants",
     "bsp": {
       "name": "adafruit"
     },
@@ -42,14 +42,7 @@
     "maximum_size": 815104,
     "speed": 115200,
     "protocol": "nrfutil",
-    "protocols": [
-      "jlink",
-      "nrfjprog",
-      "nrfutil",
-      "stlink",
-      "cmsis-dap",
-      "blackmagic"
-    ],
+    "protocols": ["nrfutil", "jlink", "nrfjprog", "stlink"],
     "use_1200bps_touch": true,
     "require_upload_port": true,
     "wait_for_upload_port": true
