@@ -82,6 +82,9 @@ extern "C" {
 #define PIN_SERIAL1_RX PIN_GPS_TX
 #define PIN_SERIAL1_TX PIN_GPS_RX
 
+#define PIN_SERIAL2_RX (0 + 6) // P0.06
+#define PIN_SERIAL2_TX (0 + 8) // P0.08
+
 // Serial interfaces
 #define SPI_INTERFACES_COUNT 1
 
