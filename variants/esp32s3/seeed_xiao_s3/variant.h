@@ -60,7 +60,9 @@ L76K GPS Module Information : https://www.seeedstudio.com/L76K-GNSS-Module-for-S
 // XIAO S3 Expansion board  has 1.3 inch OLED Screen
 #define USCREEN_SSD1306
 
+// Have to define BQ25896 because thats what the XPowers library expects
 #define HAS_PPM 1
+#define HAS_BQ25895 1
 #define XPOWERS_CHIP_BQ25895
 #define XPOWERS_CHIP_BQ25896
 

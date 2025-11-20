@@ -129,6 +129,11 @@ RAK9154Sensor rak9154Sensor;
 // note: XPOWERS_CHIP_XXX must be defined in variant.h
 #include <XPowersLib.h>
 XPowersPPM *PPM = NULL;
+#ifdef HAS_BQ25895
+#define BQ2589x_ADDR = BQ25895_ADDR
+#else
+#define BQ2589x_ADDR = BQ25896_ADDR
+#endif
 #endif
 
 #ifdef HAS_BQ27220
@@ -1329,7 +1334,6 @@ bool Power::lipoInit()
     return true;
 }
 
-#else
 /**
  * The Lipo battery level sensor is unavailable - default to AnalogBatteryLevel
  */
@@ -1353,144 +1357,116 @@ class LipoCharger : public HasBatteryLevel
     /**
      * Init the I2C BQ25895/6 Lipo battery charger
      */
-    bool runOnce()
+    bool runOnce() if (PPM == nullptr)
     {
-        if (PPM == nullptr && XPOWERS_CHIP_BQ25895 != 1) {
-            PPM = new XPowersPPM;
-            bool result = PPM->init(Wire, I2C_SDA, I2C_SCL, BQ25896_ADDR);
-            if (result) {
-                LOG_INFO("PPM BQ25896 init succeeded");
-                // Set the minimum operating voltage. Below this voltage, the PPM will protect
-                // PPM->setSysPowerDownVoltage(3100);
+        PPM = new XPowersPPM;
+        bool result = PPM->init(Wire, I2C_SDA, I2C_SCL, BQ2589x_ADDR);
+        if (result) {
+            LOG_INFO("PPM BQ25896 init succeeded");
+            // Set the minimum operating voltage. Below this voltage, the PPM will protect
+            // PPM->setSysPowerDownVoltage(3100);
 
-                // Set input current limit, default is 500mA
-                // PPM->setInputCurrentLimit(800);
+            // Set input current limit, default is 500mA
+            // PPM->setInputCurrentLimit(800);
 
-                // Disable current limit pin
-                // PPM->disableCurrentLimitPin();
+            // Disable current limit pin
+            // PPM->disableCurrentLimitPin();
 
-                // Set the charging target voltage, Range:3840 ~ 4608mV ,step:16 mV
-                PPM->setChargeTargetVoltage(4288);
+            // Set the charging target voltage, Range:3840 ~ 4608mV ,step:16 mV
+            PPM->setChargeTargetVoltage(4288);
 
-                // Set the precharge current , Range: 64mA ~ 1024mA ,step:64mA
-                // PPM->setPrechargeCurr(64);
+            // Set the precharge current , Range: 64mA ~ 1024mA ,step:64mA
+            // PPM->setPrechargeCurr(64);
 
-                // The premise is that limit pin is disabled, or it will
-                // only follow the maximum charging current set by limit pin.
-                // Set the charging current , Range:0~5056mA ,step:64mA
-                PPM->setChargerConstantCurr(1024);
+            // The premise is that limit pin is disabled, or it will
+            // only follow the maximum charging current set by limit pin.
+            // Set the charging current , Range:0~5056mA ,step:64mA
+            PPM->setChargerConstantCurr(1024);
 
-                // To obtain voltage data, the ADC must be enabled first
-                PPM->enableMeasure();
+            // To obtain voltage data, the ADC must be enabled first
+            PPM->enableMeasure();
 
-                // Turn on charging function
-                // If there is no battery connected, do not turn on the charging function
-                PPM->enableCharge();
-            } else {
-                LOG_WARN("PPM BQ25896 init failed");
-                delete PPM;
-                PPM = nullptr;
-                return false;
-            }
-        }
-        if (PPM == nullptr && XPOWERS_CHIP_BQ25895 == 1) {
-            PPM = new XPowersPPM;
-            bool result = PPM->init(Wire, I2C_SDA, I2C_SCL, BQ25895_ADDR);
-            if (result) {
-                LOG_INFO("PPM BQ25895 init succeeded");
-                // Set the minimum operating voltage. Below this voltage, the PPM will protect
-                // PPM->setSysPowerDownVoltage(3100);
-
-                // Set input current limit, default is 500mA
-                // PPM->setInputCurrentLimit(800);
-
-                // Disable current limit pin
-                // PPM->disableCurrentLimitPin();
-
-                // Set the charging target voltage, Range:3840 ~ 4608mV ,step:16 mV
-                PPM->setChargeTargetVoltage(4208);
-
-                // Set the precharge current , Range: 64mA ~ 1024mA ,step:64mA
-                // PPM->setPrechargeCurr(64);
-
-                // The premise is that limit pin is disabled, or it will
-                // only follow the maximum charging current set by limit pin.
-                // Set the charging current , Range:0~5056mA ,step:64mA
-                PPM->setChargerConstantCurr(1024);
-
-                // To obtain voltage data, the ADC must be enabled first
-                PPM->enableMeasure();
-
-                // Turn on charging function
-                // If there is no battery connected, do not turn on the charging function
-                PPM->enableCharge();
-            } else {
-                LOG_WARN("PPM BQ25895 init failed");
-                delete PPM;
-                PPM = nullptr;
-                return false;
-            }
-        }
-        if (bq == nullptr) {
-            bq = new BQ27220;
-            bq->setDefaultCapacity(BQ27220_DESIGN_CAPACITY);
-
-            bool result = bq->init();
-            if (result) {
-                LOG_DEBUG("BQ27220 design capacity: %d", bq->getDesignCapacity());
-                LOG_DEBUG("BQ27220 fullCharge capacity: %d", bq->getFullChargeCapacity());
-                LOG_DEBUG("BQ27220 remaining capacity: %d", bq->getRemainingCapacity());
-                return true;
-            } else {
-                LOG_WARN("BQ27220 init failed");
-                delete bq;
-                bq = nullptr;
-                return false;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Battery state of charge, from 0 to 100 or -1 for unknown
-     */
-    virtual int getBatteryPercent() override
-    {
-        return -1;
-        // return bq->getChargePercent(); // don't use BQ27220 for battery percent, it is not calibrated
-    }
-
-    /**
-     * The raw voltage of the battery in millivolts, or NAN if unknown
-     */
-    virtual uint16_t getBattVoltage() override { return bq->getVoltage(); }
-
-    /**
-     * return true if there is a battery installed in this unit
-     */
-    virtual bool isBatteryConnect() override { return PPM->getBattVoltage() > 0; }
-
-    /**
-     * return true if there is an external power source detected
-     */
-    virtual bool isVbusIn() override { return PPM->getVbusVoltage() > 0; }
-
-    /**
-     * return true if the battery is currently charging
-     */
-    virtual bool isCharging() override
-    {
-        bool isCharging = PPM->isCharging();
-        if (isCharging) {
-            LOG_DEBUG("BQ27220 time to full charge: %d min", bq->getTimeToFull());
+            // Turn on charging function
+            // If there is no battery connected, do not turn on the charging function
+            PPM->enableCharge();
         } else {
-            if (!PPM->isVbusIn()) {
-                LOG_DEBUG("BQ27220 time to empty: %d min (%d mAh)", bq->getTimeToEmpty(), bq->getRemainingCapacity());
-            }
+            LOG_WARN("PPM BQ2589x init failed");
+            delete PPM;
+            PPM = nullptr;
+            return false;
         }
-        return isCharging;
     }
-};
+    if (bq == nullptr) {
+        bq = new BQ27220;
+        bq->setDefaultCapacity(BQ27220_DESIGN_CAPACITY);
+
+        bool result = bq->init();
+        if (result) {
+            LOG_DEBUG("BQ27220 design capacity: %d", bq->getDesignCapacity());
+            LOG_DEBUG("BQ27220 fullCharge capacity: %d", bq->getFullChargeCapacity());
+            LOG_DEBUG("BQ27220 remaining capacity: %d", bq->getRemainingCapacity());
+            return true;
+        } else {
+            LOG_WARN("BQ27220 init failed");
+            delete bq;
+            bq = nullptr;
+            return false;
+        }
+    }
+    return false;
+}
+
+/**
+ * Battery state of charge, from 0 to 100 or -1 for unknown
+ */
+virtual int
+getBatteryPercent() override
+{
+    return -1;
+    // return bq->getChargePercent(); // don't use BQ27220 for battery percent, it is not calibrated
+}
+
+/**
+ * The raw voltage of the battery in millivolts, or NAN if unknown
+ */
+virtual uint16_t getBattVoltage() override
+{
+    return bq->getVoltage();
+}
+
+/**
+ * return true if there is a battery installed in this unit
+ */
+virtual bool isBatteryConnect() override
+{
+    return PPM->getBattVoltage() > 0;
+}
+
+/**
+ * return true if there is an external power source detected
+ */
+virtual bool isVbusIn() override
+{
+    return PPM->getVbusVoltage() > 0;
+}
+
+/**
+ * return true if the battery is currently charging
+ */
+virtual bool isCharging() override
+{
+    bool isCharging = PPM->isCharging();
+    if (isCharging) {
+        LOG_DEBUG("BQ27220 time to full charge: %d min", bq->getTimeToFull());
+    } else {
+        if (!PPM->isVbusIn()) {
+            LOG_DEBUG("BQ27220 time to empty: %d min (%d mAh)", bq->getTimeToEmpty(), bq->getRemainingCapacity());
+        }
+    }
+    return isCharging;
+}
+}
+;
 
 LipoCharger lipoCharger;
 
