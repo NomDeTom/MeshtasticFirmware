@@ -1351,7 +1351,7 @@ class LipoCharger : public HasBatteryLevel
 
   public:
     /**
-     * Init the I2C BQ25896 Lipo battery charger
+     * Init the I2C BQ25895/6 Lipo battery charger
      */
     bool runOnce()
     {
@@ -1386,7 +1386,14 @@ class LipoCharger : public HasBatteryLevel
                 // Turn on charging function
                 // If there is no battery connected, do not turn on the charging function
                 PPM->enableCharge();
-          } elseif (PPM == nullptr && XPOWERS_CHIP_BQ25895) {
+            } else {
+                LOG_WARN("PPM BQ25896 init failed");
+                delete PPM;
+                PPM = nullptr;
+                return false;
+            }
+        }
+          if (PPM == nullptr && XPOWERS_CHIP_BQ25895) {
             PPM = new XPowersPPM;
             bool result = PPM->init(Wire, I2C_SDA, I2C_SCL, BQ25895_ADDR);
             if (result) {
@@ -1401,7 +1408,7 @@ class LipoCharger : public HasBatteryLevel
                 // PPM->disableCurrentLimitPin();
 
                 // Set the charging target voltage, Range:3840 ~ 4608mV ,step:16 mV
-                PPM->setChargeTargetVoltage(4288);
+                PPM->setChargeTargetVoltage(4208);
 
                 // Set the precharge current , Range: 64mA ~ 1024mA ,step:64mA
                 // PPM->setPrechargeCurr(64);
@@ -1418,7 +1425,7 @@ class LipoCharger : public HasBatteryLevel
                 // If there is no battery connected, do not turn on the charging function
                 PPM->enableCharge();
             } else {
-                LOG_WARN("PPM BQ25896 init failed");
+                LOG_WARN("PPM BQ25895 init failed");
                 delete PPM;
                 PPM = nullptr;
                 return false;
