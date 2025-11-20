@@ -1355,7 +1355,7 @@ class LipoCharger : public HasBatteryLevel
      */
     bool runOnce()
     {
-        if (PPM == nullptr && XPOWERS_CHIP_BQ25896) {
+        if (PPM == nullptr && !XPOWERS_CHIP_BQ25895) {
             PPM = new XPowersPPM;
             bool result = PPM->init(Wire, I2C_SDA, I2C_SCL, BQ25896_ADDR);
             if (result) {
@@ -1393,7 +1393,7 @@ class LipoCharger : public HasBatteryLevel
                 return false;
             }
         }
-          if (PPM == nullptr && XPOWERS_CHIP_BQ25895) {
+        if (PPM == nullptr && XPOWERS_CHIP_BQ25895) {
             PPM = new XPowersPPM;
             bool result = PPM->init(Wire, I2C_SDA, I2C_SCL, BQ25895_ADDR);
             if (result) {

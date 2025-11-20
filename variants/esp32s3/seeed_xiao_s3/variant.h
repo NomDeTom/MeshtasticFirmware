@@ -62,6 +62,7 @@ L76K GPS Module Information : https://www.seeedstudio.com/L76K-GNSS-Module-for-S
 
 #define HAS_PPM 1
 #define XPOWERS_CHIP_BQ25895
+#define XPOWERS_CHIP_BQ25896
 
 #define I2C_SDA 43
 #define I2C_SCL 44
