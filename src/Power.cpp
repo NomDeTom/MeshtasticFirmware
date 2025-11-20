@@ -1355,11 +1355,42 @@ class LipoCharger : public HasBatteryLevel
      */
     bool runOnce()
     {
-        if (PPM == nullptr) {
+        if (PPM == nullptr && XPOWERS_CHIP_BQ25896) {
             PPM = new XPowersPPM;
             bool result = PPM->init(Wire, I2C_SDA, I2C_SCL, BQ25896_ADDR);
             if (result) {
                 LOG_INFO("PPM BQ25896 init succeeded");
+                // Set the minimum operating voltage. Below this voltage, the PPM will protect
+                // PPM->setSysPowerDownVoltage(3100);
+
+                // Set input current limit, default is 500mA
+                // PPM->setInputCurrentLimit(800);
+
+                // Disable current limit pin
+                // PPM->disableCurrentLimitPin();
+
+                // Set the charging target voltage, Range:3840 ~ 4608mV ,step:16 mV
+                PPM->setChargeTargetVoltage(4288);
+
+                // Set the precharge current , Range: 64mA ~ 1024mA ,step:64mA
+                // PPM->setPrechargeCurr(64);
+
+                // The premise is that limit pin is disabled, or it will
+                // only follow the maximum charging current set by limit pin.
+                // Set the charging current , Range:0~5056mA ,step:64mA
+                PPM->setChargerConstantCurr(1024);
+
+                // To obtain voltage data, the ADC must be enabled first
+                PPM->enableMeasure();
+
+                // Turn on charging function
+                // If there is no battery connected, do not turn on the charging function
+                PPM->enableCharge();
+          } elseif (PPM == nullptr && XPOWERS_CHIP_BQ25895) {
+            PPM = new XPowersPPM;
+            bool result = PPM->init(Wire, I2C_SDA, I2C_SCL, BQ25895_ADDR);
+            if (result) {
+                LOG_INFO("PPM BQ25895 init succeeded");
                 // Set the minimum operating voltage. Below this voltage, the PPM will protect
                 // PPM->setSysPowerDownVoltage(3100);
 
