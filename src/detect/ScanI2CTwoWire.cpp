@@ -464,7 +464,11 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
 
                 break;
 
+#ifdef HAS_BQ25895
+                SCAN_SIMPLE_CASE(BQ25895_ADDR, BQ25895, "BQ25895", (uint8_t)addr.address);
+#else
                 SCAN_SIMPLE_CASE(LSM6DS3_ADDR, LSM6DS3, "LSM6DS3", (uint8_t)addr.address);
+#endif
                 SCAN_SIMPLE_CASE(VEML7700_ADDR, VEML7700, "VEML7700", (uint8_t)addr.address);
             case TCA9555_ADDR:
                 registerValue = getRegisterValue(ScanI2CTwoWire::RegisterLocation(addr, 0x01), 1);
