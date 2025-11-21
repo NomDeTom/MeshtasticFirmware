@@ -76,6 +76,7 @@ class ScanI2C
         TCA8418KB,
         PCT2075,
         CST328,
+        BQ25895,
         BQ25896,
         BQ27220,
         LTR553ALS,

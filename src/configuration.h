@@ -211,6 +211,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define XPOWERS_AXP192_AXP2101_ADDRESS 0x34 // same adress as TCA8418_KB
 #define PCT2075_ADDR 0x37
 #define BQ27220_ADDR 0x55 // same address as TDECK_KB
+#define BQ25895_ADDR 0x6A // same address as LSM6DS3 Accelerometer
 #define BQ25896_ADDR 0x6B
 #define LTR553ALS_ADDR 0x23
 
@@ -222,7 +223,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define LIS3DH_ADDR 0x18
 #define LIS3DH_ADDR_ALT 0x19
 #define BMA423_ADDR 0x19
-#define LSM6DS3_ADDR 0x6A
+#define LSM6DS3_ADDR 0x6A // same address as BQ25895 Charger
 #define BMX160_ADDR 0x69
 #define ICM20948_ADDR 0x69
 #define ICM20948_ADDR_ALT 0x68
