@@ -63,7 +63,6 @@ static const uint8_t A5 = PIN_A5;
 #define XPOWERS_CHIP_BQ25895
 #define XPOWERS_CHIP_BQ25896 // Have to define BQ25896 because thats what the XPowers library expects
 
-
 /*
  * LEDs
  */
@@ -199,6 +198,9 @@ static const uint8_t SCK = PIN_SPI_SCK;
 #define PIN_WIRE_SDA (17)
 #define PIN_WIRE_SCL (16)
 #endif
+
+static const uint8_t I2C_SDA = PIN_WIRE_SDA;
+static const uint8_t I2C_SCL = PIN_WIRE_SCL;
 
 static const uint8_t SDA = PIN_WIRE_SDA;
 static const uint8_t SCL = PIN_WIRE_SCL;
