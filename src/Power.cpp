@@ -1392,6 +1392,7 @@ class LipoCharger : public HasBatteryLevel
                 return false;
             }
         }
+        return false;
     }
 
     /**
