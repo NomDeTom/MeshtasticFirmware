@@ -1372,7 +1372,7 @@ class LipoCharger : public HasBatteryLevel
 
                 // Set the charging target voltage, Range:3840 ~ 4608mV ,step:16 mV
                 PPM->setChargeTargetVoltage(4208);
-
+                LOG_WARN("voltage set to 4.2");
                 // Set the precharge current , Range: 64mA ~ 1024mA ,step:64mA
                 // PPM->setPrechargeCurr(64);
 
@@ -1380,13 +1380,14 @@ class LipoCharger : public HasBatteryLevel
                 // only follow the maximum charging current set by limit pin.
                 // Set the charging current , Range:0~5056mA ,step:64mA
                 PPM->setChargerConstantCurr(1024);
-
+                LOG_WARN("MaxCurrent set to 1A");
                 // To obtain voltage data, the ADC must be enabled first
                 PPM->enableMeasure();
-
+                LOG_WARN("EnMeasure");
                 // Turn on charging function
                 // If there is no battery connected, do not turn on the charging function
                 PPM->enableCharge();
+                LOG_WARN("EnCharge");
             } else {
                 LOG_WARN("PPM BQ25895 init failed");
                 delete PPM;
