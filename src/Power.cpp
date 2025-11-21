@@ -1340,6 +1340,8 @@ bool Power::lipoInit()
 #endif
 
 #if defined(HAS_PPM) && HAS_PPM && defined(HAS_BQ25895) && HAS_BQ25895
+#undef BQ25896_SLAVE_ADDRESS
+#define BQ25896_SLAVE_ADDRESS 0x6A
 /**
  * Adapter class for BQ25895Lipo battery charger.
  */

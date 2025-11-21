@@ -62,7 +62,7 @@ static const uint8_t A5 = PIN_A5;
 #define HAS_BQ25895 1
 #define XPOWERS_CHIP_BQ25895
 #define XPOWERS_CHIP_BQ25896 // Have to define BQ25896 because thats what the XPowers library expects
-
+#undef HAS_BQ27220
 /*
  * LEDs
  */
