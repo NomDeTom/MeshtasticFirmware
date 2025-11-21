@@ -1453,7 +1453,7 @@ bool Power::lipoChargerInit()
     return true;
 }
 
-#else if defined(HAS_BQ27220) && HAS_BQ27220 &&defined(HAS_PPM) && HAS_PPM
+#elif defined(HAS_BQ27220) && HAS_BQ27220 && defined(HAS_PPM) && HAS_PPM
 
 /**
  * Adapter class for BQ25896/BQ27220 Lipo battery charger.
