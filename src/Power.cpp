@@ -106,6 +106,12 @@ INA3221Sensor ina3221Sensor;
 NullSensor ina3221Sensor;
 #endif
 
+#if __has_include(<bq2589x.h>)
+BQ25895Sensor bq25895Sensor;
+#else
+NullSensor bq25895Sensor;
+#endif
+
 #endif
 
 #if !MESHTASTIC_EXCLUDE_I2C
@@ -531,6 +537,9 @@ class AnalogBatteryLevel : public HasBatteryLevel
         } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA3221].first ==
                    config.power.device_battery_ina_address) {
             return ina3221Sensor.getBusVoltageMv();
+        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_BQ25895].first ==
+                   config.power.device_battery_ina_address) {
+            return ina3221Sensor.getBusVoltageMv();
         }
         return 0;
     }
@@ -543,6 +552,9 @@ class AnalogBatteryLevel : public HasBatteryLevel
                    config.power.device_battery_ina_address) {
             return ina226Sensor.getCurrentMa();
         } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA3221].first ==
+                   config.power.device_battery_ina_address) {
+            return ina3221Sensor.getCurrentMa();
+        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_BQ25895].first ==
                    config.power.device_battery_ina_address) {
             return ina3221Sensor.getCurrentMa();
         }
@@ -573,6 +585,11 @@ class AnalogBatteryLevel : public HasBatteryLevel
             if (!ina3221Sensor.isInitialized())
                 return ina3221Sensor.runOnce() > 0;
             return ina3221Sensor.isRunning();
+        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_BQ25895].first ==
+                   config.power.device_battery_ina_address) {
+            if (!bq25895Sensor.isInitialized())
+                return bq25895Sensor.runOnce() > 0;
+            return bq25895Sensor.isRunning();
         }
         return false;
     }
