@@ -7,6 +7,7 @@
 #include "TelemetrySensor.h"
 #include "VoltageSensor.h"
 #include <bq2589x.h>
+#include <Arduino.h>
 
 class BQ25895Sensor : public TelemetrySensor, VoltageSensor, CurrentSensor
 {
