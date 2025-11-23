@@ -103,7 +103,8 @@ typedef enum _meshtastic_TelemetrySensorType {
     /* TSL2561 light sensor */
     meshtastic_TelemetrySensorType_TSL2561 = 44,
     /* BH1750 light sensor */
-    meshtastic_TelemetrySensorType_BH1750 = 45
+    meshtastic_TelemetrySensorType_BH1750 = 45,
+    meshtastic_TelemetrySensorType_BQ25895 = 46
 } meshtastic_TelemetrySensorType;
 
 /* Struct definitions */

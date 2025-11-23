@@ -15,11 +15,11 @@ int32_t BQ25895Sensor::runOnce()
     if (!hasSensor()) {
         return DEFAULT_SENSOR_MINIMUM_WAIT_TIME_BETWEEN_READS;
     }
-    if (!bq25895.success()) {
-        bq25895 = bq2589x(BQ25895_ADDR);
+    if (!bq25895.begin()) {
+        bq25895 = bq2589x();
         status = bq25895.begin();
     } else {
-        status = bq25895.success();
+        status = bq25895.begin();
     }
     return initI2CSensor();
 }
@@ -31,19 +31,19 @@ bool BQ25895Sensor::getMetrics(meshtastic_Telemetry *measurement)
     measurement->variant.environment_metrics.has_voltage = true;
     measurement->variant.environment_metrics.has_current = true;
 
-    measurement->variant.environment_metrics.voltage = bq25895.getBusVoltage_V();
-    measurement->variant.environment_metrics.current = bq25895.getCurrent_mA();
+    measurement->variant.environment_metrics.voltage = bq25895.adc_read_battery_volt();
+    measurement->variant.environment_metrics.current = bq25895.adc_read_charge_current();
     return true;
 }
 
 uint16_t BQ25895Sensor::getBusVoltageMv()
 {
-    return lround(bq25895.getBusVoltage_V() * 1000);
+    return lround(bq25895.adc_read_battery_volt());
 }
 
 int16_t BQ25895Sensor::getCurrentMa()
 {
-    return lround(bq25895.getCurrent_mA());
+    return lround(bq25895.adc_read_charge_current());
 }
 
 #endif
