@@ -81,6 +81,13 @@ extern INA3221Sensor ina3221Sensor;
 extern NullSensor ina3221Sensor;
 #endif
 
+#if __has_include(<bq2589x.h>)
+#include "modules/Telemetry/Sensor/BQ25895Sensor.h"
+extern BQ25895Sensor bq25895Sensor;
+#else
+extern NullSensor bq25895Sensor;
+#endif
+
 #endif
 
 #if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
