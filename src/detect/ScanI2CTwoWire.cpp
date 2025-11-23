@@ -466,7 +466,7 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
 
                 case BQ25895_ADDR:
                     registerValue = getRegisterValue(ScanI2CTwoWire::RegisterLocation(addr, 0x14), 1); // get ID
-                if ((registerValue & 0b00111000) == 0b00000111) {
+                if ((registerValue & 0b00111011) == 0b00111001) {
                     type = BQ25895;
                     logFoundDevice("BQ25895", (uint8_t)addr.address);
                 } else {
