@@ -539,7 +539,7 @@ class AnalogBatteryLevel : public HasBatteryLevel
             return ina3221Sensor.getBusVoltageMv();
         } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_BQ25895].first ==
                    config.power.device_battery_ina_address) {
-            return ina3221Sensor.getBusVoltageMv();
+            return bq25895Sensor.getBusVoltageMv();
         }
         return 0;
     }
@@ -556,7 +556,7 @@ class AnalogBatteryLevel : public HasBatteryLevel
             return ina3221Sensor.getCurrentMa();
         } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_BQ25895].first ==
                    config.power.device_battery_ina_address) {
-            return ina3221Sensor.getCurrentMa();
+            return bq25895Sensor.getCurrentMa();
         }
         return 0;
     }
