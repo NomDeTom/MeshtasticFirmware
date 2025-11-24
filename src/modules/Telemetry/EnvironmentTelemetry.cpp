@@ -586,7 +586,7 @@ bool EnvironmentTelemetryModule::getEnvironmentTelemetry(meshtastic_Telemetry *m
         valid = valid && max17048Sensor.getMetrics(m);
         hasSensor = true;
     }
-    if (bq25895ensor.hasSensor()) {
+    if (bq25895Sensor.hasSensor()) {
         valid = valid && bq25895Sensor.getMetrics(m);
         hasSensor = true;
     }
