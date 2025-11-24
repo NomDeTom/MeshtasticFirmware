@@ -193,9 +193,6 @@ static const uint8_t SCK = PIN_SPI_SCK;
 #define PIN_WIRE_SCL (16)
 #endif
 
-static const uint8_t I2C_SDA = PIN_WIRE_SDA;
-static const uint8_t I2C_SCL = PIN_WIRE_SCL;
-
 static const uint8_t SDA = PIN_WIRE_SDA;
 static const uint8_t SCL = PIN_WIRE_SCL;
 
