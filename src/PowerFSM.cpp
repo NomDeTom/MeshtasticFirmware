@@ -52,7 +52,7 @@ static bool isPowered()
         3) On some boards we don't have the power management chip (like AXPxxxx) so we use EXT_PWR_DETECT GPIO pin to detect
        external power source (see `isVbusIn()` in `Power.cpp`)
     */
-        LOG_DEBUG("IsPowered State: %s %s", !isPowerSavingMode, powerStatus);
+        LOG_DEBUG("IsPowered NPowerSavingMode %s IsPowered State: %s", !isPowerSavingMode ? "true" : "false", powerStatus? "true" : "false");
     return !isPowerSavingMode && powerStatus && (!powerStatus->getHasBattery() || powerStatus->getHasUSB());
 }
 
