@@ -38,12 +38,13 @@ bool BQ25895Sensor::getMetrics(meshtastic_Telemetry *measurement)
 
 uint16_t BQ25895Sensor::getBusVoltageMv()
 {
-    LOG_INFO("GetBus BQ25895");
+    LOG_INFO("GetBus BQ25895 %s", bq25895.adc_read_battery_volt());
     return lround(bq25895.adc_read_battery_volt());
 }
 
 int16_t BQ25895Sensor::getCurrentMa()
 {
+    LOG_INFO("GetBus BQ25895 %s", bq25895.adc_read_charge_current());
     LOG_INFO("GetCurrentMa BQ25895");
     return lround(bq25895.adc_read_charge_current());
 }
