@@ -15,13 +15,9 @@ int32_t BQ25895Sensor::runOnce()
     if (!hasSensor()) {
         return DEFAULT_SENSOR_MINIMUM_WAIT_TIME_BETWEEN_READS;
     }
-    if (!bq25895.begin()) {
-        bq25895 = bq2589x();
-        status = bq25895.begin();
-    } else {
-        status = bq25895.begin();
-    }
-    return initI2CSensor();
+    status = bq25895.begin();
+    initI2CSensor();
+    return status;
 }
 
 void BQ25895Sensor::setup()
