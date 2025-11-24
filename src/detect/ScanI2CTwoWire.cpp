@@ -421,6 +421,7 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                 if ((registerValue & 0b00000011) == 0b00000010) {
                     type = BQ25896;
                     logFoundDevice("BQ25896", (uint8_t)addr.address);
+                    LOG_INFO("BQ2589666 checking in!");
                     break;
                 }
                 registerValue = getRegisterValue(ScanI2CTwoWire::RegisterLocation(addr, 0x0F), 1); // get ID
@@ -469,6 +470,7 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                 if ((registerValue & 0b00111011) == 0b00111001) {
                     type = BQ25895;
                     logFoundDevice("BQ25895", (uint8_t)addr.address);
+                    LOG_INFO("BQ25895 checking in!");
                 } else {
                     type = LSM6DS3;
                     logFoundDevice("LSM6DS3", (uint8_t)addr.address);
