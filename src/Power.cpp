@@ -1486,9 +1486,10 @@ bool Power::lipoChargerInit()
     return true;
 }
 
-#else /**                                                                                                                        \
-       * The Lipo battery level sensor is unavailable - default to AnalogBatteryLevel                                            \
-       */
+#else
+/**
+ * The Lipo battery level sensor is unavailable - default to AnalogBatteryLevel
+ */
 bool Power::lipoChargerInit()
 {
     return false;
