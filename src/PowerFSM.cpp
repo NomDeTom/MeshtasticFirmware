@@ -199,6 +199,7 @@ static void powerEnter()
     if (!isPowered()) {
         // If we got here, we are in the wrong state - we should be in powered, let that state handle things
         LOG_INFO("Loss of power in Powered");
+        LOG_INFO("checkpoint 2");
         powerFSM.trigger(EVENT_POWER_DISCONNECTED);
     } else {
         if (screen)
@@ -213,6 +214,7 @@ static void powerIdle()
     if (!isPowered()) {
         // If we got here, we are in the wrong state
         LOG_INFO("Loss of power in Powered");
+        LOG_INFO("checkpoint 3");
         powerFSM.trigger(EVENT_POWER_DISCONNECTED);
     }
 }
