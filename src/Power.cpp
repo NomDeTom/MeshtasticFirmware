@@ -1356,7 +1356,7 @@ bool Power::lipoInit()
 }
 #endif
 
-#elif defined(HAS_PPM) && HAS_PPM
+#if defined(HAS_PPM) && HAS_PPM
 
 /**
  * Adapter class for BQ25896/BQ27220 Lipo battery charger.
