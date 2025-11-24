@@ -1,4 +1,5 @@
 #pragma once
+#include "DebugConfiguration.h"
 #include "Status.h"
 #include "configuration.h"
 #include <Arduino.h>
@@ -57,7 +58,7 @@ class PowerStatus : public Status
     bool getIsCharging() const { return isCharging == OptTrue; }
 
     int getBatteryVoltageMv() const { return batteryVoltageMv; }
-    LOG_DEBUG("hasBattery %s hasUSB %s isCharging %s", int hasBattery, int hasUSB, int isCharging);
+    LOG_DEBUG("hasBattery %i hasUSB %i isCharging %i", hasBattery, hasUSB, isCharging);
     /**
      * Note: for boards with battery pin or PMU, 0% battery means 'unknown/this board doesn't have a battery installed'
      */
