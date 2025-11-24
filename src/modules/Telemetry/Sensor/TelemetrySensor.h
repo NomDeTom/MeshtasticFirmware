@@ -38,7 +38,7 @@ class TelemetrySensor
             nodeTelemetrySensorsMap[sensorType].first = 0;
         } else {
             LOG_INFO("Opened %s sensor on i2c bus", sensorName);
-            LOG_INFO("ckeckpoint1");
+            LOG_INFO("checkpoint1");
             setup();
         }
         initialized = true;
