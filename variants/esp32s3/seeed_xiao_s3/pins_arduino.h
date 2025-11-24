@@ -9,8 +9,8 @@
 // GPIO48 Reference: https://github.com/espressif/arduino-esp32/pull/8600
 
 // The default Wire will be mapped to Screen and Sensors
-static const uint8_t SDA = 43;
-static const uint8_t SCL = 44;
+static const uint8_t SDA = 47;
+static const uint8_t SCL = 48;
 
 // Default SPI will be mapped to Radio
 static const uint8_t MISO = 8;
