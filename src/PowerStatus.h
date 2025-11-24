@@ -57,7 +57,7 @@ class PowerStatus : public Status
     bool getIsCharging() const { return isCharging == OptTrue; }
 
     int getBatteryVoltageMv() const { return batteryVoltageMv; }
-    LOG_DEBUG("hasBattery %i hasUSB %i isCharging %i", hasBattery, hasUSB, isCharging);
+    LOG_DEBUG("hasBattery %d hasUSB %d isCharging %d", hasBattery, hasUSB, isCharging);
     /**
      * Note: for boards with battery pin or PMU, 0% battery means 'unknown/this board doesn't have a battery installed'
      */
