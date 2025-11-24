@@ -15,7 +15,7 @@ int32_t BQ25895Sensor::runOnce()
     if (!hasSensor()) {
         return DEFAULT_SENSOR_MINIMUM_WAIT_TIME_BETWEEN_READS;
     }
-    status = bq25895.begin();
+    status = !bq25895.begin(); // begin() returns 0 on success
     initI2CSensor();
     return status;
 }
