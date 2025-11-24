@@ -75,6 +75,9 @@ int32_t PowerTelemetryModule::runOnce()
                 result = ina3221Sensor.isInitialized() ? 0 : ina3221Sensor.runOnce();
             if (max17048Sensor.hasSensor())
                 result = max17048Sensor.isInitialized() ? 0 : max17048Sensor.runOnce();
+              if (bq25895Sensor.hasSensor())
+                result = bq25895Sensor.isInitialized() ? 0 : bq25895Sensor.runOnce();
+            LOG_INFO("BQ25895 init in power telemetry");
         }
 
         // it's possible to have this module enabled, only for displaying values on the screen.
