@@ -24,7 +24,10 @@ int32_t BQ25895Sensor::runOnce()
     return initI2CSensor();
 }
 
-void BQ25895Sensor::setup() {}
+void BQ25895Sensor::setup()
+{
+    LOG_INFO("Setup BQ25895");
+}
 
 bool BQ25895Sensor::getMetrics(meshtastic_Telemetry *measurement)
 {
@@ -33,16 +36,19 @@ bool BQ25895Sensor::getMetrics(meshtastic_Telemetry *measurement)
 
     measurement->variant.environment_metrics.voltage = bq25895.adc_read_battery_volt();
     measurement->variant.environment_metrics.current = bq25895.adc_read_charge_current();
+    LOG_INFO("Get metrics BQ25895");
     return true;
 }
 
 uint16_t BQ25895Sensor::getBusVoltageMv()
 {
+    LOG_INFO("GetBus BQ25895");
     return lround(bq25895.adc_read_battery_volt());
 }
 
 int16_t BQ25895Sensor::getCurrentMa()
 {
+    LOG_INFO("GetCurrentMa BQ25895");
     return lround(bq25895.adc_read_charge_current());
 }
 

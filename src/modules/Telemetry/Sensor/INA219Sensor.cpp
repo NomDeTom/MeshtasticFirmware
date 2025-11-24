@@ -28,7 +28,10 @@ int32_t INA219Sensor::runOnce()
     return initI2CSensor();
 }
 
-void INA219Sensor::setup() {}
+void INA219Sensor::setup()
+{
+    LOG_INFO("Setup INA219");
+}
 
 bool INA219Sensor::getMetrics(meshtastic_Telemetry *measurement)
 {
@@ -37,16 +40,19 @@ bool INA219Sensor::getMetrics(meshtastic_Telemetry *measurement)
 
     measurement->variant.environment_metrics.voltage = ina219.getBusVoltage_V();
     measurement->variant.environment_metrics.current = ina219.getCurrent_mA() * INA219_MULTIPLIER;
+    LOG_INFO("Get metrics INA219");
     return true;
 }
 
 uint16_t INA219Sensor::getBusVoltageMv()
 {
+    LOG_INFO("Getbus INA219");
     return lround(ina219.getBusVoltage_V() * 1000);
 }
 
 int16_t INA219Sensor::getCurrentMa()
 {
+    LOG_INFO("getcurrentMa INA219");
     return lround(ina219.getCurrent_mA());
 }
 
