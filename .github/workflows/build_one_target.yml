@@ -65,7 +65,7 @@ jobs:
             echo "arch=$ARCH" >> $GITHUB_OUTPUT
           fi
     outputs:
-      arch: ${{ steps.find-targets.outputs.arch }}
+      arch: ${{ steps.jsonStep.outputs.arch }}
 
   find-arch:
     if: ${{ inputs.target != '' }}
