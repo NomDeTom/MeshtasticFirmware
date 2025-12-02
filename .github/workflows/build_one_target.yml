@@ -49,7 +49,7 @@ jobs:
           TARGETS=$(./bin/generate_ci_matrix.py ${{ inputs.arch }} --level extra)
           echo "Name: $GITHUB_REF_NAME" >> $GITHUB_STEP_SUMMARY
           echo "Base: $GITHUB_BASE_REF" >> $GITHUB_STEP_SUMMARY
-          echo "Arch: ${{matrix.arch}}" >> $GITHUB_STEP_SUMMARY
+          echo "Arch: ${{ inputs.arch }}" >> $GITHUB_STEP_SUMMARY
           echo "Ref: $GITHUB_REF" >> $GITHUB_STEP_SUMMARY
           echo "Targets:" >> $GITHUB_STEP_SUMMARY
           echo $TARGETS | jq -r 'sort_by(.board) | sort_by(.platform) |.[] | "- " + .board' >> $GITHUB_STEP_SUMMARY
@@ -69,18 +69,15 @@ jobs:
           python-version: 3.x
           cache: pip
       - run: pip install -U platformio
-      - name: Generate matrix
-        id: jsonStep
+      - name: Get platform for target
+        id: target-step
         run: |
           TARGETS=$(./bin/generate_ci_matrix.py ${{matrix.arch}} --level extra)
-          ARCH=$(echo "$TARGETS" | jq -r --arg board "$Board" '.[] | select(.board=="t-echo") | .platform')
-          echo "Name: $GITHUB_REF_NAME" >> $GITHUB_STEP_SUMMARY
-          echo "Base: $GITHUB_BASE_REF" >> $GITHUB_STEP_SUMMARY
-          echo "Arch: ${{matrix.arch}}" >> $GITHUB_STEP_SUMMARY
-          echo "Ref: $GITHUB_REF" >> $GITHUB_STEP_SUMMARY
-          echo "Targets:" >> $GITHUB_STEP_SUMMARY
-          echo $TARGETS | jq -r 'sort_by(.platform, .board) |.[] | "- " + .board' >> $GITHUB_STEP_SUMMARY
-          echo "$RESULT" >> $GITHUB_STEP_SUMMARY
+          ARCH=$(echo "$TARGETS" | jq -r --arg board "$Board" '.[] | select(.board==${{ inputs.arch }}) | .platform')
+          echo "$ARCH" >> $GITHUB_STEP_SUMMARY
+          echo "arch=$ARCH" >> $GITHUB_OUTPUT
+    outputs:
+      arch: ${{ steps.target-step.outputs.arch }}
 
   version:
     if: ${{ inputs.target != '' }}
@@ -100,12 +97,12 @@ jobs:
 
   build:
     if: ${{ inputs.target != '' && inputs.arch != 'native' }}
-    needs: [version]
+    needs: [version, find-arch]
     uses: ./.github/workflows/build_firmware.yml
     with:
       version: ${{ needs.version.outputs.long }}
       pio_env: ${{ inputs.target }}
-      platform: ${{ inputs.arch }}
+      platform: ${{ needs.find-arch.outputs.arch }}
 
   gather-artifacts:
     permissions:
