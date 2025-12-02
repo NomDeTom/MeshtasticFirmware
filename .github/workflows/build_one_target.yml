@@ -53,7 +53,7 @@ jobs:
             echo "Base: $GITHUB_BASE_REF" >> $GITHUB_STEP_SUMMARY
             echo "Arch: ${{ inputs.arch }}" >> $GITHUB_STEP_SUMMARY
             echo "Ref: $GITHUB_REF" >> $GITHUB_STEP_SUMMARY
-            echo "Targets:" >> $GITHUB_STEP_SUMMARY
+            echo "The following targets are available to build:" >> $GITHUB_STEP_SUMMARY
             echo "| Platform | Board |" >> $GITHUB_STEP_SUMMARY
             echo "| -------- | ----- |" >> $GITHUB_STEP_SUMMARY
             echo $TARGETS | jq -r 'sort_by(.board) | sort_by(.platform) |.[] | "| " + .platform + " | " + .board + " |" ' >> $GITHUB_STEP_SUMMARY
