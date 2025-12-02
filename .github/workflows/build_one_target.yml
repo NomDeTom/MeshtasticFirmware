@@ -73,7 +73,7 @@ jobs:
         id: target-step
         run: |
           TARGETS=$(./bin/generate_ci_matrix.py ${{matrix.arch}} --level extra)
-          ARCH=$(echo "$TARGETS" | jq -r --arg board "$Board" '.[] | select(.board==${{ inputs.target }}) | .platform')
+          ARCH=$(echo "$TARGETS" | jq -r '.[] | select(.board==${{ inputs.target }}) | .platform')
           echo "$ARCH" >> $GITHUB_STEP_SUMMARY
           echo "arch=$ARCH" >> $GITHUB_OUTPUT
     outputs:
