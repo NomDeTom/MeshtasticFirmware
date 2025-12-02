@@ -47,8 +47,8 @@ jobs:
       - name: Generate matrix
         id: jsonStep
         run: |
+          TARGETS=$(./bin/generate_ci_matrix.py ${{matrix.arch}} --level extra)
           if [ "${{ inputs.target }}" = "" ]; then
-            TARGETS=$(./bin/generate_ci_matrix.py ${{ inputs.arch }} --level extra)
             echo "Name: $GITHUB_REF_NAME" >> $GITHUB_STEP_SUMMARY
             echo "Base: $GITHUB_BASE_REF" >> $GITHUB_STEP_SUMMARY
             echo "Arch: ${{ inputs.arch }}" >> $GITHUB_STEP_SUMMARY
@@ -59,14 +59,17 @@ jobs:
             echo $TARGETS | jq -r 'sort_by(.board) | sort_by(.platform) |.[] | "| " + .platform + " | " + .board + " |" ' >> $GITHUB_STEP_SUMMARY
           else
             echo "We build this one:" >> $GITHUB_STEP_SUMMARY
-            TARGETS=$(./bin/generate_ci_matrix.py ${{matrix.arch}} --level extra)
             ARCH=$(echo "$TARGETS" | jq -r '.[] | select(.board=="${{ inputs.target }}") | .platform')
             echo "| Platform | Board |" >> $GITHUB_STEP_SUMMARY
             echo "| -------- | ----- |" >> $GITHUB_STEP_SUMMARY
             echo "| $ARCH | ${{ inputs.target }} |" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "This will now build, and the gathered firmware files will appear below." >> $GITHUB_STEP_SUMMARY
-            echo "You may need to refresh this page to make them appear." >> $GITHUB_STEP_SUMMARY
+            if [[ "$ARCH" == "" ]]; then
+              echo "## ❌ Error: Target ${{ inputs.target }} not found!" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "## ✅ Target ${{ inputs.target }} found, proceeding to build." >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "You may need to refresh this page to make the built firmware appear below." >> $GITHUB_STEP_SUMMARY
             echo "arch=$ARCH" >> $GITHUB_OUTPUT
           fi
     outputs:
