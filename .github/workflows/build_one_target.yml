@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       # trunk-ignore(checkov/CKV_GHA_7)
+      target:
+        type: string
+        required: false
+        description: Choose the target board, e.g. nrf52_promicro_diy_tcxo. If blank, will find available targets.
       arch:
         type: choice
         options:
@@ -16,10 +20,8 @@ on:
           - rp2040
           - rp2350
           - stm32
-      target:
-        type: string
-        required: false
-        description: Choose the target board, e.g. nrf52_promicro_diy_tcxo. If blank, will find available targets. Choose an arch to limit the search.
+        description: Choose an arch to limit the search, or 'all' to search all architectures.
+        default: all
       # find-target:
       #   type: boolean
       #   default: true
