@@ -53,12 +53,14 @@ jobs:
         id: jsonStep
         run: |
           TARGETS=$(./bin/generate_ci_matrix.py ${{matrix.arch}} --level extra)
+          RESULT=$(echo "$TARGETS" | jq -r --arg board "$Board" '.[] | select(. == $platform) | .value')
           echo "Name: $GITHUB_REF_NAME" >> $GITHUB_STEP_SUMMARY
           echo "Base: $GITHUB_BASE_REF" >> $GITHUB_STEP_SUMMARY
           echo "Arch: ${{matrix.arch}}" >> $GITHUB_STEP_SUMMARY
           echo "Ref: $GITHUB_REF" >> $GITHUB_STEP_SUMMARY
           echo "Targets:" >> $GITHUB_STEP_SUMMARY
           echo $TARGETS | jq -r 'sort_by(.board) |.[] | "- " + .board' >> $GITHUB_STEP_SUMMARY
+          echo "$RESULT" >> $GITHUB_STEP_SUMMARY
 
   version:
     if: ${{ inputs.target != '' }}
