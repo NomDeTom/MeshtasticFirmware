@@ -61,7 +61,7 @@ jobs:
             echo "$ARCH" >> $GITHUB_STEP_SUMMARY
             echo "| Platform | Board |" >> $GITHUB_STEP_SUMMARY
             echo "| -------- | ----- |" >> $GITHUB_STEP_SUMMARY
-            echo "| " + "$ARCH" + " | " + "${{ inputs.target }}"  + " |" ' >> $GITHUB_STEP_SUMMARY
+            echo "| $ARCH | ${{ inputs.target }} |" >> $GITHUB_STEP_SUMMARY
             echo "arch=$ARCH" >> $GITHUB_OUTPUT
           fi
     outputs:
