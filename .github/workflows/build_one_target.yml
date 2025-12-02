@@ -64,6 +64,7 @@ jobs:
             echo "| Platform | Board |" >> $GITHUB_STEP_SUMMARY
             echo "| -------- | ----- |" >> $GITHUB_STEP_SUMMARY
             echo "| $ARCH | ${{ inputs.target }} |" >> $GITHUB_STEP_SUMMARY
+            echo "This will now build, and the gathered firmware files will appear below." >> $GITHUB_STEP_SUMMARY
             echo "arch=$ARCH" >> $GITHUB_OUTPUT
           fi
     outputs:
