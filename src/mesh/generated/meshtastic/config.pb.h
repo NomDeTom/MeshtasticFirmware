@@ -312,7 +312,7 @@ typedef enum _meshtastic_Config_LoRaConfig_ModemPreset {
     /* Short Range - Turbo
  This is the fastest preset and the only one with 500kHz bandwidth.
  It is not legal to use in all regions due to this wider bandwidth. */
-    meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO = 8, 
+    meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO = 8,
     meshtastic_Config_LoRaConfig_ModemPreset_LITE_FAST = 9
 } meshtastic_Config_LoRaConfig_ModemPreset;
 
