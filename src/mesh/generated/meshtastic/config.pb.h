@@ -285,7 +285,9 @@ typedef enum _meshtastic_Config_LoRaConfig_RegionCode {
     /* Nepal 865MHz */
     meshtastic_Config_LoRaConfig_RegionCode_NP_865 = 25,
     /* Brazil 902MHz */
-    meshtastic_Config_LoRaConfig_RegionCode_BR_902 = 26
+    meshtastic_Config_LoRaConfig_RegionCode_BR_902 = 26,
+    /* EU 866MHz RFID band (ETSI EN 302 208) */
+    meshtastic_Config_LoRaConfig_RegionCode_EU_866 = 27
 } meshtastic_Config_LoRaConfig_RegionCode;
 
 /* Standard predefined channel settings
@@ -311,7 +313,11 @@ typedef enum _meshtastic_Config_LoRaConfig_ModemPreset {
     /* Short Range - Turbo
  This is the fastest preset and the only one with 500kHz bandwidth.
  It is not legal to use in all regions due to this wider bandwidth. */
-    meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO = 8
+    meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO = 8,
+    /* Lite Fast
+ Medium range preset optimized for EU 866MHz RFID band with 125kHz bandwidth.
+ Comparable link budget to MEDIUM_FAST but compliant with ETSI EN 302 208. */
+    meshtastic_Config_LoRaConfig_ModemPreset_LITE_FAST = 9
 } meshtastic_Config_LoRaConfig_ModemPreset;
 
 typedef enum _meshtastic_Config_BluetoothConfig_PairingMode {
@@ -685,12 +691,12 @@ extern "C" {
 #define _meshtastic_Config_DisplayConfig_CompassOrientation_ARRAYSIZE ((meshtastic_Config_DisplayConfig_CompassOrientation)(meshtastic_Config_DisplayConfig_CompassOrientation_DEGREES_270_INVERTED+1))
 
 #define _meshtastic_Config_LoRaConfig_RegionCode_MIN meshtastic_Config_LoRaConfig_RegionCode_UNSET
-#define _meshtastic_Config_LoRaConfig_RegionCode_MAX meshtastic_Config_LoRaConfig_RegionCode_BR_902
-#define _meshtastic_Config_LoRaConfig_RegionCode_ARRAYSIZE ((meshtastic_Config_LoRaConfig_RegionCode)(meshtastic_Config_LoRaConfig_RegionCode_BR_902+1))
+#define _meshtastic_Config_LoRaConfig_RegionCode_MAX meshtastic_Config_LoRaConfig_RegionCode_EU_866
+#define _meshtastic_Config_LoRaConfig_RegionCode_ARRAYSIZE ((meshtastic_Config_LoRaConfig_RegionCode)(meshtastic_Config_LoRaConfig_RegionCode_EU_866+1))
 
 #define _meshtastic_Config_LoRaConfig_ModemPreset_MIN meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST
-#define _meshtastic_Config_LoRaConfig_ModemPreset_MAX meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO
-#define _meshtastic_Config_LoRaConfig_ModemPreset_ARRAYSIZE ((meshtastic_Config_LoRaConfig_ModemPreset)(meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO+1))
+#define _meshtastic_Config_LoRaConfig_ModemPreset_MAX meshtastic_Config_LoRaConfig_ModemPreset_LITE_FAST
+#define _meshtastic_Config_LoRaConfig_ModemPreset_ARRAYSIZE ((meshtastic_Config_LoRaConfig_ModemPreset)(meshtastic_Config_LoRaConfig_ModemPreset_LITE_FAST+1))
 
 #define _meshtastic_Config_BluetoothConfig_PairingMode_MIN meshtastic_Config_BluetoothConfig_PairingMode_RANDOM_PIN
 #define _meshtastic_Config_BluetoothConfig_PairingMode_MAX meshtastic_Config_BluetoothConfig_PairingMode_NO_PIN
