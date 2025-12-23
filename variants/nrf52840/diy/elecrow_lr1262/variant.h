@@ -86,13 +86,13 @@ extern "C" {
 #define PIN_SPI_SCK (32 + 13)  // P1.13 45
 #define PIN_SPI_NSS (32 + 12)  // P1.12 44
 
-#define LORA_RESET (32 + 10) // P1.10 42 // RST
-#define LORA_DIO1 (32 + 6)   // IRQ
-#define LORA_DIO2 (32 + 11)  // P1.11 43 // BUSY
-#define LORA_SCK PIN_SPI_SCK
-#define LORA_MISO PIN_SPI_MISO
-#define LORA_MOSI PIN_SPI_MOSI
-#define LORA_CS PIN_SPI_NSS
+#define LORA_DIO1   38   // P1.06
+#define LORA_CS     44   // P1.12
+#define LORA_SCK    45   // P1.13
+#define LORA_MOSI   46   // P1.14
+#define LORA_MISO   47   // P1.15
+#define LORA_DIO2   43   // P1.11 (BUSY)
+#define LORA_RESET  42   // P1.10
 
 // LORA MODULES
 #define USE_SX1262
