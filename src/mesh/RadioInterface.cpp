@@ -18,10 +18,11 @@ uint32_t pow_of_2(uint32_t n)
     return 1 << n;
 }
 
-#define RDEF(name, freq_start, freq_end, duty_cycle, spacing, power_limit, audio_permitted, frequency_switching, wide_lora)      \
+#define RDEF(name, freq_start, freq_end, duty_cycle, spacing, power_limit, audio_permitted, frequency_switching, wide_lora,      \
+             default_preset, preset_bits)                                                                                        \
     {                                                                                                                            \
         meshtastic_Config_LoRaConfig_RegionCode_##name, freq_start, freq_end, duty_cycle, spacing, power_limit, audio_permitted, \
-            frequency_switching, wide_lora, #name                                                                                \
+            frequency_switching, wide_lora, meshtastic_Config_LoRaConfig_ModemPreset_##default_preset, preset_bits, #name        \
     }
 
 const RegionInfo regions[] = {
@@ -29,7 +30,7 @@ const RegionInfo regions[] = {
         https://link.springer.com/content/pdf/bbm%3A978-1-4842-4357-2%2F1.pdf
         https://www.thethingsnetwork.org/docs/lorawan/regional-parameters/
     */
-    RDEF(US, 902.0f, 928.0f, 100, 0, 30, true, false, false),
+    RDEF(US, 902.0f, 928.0f, 100, 0, 30, true, false, false, LONG_FAST, PRESETS_STD),
 
     /*
         EN300220 ETSI V3.2.1 [Table B.1, Item H, p. 21]
@@ -37,7 +38,7 @@ const RegionInfo regions[] = {
         https://www.etsi.org/deliver/etsi_en/300200_300299/30022002/03.02.01_60/en_30022002v030201p.pdf
         FIXME: https://github.com/meshtastic/firmware/issues/3371
      */
-    RDEF(EU_433, 433.0f, 434.0f, 10, 0, 10, true, false, false),
+    RDEF(EU_433, 433.0f, 434.0f, 10, 0, 10, true, false, false, LONG_FAST, PRESETS_STD),
 
     /*
        https://www.thethingsnetwork.org/docs/lorawan/duty-cycle/
@@ -53,19 +54,19 @@ const RegionInfo regions[] = {
        AFA) to avoid a duty cycle. (Please refer to line P page 22 of this document.)
        https://www.etsi.org/deliver/etsi_en/300200_300299/30022002/03.01.01_60/en_30022002v030101p.pdf
      */
-    RDEF(EU_868, 869.4f, 869.65f, 10, 0, 27, false, false, false),
+    RDEF(EU_868, 869.4f, 869.65f, 10, 0, 27, false, false, false, LONG_FAST, PRESETS_EU_868),
 
     /*
         https://lora-alliance.org/wp-content/uploads/2020/11/lorawan_regional_parameters_v1.0.3reva_0.pdf
      */
-    RDEF(CN, 470.0f, 510.0f, 100, 0, 19, true, false, false),
+    RDEF(CN, 470.0f, 510.0f, 100, 0, 19, true, false, false, LONG_FAST, PRESETS_STD),
 
     /*
         https://lora-alliance.org/wp-content/uploads/2020/11/lorawan_regional_parameters_v1.0.3reva_0.pdf
         https://www.arib.or.jp/english/html/overview/doc/5-STD-T108v1_5-E1.pdf
         https://qiita.com/ammo0613/items/d952154f1195b64dc29f
      */
-    RDEF(JP, 920.5f, 923.5f, 100, 0, 13, true, false, false),
+    RDEF(JP, 920.5f, 923.5f, 100, 0, 13, true, false, false, LONG_FAST, PRESETS_STD),
 
     /*
         https://www.iot.org.au/wp/wp-content/uploads/2016/12/IoTSpectrumFactSheet.pdf
