@@ -294,6 +294,8 @@ typedef enum _meshtastic_HardwareModel {
     meshtastic_HardwareModel_THINKNODE_M4 = 119,
     /* Elecrow ThinkNode M6 */
     meshtastic_HardwareModel_THINKNODE_M6 = 120,
+    /* Elecrow Meshstick 1262 */
+    meshtastic_HardwareModel_MESHSTICK_1262 = 121,
     /* ------------------------------------------------------------------------------------------------------------------------------------------
  Reserved ID For developing private Ports. These will show up in live traffic sparsely, so we can use a high number. Keep it within 8 bits.
  ------------------------------------------------------------------------------------------------------------------------------------------ */
@@ -1356,10 +1358,6 @@ extern "C" {
 #define _meshtastic_Routing_Error_MIN meshtastic_Routing_Error_NONE
 #define _meshtastic_Routing_Error_MAX meshtastic_Routing_Error_PKI_SEND_FAIL_PUBLIC_KEY
 #define _meshtastic_Routing_Error_ARRAYSIZE ((meshtastic_Routing_Error)(meshtastic_Routing_Error_PKI_SEND_FAIL_PUBLIC_KEY+1))
-
-#define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_MIN meshtastic_StoreForwardPlusPlus_SFPP_message_type_CANON_ANNOUNCE
-#define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_MAX meshtastic_StoreForwardPlusPlus_SFPP_message_type_LINK_PROVIDE_SECONDHALF
-#define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_ARRAYSIZE ((meshtastic_StoreForwardPlusPlus_SFPP_message_type)(meshtastic_StoreForwardPlusPlus_SFPP_message_type_LINK_PROVIDE_SECONDHALF+1))
 
 #define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_MIN meshtastic_StoreForwardPlusPlus_SFPP_message_type_CANON_ANNOUNCE
 #define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_MAX meshtastic_StoreForwardPlusPlus_SFPP_message_type_LINK_PROVIDE_SECONDHALF
