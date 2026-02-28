@@ -433,6 +433,20 @@ std::unique_ptr<RadioInterface> initLoRa()
     }
 #endif
 
+#if defined(USE_LR2021) && RADIOLIB_EXCLUDE_LR2021 != 1
+    if ((!rIf) && (config.lora.region != meshtastic_Config_LoRaConfig_RegionCode_LORA_24)) {
+        rIf = std::unique_ptr<LR2021Interface>(
+            new LR2021Interface(loraHal, LR2021_SPI_NSS_PIN, LR2021_IRQ_PIN, LR2021_NRESET_PIN, LR2021_BUSY_PIN));
+        if (!rIf->init()) {
+            LOG_WARN("No LR2021 radio");
+            rIf = nullptr;
+        } else {
+            LOG_INFO("LR2021 init success");
+            radioType = LR2021_RADIO;
+        }
+    }
+#endif
+
 #if defined(USE_LR1120) && RADIOLIB_EXCLUDE_LR11X0 != 1
     if (!rIf) {
         rIf = std::unique_ptr<LR1120Interface>(
