@@ -125,6 +125,7 @@ class Power : public concurrency::OSThread
     void lipoChargerRetry();
     /// Setup a meshSolar battery sensor
     bool meshSolarInit();
+    bool inaInit();
     /// Setup a serial battery sensor
     bool serialBatteryInit();
 #ifdef HAS_ADS1115
