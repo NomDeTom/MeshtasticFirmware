@@ -711,7 +711,13 @@ class AnalogBatteryLevel : public HasBatteryLevel
 
     bool hasINA()
     {
-        const uint8_t inaAddress = config.power.device_battery_ina_address;
+        uint8_t inaAddress = config.power.device_battery_ina_address;
+#ifdef BATTERY_INA_ADDRESS
+        if (!inaAddress) {
+            inaAddress = BATTERY_INA_ADDRESS;
+            config.power.device_battery_ina_address = inaAddress;
+        }
+#endif
         if (!inaAddress) {
             return false;
         }
@@ -784,7 +790,7 @@ class ADS1115BatteryLevel : public AnalogBatteryLevel
                     sum += _ads.computeVolts(raw);
                 }
                 // Piggyback a toggle-engine watchdog on this same throttle interval.
-                // Only re-arm when VBUS is absent — calling this while attached
+                // Only re-arm when VBUS is absent - calling this while attached
                 // would restart CC toggling and could glitch an active sink attach.
                 if (_aw35615.isReady() && !_aw35615.isVbusPresent()) {
                     _aw35615.rearmToggle();
@@ -812,7 +818,7 @@ class ADS1115BatteryLevel : public AnalogBatteryLevel
 
             bool vbus = _aw35615.isVbusPresent();
             if (!vbus) {
-                // VBUS just went away (or has been away) — make sure the CC
+                // VBUS just went away (or has been away) - make sure the CC
                 // toggle engine is re-armed so the next attach gets detected.
                 _aw35615.rearmToggle();
             }
@@ -830,7 +836,7 @@ class ADS1115BatteryLevel : public AnalogBatteryLevel
         if (_aw35615.isReady()) {
             concurrency::LockGuard guard(spiLock);
             // Charging == VBUS present AND we're attached as a sink.
-            // (isSinkAttached() is a latched result — safe to trust here since
+            // (isSinkAttached() is a latched result - safe to trust here since
             // isVbusIn() above keeps re-arming toggle on every detach.)
             return _aw35615.isVbusPresent() && _aw35615.isSinkAttached();
         }
@@ -867,6 +873,23 @@ Power::Power() : OSThread("Power")
 #ifdef DEBUG_HEAP
     lastheap = memGet.getFreeHeap();
 #endif
+}
+
+bool Power::inaInit()
+{
+#if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+#ifdef BATTERY_INA_ADDRESS
+    if (!config.power.device_battery_ina_address) {
+        config.power.device_battery_ina_address = BATTERY_INA_ADDRESS;
+    }
+#endif
+    if (config.power.device_battery_ina_address) {
+        batteryLevel = &analogLevel;
+        LOG_INFO("Power: INA battery sensor at 0x%x", config.power.device_battery_ina_address);
+        return true;
+    }
+#endif
+    return false;
 }
 
 bool Power::analogInit()
@@ -960,6 +983,8 @@ bool Power::setup()
     } else if (ads1115Init()) {
         found = true;
 #endif
+    } else if (inaInit()) {
+        found = true;
     } else if (analogInit()) {
         found = true;
     } else {
