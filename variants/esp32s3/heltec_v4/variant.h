@@ -29,6 +29,11 @@
 #define SX126X_DIO2_AS_RF_SWITCH
 #define SX126X_DIO3_TCXO_VOLTAGE 1.8
 
+// PA Ramp Time - T-Beam 1W requires >800us stabilization (default is 200us)
+// I copied it here to see if it helps.
+// Value 0x05 = RADIOLIB_SX126X_PA_RAMP_800U
+#define SX126X_PA_RAMP_US 0x05
+
 // Enable Traffic Management Module for Heltec V4
 #ifndef HAS_TRAFFIC_MANAGEMENT
 #define HAS_TRAFFIC_MANAGEMENT 1
