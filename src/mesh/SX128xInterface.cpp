@@ -72,7 +72,7 @@ template <typename T> bool SX128xInterface<T>::init()
     if (res == RADIOLIB_ERR_CHIP_NOT_FOUND || res == RADIOLIB_ERR_SPI_CMD_FAILED)
         return false;
 
-    if ((config.lora.region != meshtastic_Config_LoRaConfig_RegionCode_LORA_24) && (res == RADIOLIB_ERR_INVALID_FREQUENCY)) {
+    if ((!getRegion(config.lora.region)->wideLora) && (res == RADIOLIB_ERR_INVALID_FREQUENCY)) {
         LOG_WARN("Radio only supports 2.4GHz LoRa. Adjusting Region and rebooting");
         config.lora.region = meshtastic_Config_LoRaConfig_RegionCode_LORA_24;
         nodeDB->saveToDisk(SEGMENT_CONFIG);

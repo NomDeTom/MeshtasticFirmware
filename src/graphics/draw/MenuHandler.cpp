@@ -112,6 +112,7 @@ void menuHandler::OnboardMessage()
 
 void menuHandler::LoraRegionPicker(uint32_t duration)
 {
+    // ToDo: limit the selection picker to only options that are possible, e.g. wideLora, ham regions, etc.
     static const LoraRegionOption regionOptions[] = {
         {"Back", OptionsAction::Back},
         {"US", OptionsAction::Select, meshtastic_Config_LoRaConfig_RegionCode_US},
@@ -161,12 +162,12 @@ void menuHandler::LoraRegionPicker(uint32_t duration)
                 return;
             }
 
+            const RegionInfo *selectedRegionInfo = getRegion(selectedRegion);
             // Guard: without a reboot, reconfigure() applies the region directly.
             // Reject LORA_24 on sub-GHz-only hardware — getRadio() used to catch this post-reboot.
             // TODO: change this to either use the validateLoraConfig() logic or at least check the region for wideLora
             // rather than a hardcoded check for LORA_24.
-            if (selectedRegion == meshtastic_Config_LoRaConfig_RegionCode_LORA_24 &&
-                !(RadioLibInterface::instance && RadioLibInterface::instance->wideLora())) {
+            if (selectedRegionInfo->wideLora && !(RadioLibInterface::instance && RadioLibInterface::instance->wideLora())) {
                 LOG_WARN("Radio hardware does not support 2.4 GHz; ignoring region selection");
                 return;
             }

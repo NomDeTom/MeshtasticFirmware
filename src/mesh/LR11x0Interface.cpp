@@ -71,7 +71,7 @@ template <typename T> bool LR11x0Interface<T>::init()
 
     RadioLibInterface::init();
 
-    if (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_LORA_24) { // clamp if wide freq range
+    if (getRegion(config.lora.region)->wideLora) { // clamp if wide freq range
         limitPower(LR1120_MAX_POWER);
         preambleLength = 12; // 12 is the default for operation above 2GHz
     } else {
@@ -183,7 +183,7 @@ template <typename T> bool LR11x0Interface<T>::reconfigure()
     if (err != RADIOLIB_ERR_NONE)
         RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
 
-    if (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_LORA_24) { // clamp if wide freq range
+    if (getRegion(config.lora.region)->wideLora) { // clamp if wide freq range
         limitPower(LR1120_MAX_POWER);
         preambleLength = 12; // 12 is the default for operation above 2GHz
     } else {
