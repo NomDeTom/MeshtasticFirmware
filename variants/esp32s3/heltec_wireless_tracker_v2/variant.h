@@ -92,3 +92,8 @@
 #define LORA_PA_POWER 7        // VFEM_Ctrl - KCT8103L LDO power enable
 #define LORA_KCT8103L_PA_CSD 4 // CSD - KCT8103L chip enable (HIGH=on)
 #define LORA_KCT8103L_PA_CTX 5 // CTX - Switch between Receive LNA Mode and Receive Bypass Mode. (HIGH=RX bypass, LOW=RX LNA)
+
+// PA Ramp Time - T-Beam 1W requires >800us stabilization (default is 200us)
+// I copied it here to see if it helps.
+// Value 0x05 = RADIOLIB_SX126X_PA_RAMP_800U
+#define SX126X_PA_RAMP_US 0x05
