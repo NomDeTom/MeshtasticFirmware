@@ -1045,6 +1045,11 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         moduleConfig.has_traffic_management = true;
         moduleConfig.traffic_management = c.payload_variant.traffic_management;
         break;
+    case meshtastic_ModuleConfig_hop_scaling_tag:
+        LOG_INFO("Set module config: Hop Scaling");
+        moduleConfig.has_hop_scaling = true;
+        moduleConfig.hop_scaling = c.payload_variant.hop_scaling;
+        break;
     }
     saveChanges(SEGMENT_MODULECONFIG, shouldReboot);
     return true;
@@ -1235,6 +1240,11 @@ void AdminModule::handleGetModuleConfig(const meshtastic_MeshPacket &req, const 
             configName = "Traffic Management";
             res.get_module_config_response.which_payload_variant = meshtastic_ModuleConfig_traffic_management_tag;
             res.get_module_config_response.payload_variant.traffic_management = moduleConfig.traffic_management;
+            break;
+        case meshtastic_AdminMessage_ModuleConfigType_HOPSCALING_CONFIG:
+            configName = "Hop Scaling";
+            res.get_module_config_response.which_payload_variant = meshtastic_ModuleConfig_hop_scaling_tag;
+            res.get_module_config_response.payload_variant.hop_scaling = moduleConfig.hop_scaling;
             break;
         }
         LOG_INFO("Get module config: %s", configName);

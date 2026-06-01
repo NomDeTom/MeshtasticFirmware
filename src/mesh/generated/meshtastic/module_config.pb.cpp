@@ -60,6 +60,9 @@ PB_BIND(meshtastic_ModuleConfig_StatusMessageConfig, meshtastic_ModuleConfig_Sta
 PB_BIND(meshtastic_ModuleConfig_TAKConfig, meshtastic_ModuleConfig_TAKConfig, AUTO)
 
 
+PB_BIND(meshtastic_ModuleConfig_HopScalingConfig, meshtastic_ModuleConfig_HopScalingConfig, AUTO)
+
+
 PB_BIND(meshtastic_RemoteHardwarePin, meshtastic_RemoteHardwarePin, AUTO)
 
 

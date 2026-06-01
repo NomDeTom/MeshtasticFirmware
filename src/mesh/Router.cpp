@@ -362,24 +362,35 @@ ErrorCode Router::send(meshtastic_MeshPacket *p)
     p->relay_node = nodeDB->getLastByteOfNodeNum(getNodeNum()); // set the relayer to us
 
 #if HAS_VARIABLE_HOPS
-    // Apply HopScaling hop recommendation to routine outgoing broadcasts
-    if (isFromUs(p) && isBroadcast(p->to) && hopScalingModule && p->which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
+    // Apply HopScaling hop recommendation to routine outgoing broadcasts.
+    // Gated by moduleConfig.hop_scaling.enabled; per-portnum skip flags provide opt-outs.
+    const bool hopScalingActive = hopScalingModule && (!moduleConfig.has_hop_scaling || moduleConfig.hop_scaling.enabled);
+    if (isFromUs(p) && isBroadcast(p->to) && hopScalingActive && p->which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
+        const auto &hsCfg = moduleConfig.hop_scaling;
+        bool skip = false;
         switch (p->decoded.portnum) {
         case meshtastic_PortNum_POSITION_APP:
+            skip = moduleConfig.has_hop_scaling && hsCfg.skip_position;
+            break;
         case meshtastic_PortNum_TELEMETRY_APP:
+            skip = moduleConfig.has_hop_scaling && hsCfg.skip_telemetry;
+            break;
         case meshtastic_PortNum_NODEINFO_APP:
-        case meshtastic_PortNum_NEIGHBORINFO_APP: {
+            skip = moduleConfig.has_hop_scaling && hsCfg.skip_nodeinfo;
+            break;
+        case meshtastic_PortNum_NEIGHBORINFO_APP:
+            skip = moduleConfig.has_hop_scaling && hsCfg.skip_neighborinfo;
+            break;
+        default:
+            skip = true;
+            break;
+        }
+        if (!skip) {
             uint8_t variableHopLimit = hopScalingModule->getLastRequiredHop();
-
-            // Never exceed user-configured hop_limit
             if (variableHopLimit < p->hop_limit) {
                 LOG_DEBUG("[HOPSCALE] hop_limit %u -> %u for portnum %u", p->hop_limit, variableHopLimit, p->decoded.portnum);
                 p->hop_limit = variableHopLimit;
             }
-            break;
-        }
-        default:
-            break;
         }
     }
 #endif
