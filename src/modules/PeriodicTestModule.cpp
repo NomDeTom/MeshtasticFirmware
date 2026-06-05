@@ -6,6 +6,7 @@
 
 #if !EXCLUDE_TEST_MODULE
 
+static constexpr uint32_t FIRST_LOG_DELAY_MS = 45 * 1000UL;
 static constexpr uint32_t LOG_INTERVAL_MS = 30 * 1000UL;
 static constexpr const char *STATE_FILE = "/prefs/periodicTest.bin";
 static constexpr LR2021DcdcProfile DCDC_PROFILES[] = {
@@ -38,7 +39,8 @@ uint8_t PeriodicTestModule::getDcdcProfileCount() const
 
 int32_t PeriodicTestModule::runOnce()
 {
-    if (Throttle::isWithinTimespanMs(lastTickMs, LOG_INTERVAL_MS))
+    const uint32_t interval = firstFired ? LOG_INTERVAL_MS : FIRST_LOG_DELAY_MS;
+    if (Throttle::isWithinTimespanMs(lastTickMs, interval))
         return 1000;
 
     lastTickMs = millis();
