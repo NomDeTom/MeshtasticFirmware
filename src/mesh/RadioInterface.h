@@ -67,6 +67,31 @@ typedef struct {
 
 } RadioBuffer;
 
+struct RadioDiagnostics {
+    bool hasNoiseFloor = false;
+    int32_t noiseFloor = 0;
+
+    bool hasLastRx = false;
+    float lastRxRssi = 0.0f;
+    float lastRxSnr = 0.0f;
+
+    bool hasDcdcSwitcher = false;
+    bool dcdcSwitcherReadFailed = false;
+    uint32_t dcdcSwitcher = 0;
+    uint32_t dcdcRise = 0;
+    uint32_t dcdcFall = 0;
+
+    bool hasDcdcFreqLf = false;
+    bool dcdcFreqLfReadFailed = false;
+    uint32_t dcdcFreqLfRaw = 0;
+    uint32_t dcdcFreqLfHz = 0;
+
+    bool hasRfFreq = false;
+    bool rfFreqReadFailed = false;
+    uint32_t rfFreqRaw = 0;
+    uint32_t rfFreqHz = 0;
+};
+
 /**
  * Basic operations all radio chipsets must implement.
  *
@@ -253,6 +278,18 @@ class RadioInterface
     // Make a candidate radio configuration valid, even if it isn't.
     static void clampConfigLora(meshtastic_Config_LoRaConfig &loraConfig);
 
+    /**
+     * Get current RSSI reading from the radio.
+     * Returns 0 if not available.
+     */
+    virtual int16_t getCurrentRSSI() { return 0; }
+
+    /**
+     * Collect any radio-implementation-specific diagnostics for PeriodicTestModule.
+     * Returns true when the implementation populated any fields.
+     */
+    virtual bool collectDiagnostics(RadioDiagnostics &diagnostics) { return false; }
+
   protected:
     int8_t power = 17; // Set by applyModemConfig()
 
@@ -282,12 +319,6 @@ class RadioInterface
      * Save the channel we selected for later reuse.
      */
     virtual void saveChannelNum(uint32_t savedChannelNum);
-
-    /**
-     * Get current RSSI reading from the radio.
-     * Returns 0 if not available.
-     */
-    virtual int16_t getCurrentRSSI() { return 0; }
 
   private:
     /**

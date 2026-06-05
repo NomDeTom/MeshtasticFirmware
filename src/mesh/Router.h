@@ -35,6 +35,8 @@ class Router : protected concurrency::OSThread, protected PacketHistory
      */
     void addInterface(std::unique_ptr<RadioInterface> _iface) { iface = std::move(_iface); }
 
+    RadioInterface *getIface() const { return iface.get(); }
+
     /**
      * do idle processing
      * Mostly looking in our incoming rxPacket queue and calling handleReceived.

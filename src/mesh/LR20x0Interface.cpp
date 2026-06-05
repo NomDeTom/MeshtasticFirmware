@@ -4,24 +4,23 @@
 #include "LR20x0Interface.h"
 #if RADIOLIB_GODMODE
 #include "modules/LR2021/LR2021_registers.h"
-#endif
+#endif // RADIOLIB_GODMODE
 #include "Throttle.h"
 #include "error.h"
 #include "mesh/NodeDB.h"
-#ifdef USERPREFS_LR2021_DCDC_RAMP_TEST
-#include "FSCommon.h"
-
-// State shared between init() and the periodic log in getCurrentRSSI().
-static const char *dcdcTestLabel = nullptr;
+#if !EXCLUDE_TEST_MODULE
+#include "modules/PeriodicTestModule.h"
+#endif // !EXCLUDE_TEST_MODULE
+#if !EXCLUDE_TEST_MODULE
+// State shared between receive bookkeeping and periodic diagnostics.
 static float dcdcLastRxRssi = 0.0f;
 static float dcdcLastRxSnr = 0.0f;
-static uint32_t dcdcLastLogMs = 0;
-#endif
+#endif // !EXCLUDE_TEST_MODULE
 
 // Keep LR20x0 naming while RadioLib exposes LR2021 symbols.
 #ifndef LR20x0
 #define LR20x0 LR2021
-#endif
+#endif // LR20x0
 
 #ifdef LR2021_DIO_AS_RF_SWITCH
 #include "rfswitch.h"
@@ -35,25 +34,25 @@ static const Module::RfSwitchMode_t lr20x0_rfswitch_table[] = {
     {LR20x0::MODE_STBY, {}},  {LR20x0::MODE_RX, {}},    {LR20x0::MODE_TX, {}},
     {LR20x0::MODE_RX_HF, {}}, {LR20x0::MODE_TX_HF, {}}, END_OF_MODE_TABLE,
 };
-#endif
+#endif // LR2021_DIO_AS_RF_SWITCH
 
 // Particular boards might define a different max power based on what their hardware can do, default to max power output if not
 // specified (may be dangerous if using external PA and LR20x0 power config forgotten)
 #if ARCH_PORTDUINO
 #define LR2021_MAX_POWER portduino_config.lr2021_max_power
-#endif
+#endif // ARCH_PORTDUINO
 #ifndef LR2021_MAX_POWER
 #define LR2021_MAX_POWER 22
-#endif
+#endif // LR2021_MAX_POWER
 
 // the 2.4G part maxes at 12dBm
 
 #if ARCH_PORTDUINO
 #define LR2021_MAX_POWER_HF portduino_config.lr2021_max_power_hf
-#endif
+#endif // ARCH_PORTDUINO
 #ifndef LR2021_MAX_POWER_HF
 #define LR2021_MAX_POWER_HF 12
-#endif
+#endif // LR2021_MAX_POWER_HF
 
 template <typename T>
 LR20x0Interface<T>::LR20x0Interface(LockingArduinoHal *hal, RADIOLIB_PIN_TYPE cs, RADIOLIB_PIN_TYPE irq, RADIOLIB_PIN_TYPE rst,
@@ -71,7 +70,7 @@ template <typename T> bool LR20x0Interface<T>::init()
 #ifdef LR2021_POWER_EN
     pinMode(LR2021_POWER_EN, OUTPUT);
     digitalWrite(LR2021_POWER_EN, HIGH);
-#endif
+#endif // LR2021_POWER_EN
 
 #if ARCH_PORTDUINO
     float tcxoVoltage = (float)portduino_config.dio3_tcxo_voltage / 1000;
@@ -89,7 +88,7 @@ template <typename T> bool LR20x0Interface<T>::init()
            // https://github.com/jgromes/RadioLib/blob/690a050ebb46e6097c5d00c371e961c1caa3b52e/src/modules/LR11x0/LR11x0.h#L471C26-L471C104
     // (DIO3 is free to be used as an IRQ)
     LOG_DEBUG("LR2021_DIO3_TCXO_VOLTAGE not defined, not using DIO3 as TCXO reference voltage");
-#endif
+#endif // ARCH_PORTDUINO
 
     RadioLibInterface::init();
 
@@ -101,7 +100,7 @@ template <typename T> bool LR20x0Interface<T>::init()
     LOG_DEBUG("Set irqDioNum %d", lora.irqDioNum);
 #else
     LOG_DEBUG("Use default irqDioNum %d", lora.irqDioNum);
-#endif
+#endif // LR2021_IRQ_DIO_NUM
 
     if (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_LORA_24) { // clamp if wide freq range
         limitPower(LR2021_MAX_POWER_HF);
@@ -113,13 +112,13 @@ template <typename T> bool LR20x0Interface<T>::init()
     pinMode(LR2021_RF_SWITCH_SUBGHZ, OUTPUT);
     digitalWrite(LR2021_RF_SWITCH_SUBGHZ, getFreq() < 1e9 ? HIGH : LOW);
     LOG_DEBUG("Set RF0 switch to %s", getFreq() < 1e9 ? "SubGHz" : "2.4GHz");
-#endif
+#endif // LR2021_RF_SWITCH_SUBGHZ
 
 #ifdef LR2021_RF_SWITCH_2_4GHZ
     pinMode(LR2021_RF_SWITCH_2_4GHZ, OUTPUT);
     digitalWrite(LR2021_RF_SWITCH_2_4GHZ, getFreq() < 1e9 ? LOW : HIGH);
     LOG_DEBUG("Set RF1 switch to %s", getFreq() < 1e9 ? "SubGHz" : "2.4GHz");
-#endif
+#endif // LR2021_RF_SWITCH_2_4GHZ
 
     // Allow extra time for TCXO to stabilize after power-on
     delay(10);
@@ -142,7 +141,7 @@ template <typename T> bool LR20x0Interface<T>::init()
         if (res == RADIOLIB_ERR_NONE)
             LOG_INFO("LR20x0 init success without TCXO (XTAL mode)");
     }
-#endif
+#endif // defined(TCXO_OPTIONAL)
 
     // \todo Display actual typename of the adapter, not just `LR20x0`
     LOG_INFO("LR20x0 init result %d", res);
@@ -181,39 +180,9 @@ template <typename T> bool LR20x0Interface<T>::init()
 
         int16_t dcdcRes = RADIOLIB_ERR_NONE;
 
-#ifdef USERPREFS_LR2021_DCDC_RAMP_TEST
-        // DCDC ramp sensitivity test: cycles through all profiles on each reboot.
-        // Profile index is persisted in /prefs/lr2021dcdc (single byte).
-        // Enable by setting USERPREFS_LR2021_DCDC_RAMP_TEST=1 in userPrefs.jsonc (requires RADIOLIB_GODMODE=1).
-        // Profile 6 (LDO-only) uses setRegMode which is a public API and does not require GODMODE.
-        struct DcdcProfile {
-            uint32_t rise, fall, freq;
-            bool ldoOnly;
-            const char *label;
-        };
-        static constexpr DcdcProfile kProfiles[] = {
-            {0, 0, 0, false, "bypass (no workaround — raw hardware baseline)"},
-            {15, 15, 2800000, false, "RISE=15 FALL=15 FREQ=2.8MHz (Semtech reset state)"},
-            {11, 13, 2800000, false, "RISE=11 FALL=13 FREQ=2.8MHz (narrowband timing)"},
-            {11, 13, 4300000, false, "RISE=11 FALL=13 FREQ=4.3MHz (narrowband timing + elevated freq)"},
-            {15, 15, 4300000, false, "RISE=15 FALL=15 FREQ=4.3MHz (conservative + elevated freq)"},
-            {0, 0, 0, true, "LDO-only (SIMO DCDC disabled via setRegMode SIMO_OFF)"},
-        };
-        static constexpr uint8_t kNumProfiles = sizeof(kProfiles) / sizeof(kProfiles[0]);
-        static constexpr const char *kIdxFile = "/prefs/lr2021dcdc";
-
-        uint8_t idx = 0;
-        {
-            auto f = FSCom.open(kIdxFile, FILE_O_READ);
-            if (f) {
-                f.read(&idx, 1);
-                f.close();
-            }
-        }
-        idx = idx % kNumProfiles;
-        const DcdcProfile &p = kProfiles[idx];
-        dcdcTestLabel = p.label;
-        LOG_INFO("LR20x0 DCDC ramp test [%u/%u]: %s", (unsigned)(idx + 1), (unsigned)kNumProfiles, p.label);
+#if !EXCLUDE_TEST_MODULE
+        const LR2021DcdcProfile &p =
+            periodicTestModule ? periodicTestModule->getCurrentDcdcProfile() : LR2021DcdcProfile{0, 0, 0, false, "bypass"};
 
         if (p.ldoOnly) {
             uint8_t rampTimes[4] = {0, 0, 0, 0};
@@ -226,16 +195,6 @@ template <typename T> bool LR20x0Interface<T>::init()
                 dcdcRes = lora.writeRegMemMask32(RADIOLIB_LR2021_REG_DCDC_SWITCHER, 0xFu << 16, p.fall << 16);
             if (dcdcRes == RADIOLIB_ERR_NONE)
                 dcdcRes = dcdcSetFreq(p.freq);
-        }
-
-        // Advance counter for next boot
-        uint8_t nextIdx = (idx + 1) % kNumProfiles;
-        {
-            auto fw = FSCom.open(kIdxFile, FILE_O_WRITE);
-            if (fw) {
-                fw.write(&nextIdx, 1);
-                fw.close();
-            }
         }
 #else
         // dcdc_reset: reset RISE/FALL ramp fields to conservative 15/15 at 2.8 MHz
@@ -266,12 +225,13 @@ template <typename T> bool LR20x0Interface<T>::init()
             }
         }
         if (dcdcRes == RADIOLIB_ERR_NONE)
-            LOG_DEBUG("LR20x0 DCDC workaround applied");
-#endif
+            LOG_INFO("LR20x0 DCDC workaround applied (anaDec=%u, rise=%u, fall=%u)", (unsigned)anaDec, (unsigned)rise,
+                     (unsigned)fall);
+#endif // !EXCLUDE_TEST_MODULE
         if (dcdcRes != RADIOLIB_ERR_NONE)
             LOG_WARN("LR20x0 DCDC workaround failed: %d", dcdcRes);
     }
-#endif
+#endif // RADIOLIB_GODMODE
 
     LOG_INFO("Frequency set to %f", getFreq());
     LOG_INFO("Bandwidth set to %f", bw);
@@ -289,7 +249,7 @@ template <typename T> bool LR20x0Interface<T>::init()
         if (res != RADIOLIB_ERR_NONE)
             LOG_WARN("LR2021 setRegMode failed: %d", res);
     }
-#endif
+#endif // RADIOLIB_GODMODE
 
 #ifdef LR2021_DIO_AS_RF_SWITCH
     bool dioAsRfSwitch = true;
@@ -297,7 +257,7 @@ template <typename T> bool LR20x0Interface<T>::init()
     bool dioAsRfSwitch = portduino_config.has_rfswitch_table;
 #else
     bool dioAsRfSwitch = false;
-#endif
+#endif // LR2021_DIO_AS_RF_SWITCH
 
     if (dioAsRfSwitch) {
         lora.setRfSwitchTable(lr20x0_rfswitch_dio_pins, lr20x0_rfswitch_table);
@@ -401,10 +361,10 @@ template <typename T> void LR20x0Interface<T>::addReceiveMetadata(meshtastic_Mes
     // LOG_DEBUG("PacketStatus %x", lora.getPacketStatus());
     mp->rx_snr = lora.getSNR();
     mp->rx_rssi = lround(lora.getRSSI());
-#ifdef USERPREFS_LR2021_DCDC_RAMP_TEST
+#if !EXCLUDE_TEST_MODULE
     dcdcLastRxRssi = lora.getRSSI();
     dcdcLastRxSnr = lora.getSNR();
-#endif
+#endif // !EXCLUDE_TEST_MODULE
     // LOG_DEBUG("Corrected frequency offset: %f", lora.getFrequencyError()); // not implemented for LR20x0, but noop for LR11x0
     // too(!)
 }
@@ -441,7 +401,7 @@ template <typename T> void LR20x0Interface<T>::startReceive()
     // Must be done AFTER starting receive, because startReceive clears (possibly stale) interrupt pending register bits
     enableInterrupt(isrRxLevel0);
     checkRxDoneIrqFlag();
-#endif
+#endif // SLEEP_ONLY
 }
 
 /** Is the channel currently active? */
@@ -505,7 +465,7 @@ template <typename T> void LR20x0Interface<T>::resetAGC()
     // 6. Resume receiving
     startReceive();
 }
-#endif
+#endif // LR20X0_AGC_RESET
 
 template <typename T> bool LR20x0Interface<T>::sleep()
 {
@@ -522,25 +482,62 @@ template <typename T> bool LR20x0Interface<T>::sleep()
 
 #ifdef LR2021_POWER_EN
     digitalWrite(LR2021_POWER_EN, LOW);
-#endif
+#endif // LR2021_POWER_EN
 
     return true;
 }
 
 template <typename T> int16_t LR20x0Interface<T>::getCurrentRSSI()
 {
-    float rssi = lora.getRSSI(false, true);
-#ifdef USERPREFS_LR2021_DCDC_RAMP_TEST
-    if (dcdcTestLabel && !Throttle::isWithinTimespanMs(dcdcLastLogMs, 60000)) {
-        dcdcLastLogMs = millis();
-        LOG_INFO("[DCDC-TEST] profile: %s", dcdcTestLabel);
-        LOG_INFO("[DCDC-TEST] noise floor: %d dBm", (int)getNoiseFloor());
-        if (dcdcLastRxRssi != 0.0f || dcdcLastRxSnr != 0.0f)
-            LOG_INFO("[DCDC-TEST] last rx: RSSI=%.1f dBm  SNR=%.2f dB", dcdcLastRxRssi, dcdcLastRxSnr);
-        else
-            LOG_INFO("[DCDC-TEST] last rx: none since boot");
-    }
-#endif
-    return (int16_t)round(rssi);
+    return (int16_t)round(lora.getRSSI(false, true));
 }
-#endif
+
+template <typename T> bool LR20x0Interface<T>::collectDiagnostics(RadioDiagnostics &diagnostics)
+{
+#if !EXCLUDE_TEST_MODULE
+    diagnostics.hasNoiseFloor = true;
+    diagnostics.noiseFloor = getNoiseFloor();
+    diagnostics.hasLastRx = (dcdcLastRxRssi != 0.0f || dcdcLastRxSnr != 0.0f);
+    diagnostics.lastRxRssi = dcdcLastRxRssi;
+    diagnostics.lastRxSnr = dcdcLastRxSnr;
+
+#if RADIOLIB_GODMODE
+    // Read back DCDC switcher register: bits [23:20] = RISE, bits [19:16] = FALL
+    uint32_t switcher = 0;
+    if (lora.readRegMem32(RADIOLIB_LR2021_REG_DCDC_SWITCHER, &switcher, 1) == RADIOLIB_ERR_NONE) {
+        diagnostics.hasDcdcSwitcher = true;
+        diagnostics.dcdcSwitcher = switcher;
+        diagnostics.dcdcRise = (switcher >> 20) & 0xF;
+        diagnostics.dcdcFall = (switcher >> 16) & 0xF;
+    } else {
+        diagnostics.dcdcSwitcherReadFailed = true;
+    }
+
+    // Read back DCDC LF switching frequency register and convert to Hz
+    uint32_t freqLfRaw = 0;
+    if (lora.readRegMem32(RADIOLIB_LR2021_REG_DCDC_FREQ_LF, &freqLfRaw, 1) == RADIOLIB_ERR_NONE) {
+        diagnostics.hasDcdcFreqLf = true;
+        diagnostics.dcdcFreqLfRaw = freqLfRaw;
+        diagnostics.dcdcFreqLfHz = (uint32_t)((float)freqLfRaw / 1.048576f);
+    } else {
+        diagnostics.dcdcFreqLfReadFailed = true;
+    }
+
+    // Read back RF frequency from PLL register and convert to Hz
+    uint32_t rawRfFreq = 0;
+    if (lora.readRegMem32(RADIOLIB_LR2021_REG_RTTOF_RF_FREQ, &rawRfFreq, 1) == RADIOLIB_ERR_NONE) {
+        diagnostics.hasRfFreq = true;
+        diagnostics.rfFreqRaw = rawRfFreq;
+        diagnostics.rfFreqHz = (uint32_t)(((uint64_t)rawRfFreq * 15625ULL + 16383ULL) / 16384ULL);
+    } else {
+        diagnostics.rfFreqReadFailed = true;
+    }
+#endif // RADIOLIB_GODMODE
+
+    return true;
+#else
+    (void)diagnostics;
+    return false;
+#endif // !EXCLUDE_TEST_MODULE
+}
+#endif // defined(USE_LR2021) && RADIOLIB_EXCLUDE_LR2021 != 1

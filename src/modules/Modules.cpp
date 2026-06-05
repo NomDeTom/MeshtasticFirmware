@@ -3,6 +3,10 @@
 #include "buzz/BuzzerFeedbackThread.h"
 #include "modules/SystemCommandsModule.h"
 #endif
+#if !EXCLUDE_TEST_MODULE
+#define PERIODIC_TEST_MODULE
+#include "modules/PeriodicTestModule.h" // comment out if you don't want the periodic test log lines
+#endif
 #include "modules/StatusLEDModule.h"
 #if !MESHTASTIC_EXCLUDE_REPLYBOT
 #include "ReplyBotModule.h"
@@ -123,6 +127,7 @@ void setupModules()
     }
 #endif
     statusLEDModule = new StatusLEDModule();
+    periodicTestModule = new PeriodicTestModule();
 #if !MESHTASTIC_EXCLUDE_REPLYBOT
     new ReplyBotModule();
 #endif
