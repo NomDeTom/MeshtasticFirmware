@@ -2,6 +2,9 @@
 
 #if defined(USE_LR2021) && RADIOLIB_EXCLUDE_LR2021 != 1
 #include "LR20x0Interface.h"
+#if RADIOLIB_GODMODE
+#include "modules/LR2021/LR2021_registers.h"
+#endif
 #include "Throttle.h"
 #include "error.h"
 #include "mesh/NodeDB.h"
