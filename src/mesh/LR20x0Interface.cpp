@@ -2,8 +2,18 @@
 
 #if defined(USE_LR2021) && RADIOLIB_EXCLUDE_LR2021 != 1
 #include "LR20x0Interface.h"
+#include "Throttle.h"
 #include "error.h"
 #include "mesh/NodeDB.h"
+#ifdef USERPREFS_LR2021_DCDC_RAMP_TEST
+#include "FSCommon.h"
+
+// State shared between init() and the periodic log in getCurrentRSSI().
+static const char *dcdcTestLabel = nullptr;
+static float dcdcLastRxRssi = 0.0f;
+static float dcdcLastRxSnr = 0.0f;
+static uint32_t dcdcLastLogMs = 0;
+#endif
 
 // Keep LR20x0 naming while RadioLib exposes LR2021 symbols.
 #ifndef LR20x0
@@ -166,8 +176,67 @@ template <typename T> bool LR20x0Interface<T>::init()
             return lora.setRfFrequency(rfHz);
         };
 
+        int16_t dcdcRes = RADIOLIB_ERR_NONE;
+
+#ifdef USERPREFS_LR2021_DCDC_RAMP_TEST
+        // DCDC ramp sensitivity test: cycles through all profiles on each reboot.
+        // Profile index is persisted in /prefs/lr2021dcdc (single byte).
+        // Enable by setting USERPREFS_LR2021_DCDC_RAMP_TEST=1 in userPrefs.jsonc (requires RADIOLIB_GODMODE=1).
+        // Profile 6 (LDO-only) uses setRegMode which is a public API and does not require GODMODE.
+        struct DcdcProfile {
+            uint32_t rise, fall, freq;
+            bool ldoOnly;
+            const char *label;
+        };
+        static constexpr DcdcProfile kProfiles[] = {
+            {0, 0, 0, false, "bypass (no workaround — raw hardware baseline)"},
+            {15, 15, 2800000, false, "RISE=15 FALL=15 FREQ=2.8MHz (Semtech reset state)"},
+            {11, 13, 2800000, false, "RISE=11 FALL=13 FREQ=2.8MHz (narrowband timing)"},
+            {11, 13, 4300000, false, "RISE=11 FALL=13 FREQ=4.3MHz (narrowband timing + elevated freq)"},
+            {15, 15, 4300000, false, "RISE=15 FALL=15 FREQ=4.3MHz (conservative + elevated freq)"},
+            {0, 0, 0, true, "LDO-only (SIMO DCDC disabled via setRegMode SIMO_OFF)"},
+        };
+        static constexpr uint8_t kNumProfiles = sizeof(kProfiles) / sizeof(kProfiles[0]);
+        static constexpr const char *kIdxFile = "/prefs/lr2021dcdc";
+
+        uint8_t idx = 0;
+        {
+            auto f = FSCom.open(kIdxFile, FILE_O_READ);
+            if (f) {
+                f.read(&idx, 1);
+                f.close();
+            }
+        }
+        idx = idx % kNumProfiles;
+        const DcdcProfile &p = kProfiles[idx];
+        dcdcTestLabel = p.label;
+        LOG_INFO("LR20x0 DCDC ramp test [%u/%u]: %s", (unsigned)(idx + 1), (unsigned)kNumProfiles, p.label);
+
+        if (p.ldoOnly) {
+            uint8_t rampTimes[4] = {0, 0, 0, 0};
+            int16_t ldoRes = lora.setRegMode(RADIOLIB_LR2021_REG_MODE_SIMO_OFF, rampTimes);
+            if (ldoRes != RADIOLIB_ERR_NONE)
+                LOG_WARN("LR20x0 setRegMode SIMO_OFF failed: %d", ldoRes);
+        } else if (p.rise != 0) {
+            dcdcRes = lora.writeRegMemMask32(RADIOLIB_LR2021_REG_DCDC_SWITCHER, 0xFu << 20, p.rise << 20);
+            if (dcdcRes == RADIOLIB_ERR_NONE)
+                dcdcRes = lora.writeRegMemMask32(RADIOLIB_LR2021_REG_DCDC_SWITCHER, 0xFu << 16, p.fall << 16);
+            if (dcdcRes == RADIOLIB_ERR_NONE)
+                dcdcRes = dcdcSetFreq(p.freq);
+        }
+
+        // Advance counter for next boot
+        uint8_t nextIdx = (idx + 1) % kNumProfiles;
+        {
+            auto fw = FSCom.open(kIdxFile, FILE_O_WRITE);
+            if (fw) {
+                fw.write(&nextIdx, 1);
+                fw.close();
+            }
+        }
+#else
         // dcdc_reset: reset RISE/FALL ramp fields to conservative 15/15 at 2.8 MHz
-        int16_t dcdcRes = lora.writeRegMemMask32(RADIOLIB_LR2021_REG_DCDC_SWITCHER, 0xFu << 20, 15u << 20);
+        dcdcRes = lora.writeRegMemMask32(RADIOLIB_LR2021_REG_DCDC_SWITCHER, 0xFu << 20, 15u << 20);
         if (dcdcRes == RADIOLIB_ERR_NONE)
             dcdcRes = lora.writeRegMemMask32(RADIOLIB_LR2021_REG_DCDC_SWITCHER, 0xFu << 16, 15u << 16);
         if (dcdcRes == RADIOLIB_ERR_NONE)
@@ -193,10 +262,11 @@ template <typename T> bool LR20x0Interface<T>::init()
                     dcdcRes = dcdcSetFreq(anaDec == 1 ? 4300000 : 2800000);
             }
         }
+        if (dcdcRes == RADIOLIB_ERR_NONE)
+            LOG_DEBUG("LR20x0 DCDC workaround applied");
+#endif
         if (dcdcRes != RADIOLIB_ERR_NONE)
             LOG_WARN("LR20x0 DCDC workaround failed: %d", dcdcRes);
-        else
-            LOG_DEBUG("LR20x0 DCDC workaround applied");
     }
 #endif
 
@@ -328,6 +398,10 @@ template <typename T> void LR20x0Interface<T>::addReceiveMetadata(meshtastic_Mes
     // LOG_DEBUG("PacketStatus %x", lora.getPacketStatus());
     mp->rx_snr = lora.getSNR();
     mp->rx_rssi = lround(lora.getRSSI());
+#ifdef USERPREFS_LR2021_DCDC_RAMP_TEST
+    dcdcLastRxRssi = lora.getRSSI();
+    dcdcLastRxSnr = lora.getSNR();
+#endif
     // LOG_DEBUG("Corrected frequency offset: %f", lora.getFrequencyError()); // not implemented for LR20x0, but noop for LR11x0
     // too(!)
 }
@@ -453,6 +527,17 @@ template <typename T> bool LR20x0Interface<T>::sleep()
 template <typename T> int16_t LR20x0Interface<T>::getCurrentRSSI()
 {
     float rssi = lora.getRSSI(false, true);
+#ifdef USERPREFS_LR2021_DCDC_RAMP_TEST
+    if (dcdcTestLabel && !Throttle::isWithinTimespanMs(dcdcLastLogMs, 60000)) {
+        dcdcLastLogMs = millis();
+        LOG_INFO("[DCDC-TEST] profile: %s", dcdcTestLabel);
+        LOG_INFO("[DCDC-TEST] noise floor: %d dBm", (int)getNoiseFloor());
+        if (dcdcLastRxRssi != 0.0f || dcdcLastRxSnr != 0.0f)
+            LOG_INFO("[DCDC-TEST] last rx: RSSI=%.1f dBm  SNR=%.2f dB", dcdcLastRxRssi, dcdcLastRxSnr);
+        else
+            LOG_INFO("[DCDC-TEST] last rx: none since boot");
+    }
+#endif
     return (int16_t)round(rssi);
 }
 #endif

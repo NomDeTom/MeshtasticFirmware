@@ -57,6 +57,11 @@
   // "USERPREFS_MQTT_ENCRYPTION_ENABLED": "true",
   // "USERPREFS_MQTT_TLS_ENABLED": "false",
   // "USERPREFS_MQTT_ROOT_TOPIC": "event/REPLACEME",
+  "USERPREFS_LR2021_DCDC_RAMP_TEST": "1", // LR2021 DCDC sensitivity cycling test (requires RADIOLIB_GODMODE=1).
+  //   Each reboot advances through 6 profiles, logging the active config on boot:
+  //   [1/6] bypass  [2/6] R15/F15/2.8MHz  [3/6] R11/F13/2.8MHz
+  //   [4/6] R11/F13/4.3MHz  [5/6] R15/F15/4.3MHz  [6/6] LDO-only (SIMO_OFF)
+  //   Counter persisted in /prefs/lr2021dcdc. Unset=normal Semtech auto-detect path.
   // "USERPREFS_RINGTONE_NAG_SECS": "60",
   // "USERPREFS_NODEINFO_REPLY_SUPPRESS_SECS": "43200",
   // "USERPREFS_UI_TEST_LOG": "true", // Test-only: emits `Screen: frame N/M name=... reason=...` log per UI transition (for the mcp-server ui test tier); off in release builds.
