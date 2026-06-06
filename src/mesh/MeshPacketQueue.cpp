@@ -65,7 +65,7 @@ void fixPriority(meshtastic_MeshPacket *p)
 }
 
 /** enqueue a packet, return false if full */
-bool MeshPacketQueue::enqueue(meshtastic_MeshPacket *p)
+bool MeshPacketQueue::enqueue(meshtastic_MeshPacket *p, bool *dropped)
 {
     // no space - try to replace a lower priority packet in the queue
     if (queue.size() >= maxLen) {
@@ -73,7 +73,14 @@ bool MeshPacketQueue::enqueue(meshtastic_MeshPacket *p)
         if (!replaced) {
             LOG_WARN("TX queue is full, and there is no lower-priority packet available to evict in favour of 0x%08x", p->id);
         }
+        if (dropped) {
+            *dropped = true;
+        }
         return replaced;
+    }
+
+    if (dropped) {
+        *dropped = false;
     }
 
     // Find the correct position using upper_bound to maintain a stable order
@@ -171,6 +178,29 @@ bool MeshPacketQueue::replaceLowerPriorityPacket(meshtastic_MeshPacket *p)
                      refPacket->id, p->id);
             queue.erase(it);
             packetPool.release(refPacket);
+            // Insert the new packet in the correct order
+            enqueue(p);
+            return true;
+        }
+    }
+
+    if (backPacket->tx_after) {
+        // Check if there's a late packet at the queue end
+        auto now = millis();
+        if (backPacket->tx_after < now && (!p->tx_after || backPacket->tx_after > p->tx_after)) {
+            int32_t dt = (int32_t)(backPacket->tx_after - now);
+            if (p->tx_after) {
+                LOG_WARN("Dropping late packet 0x%08x with TX delay %dms to make room in the TX queue for packet 0x%08x with "
+                         "TX delay %ums",
+                         backPacket->id, dt, p->id, p->tx_after - now);
+
+            } else {
+                LOG_WARN("Dropping late packet 0x%08x with TX delay %dms to make room in the TX queue for packet 0x%08x "
+                         "with no TX delay",
+                         backPacket->id, dt, p->id);
+            }
+            queue.pop_back();
+            packetPool.release(backPacket);
             // Insert the new packet in the correct order
             enqueue(p);
             return true;
