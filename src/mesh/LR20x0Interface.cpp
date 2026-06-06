@@ -501,6 +501,12 @@ template <typename T> bool LR20x0Interface<T>::collectDiagnostics(RadioDiagnosti
     diagnostics.lastRxRssi = dcdcLastRxRssi;
     diagnostics.lastRxSnr = dcdcLastRxSnr;
 
+    diagnostics.hasPacketStats = true;
+    diagnostics.txGood = txGood;
+    diagnostics.txRelay = txRelay;
+    diagnostics.rxGood = rxGood;
+    diagnostics.rxBad = rxBad;
+
 #if RADIOLIB_GODMODE
     // Read back DCDC switcher register: bits [23:20] = RISE, bits [19:16] = FALL
     uint32_t switcher = 0;

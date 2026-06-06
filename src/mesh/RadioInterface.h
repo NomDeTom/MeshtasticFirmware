@@ -90,6 +90,12 @@ struct RadioDiagnostics {
     bool rfFreqReadFailed = false;
     uint32_t rfFreqRaw = 0;
     uint32_t rfFreqHz = 0;
+
+    bool hasPacketStats = false;
+    uint32_t txGood = 0;  // total over-the-air TX (originated + relay + retransmit)
+    uint32_t txRelay = 0; // subset of txGood: packets relayed on behalf of others
+    uint32_t rxGood = 0;  // packets decoded successfully at the radio layer
+    uint32_t rxBad = 0;   // packets with CRC / framing errors at the radio layer
 };
 
 /**
