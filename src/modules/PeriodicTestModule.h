@@ -31,7 +31,8 @@ class PeriodicTestModule : private concurrency::OSThread
 
     bool firstFired = false;
     uint32_t lastTickMs = 0;
-    uint8_t dcdcProfileIndex = 0;
+    uint8_t dcdcProfileIndex = 0;    // next boot's profile (persisted)
+    uint8_t appliedProfileIndex = 0; // profile actually applied this boot (for logging)
 };
 
 extern PeriodicTestModule *periodicTestModule;
