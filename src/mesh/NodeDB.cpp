@@ -191,6 +191,8 @@ bool meshtastic_NodeDatabase_callback(pb_istream_t *istream, pb_ostream_t *ostre
         if (ostream) {
             const auto *vec = static_cast<const std::vector<meshtastic_NodeInfoLite> *>(iter->pData);
             for (auto item : *vec) {
+                item.snr_q4 = (int32_t)(item.snr * 4.0f);
+                item.snr = 0.0f;
                 if (!pb_encode_tag_for_field(ostream, iter))
                     return false;
                 if (!pb_encode_submessage(ostream, meshtastic_NodeInfoLite_fields, &item))
@@ -200,8 +202,12 @@ bool meshtastic_NodeDatabase_callback(pb_istream_t *istream, pb_ostream_t *ostre
         if (istream && istream->bytes_left) {
             meshtastic_NodeInfoLite node = meshtastic_NodeInfoLite_init_zero;
             auto *vec = static_cast<std::vector<meshtastic_NodeInfoLite> *>(iter->pData);
-            if (pb_decode(istream, meshtastic_NodeInfoLite_fields, &node))
+            if (pb_decode(istream, meshtastic_NodeInfoLite_fields, &node)) {
+                if (node.snr_q4)
+                    node.snr = node.snr_q4 / 4.0f;
+                node.snr_q4 = 0;
                 vec->push_back(node);
+            }
         }
         return true;
     }
@@ -2074,7 +2080,6 @@ bool NodeDB::saveNodeDatabaseToDisk()
 #else
     nodeDatabase.status.clear();
 #endif
-
     size_t nodeDatabaseSize;
     pb_get_encoded_size(&nodeDatabaseSize, meshtastic_NodeDatabase_fields, &nodeDatabase);
     bool ok = saveProto(nodeDatabaseFileName, nodeDatabaseSize, &meshtastic_NodeDatabase_msg, &nodeDatabase, false);
