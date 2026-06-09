@@ -220,18 +220,28 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
         return static_cast<uint16_t>(res);
     }
 
-    // Convert to/from 8-bit relative timestamps with given resolution
+    // Convert to/from 8-bit relative timestamps with given resolution.
+    //
+    // All stored timestamps carry a uniform +1 "presence" offset: a value of 0 is
+    // reserved for "no timestamp recorded" (which is also the zero-initialized
+    // state), and stored values 1..255 encode raw ticks 0..254. This keeps the
+    // 0-means-empty sentinel consistent with memset/calloc zeroing across every
+    // sub-store, so the maintenance sweep's `_time != 0` presence checks are
+    // unambiguous (a timestamp recorded in the first tick after the epoch is no
+    // longer mistaken for an empty slot). The offset is applied here and removed
+    // on read, so it cancels out in all window math.
     uint8_t toRelativeTime(uint32_t nowMs, uint16_t resolutionSecs) const
     {
         uint32_t ticks = (nowMs - cacheEpochMs) / (resolutionSecs * 1000UL);
-        return (ticks > UINT8_MAX) ? UINT8_MAX : static_cast<uint8_t>(ticks);
+        return (ticks >= UINT8_MAX) ? UINT8_MAX : static_cast<uint8_t>(ticks + 1);
     }
     uint32_t fromRelativeTime(uint8_t ticks, uint16_t resolutionSecs) const
     {
-        return cacheEpochMs + (static_cast<uint32_t>(ticks) * resolutionSecs * 1000UL);
+        return (ticks == 0) ? cacheEpochMs : cacheEpochMs + (static_cast<uint32_t>(ticks - 1) * resolutionSecs * 1000UL);
     }
 
-    // Convenience wrappers for each timestamp type
+    // Convenience wrappers for each timestamp type (the +1 presence offset lives
+    // in the shared converters above, so these are plain pass-throughs).
     uint8_t toRelativePosTime(uint32_t nowMs) const { return toRelativeTime(nowMs, posTimeResolution); }
     uint32_t fromRelativePosTime(uint8_t t) const { return fromRelativeTime(t, posTimeResolution); }
 

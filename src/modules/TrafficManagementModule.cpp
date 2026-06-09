@@ -1288,8 +1288,11 @@ bool TrafficManagementModule::shouldDropPosition(const meshtastic_MeshPacket *p,
     const int32_t lat_truncated = truncateLatLon(pos->latitude_i, precision);
     const int32_t lon_truncated = truncateLatLon(pos->longitude_i, precision);
     const uint8_t fingerprint = computePositionFingerprint(lat_truncated, lon_truncated, precision);
-    const uint32_t minIntervalMs = secsToMs(Default::getConfiguredOrDefault(
-        moduleConfig.traffic_management.position_min_interval_secs, default_traffic_mgmt_position_min_interval_secs));
+    // Drop gate uses the RAW configured interval: 0 means "dedup disabled" (the
+    // contract documented below). The 12h default is only for resolution/TTL
+    // sizing (constructor / runOnce), not for deciding whether to drop — feeding
+    // the default here would silently turn the 0-disables-dedup contract off.
+    const uint32_t minIntervalMs = secsToMs(moduleConfig.traffic_management.position_min_interval_secs);
 
     bool isNew = false;
     concurrency::LockGuard guard(&cacheLock);
