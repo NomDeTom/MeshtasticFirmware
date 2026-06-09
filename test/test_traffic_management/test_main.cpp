@@ -54,6 +54,29 @@ class MockNodeDB : public NodeDB
         cachedNode.bitfield |= NODEINFO_BITFIELD_HAS_USER_MASK;
     }
 
+    // Seed a node into the hot-store buffer at index 1 (index 0 is reserved for
+    // "self"). Respects the fixed-buffer invariant: `meshNodes` is a buffer of
+    // MAX_NUM_NODES slots with `numMeshNodes` as the logical count — we grow the
+    // buffer if needed and bump the count, never clear()/push_back() (which would
+    // shrink it and break NodeDB::resetNodes()'s begin()+1..end() fill).
+    void setHotNode(NodeNum n, uint8_t nextHop)
+    {
+        if (meshNodes->size() < 2)
+            meshNodes->resize(2);
+        (*meshNodes)[1] = meshtastic_NodeInfoLite_init_zero;
+        (*meshNodes)[1].num = n;
+        (*meshNodes)[1].next_hop = nextHop;
+        numMeshNodes = 2;
+    }
+
+    // Evict everything but "self" — simulates the hot DB rolling over. Logical
+    // count only; the buffer is left intact so the invariant holds.
+    void rollHotStore()
+    {
+        numMeshNodes = 1;
+        clearCachedNode();
+    }
+
   private:
     bool hasCachedNode = false;
     NodeNum cachedNodeNum = 0;
@@ -1083,6 +1106,94 @@ static void test_tm_runOnce_enabledReturnsMaintenanceInterval(void)
     TEST_ASSERT_EQUAL_INT32(60 * 1000, interval);
 }
 
+// ---------------------------------------------------------------------------
+// Next-hop overflow cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Round-trip set/get of a confirmed next hop, plus the input guards.
+ */
+static void test_tm_nextHop_setAndGetRoundTrip(void)
+{
+    TrafficManagementModuleTestShim module;
+
+    // Unknown node yields no hint.
+    TEST_ASSERT_EQUAL_UINT8(0, module.getNextHopHint(kTargetNode));
+
+    // Store a confirmed hop and read it back.
+    module.setNextHop(kTargetNode, 0x42);
+    TEST_ASSERT_EQUAL_UINT8(0x42, module.getNextHopHint(kTargetNode));
+
+    // Zero dest and zero byte are rejected (no spurious entry created).
+    module.setNextHop(0, 0x42);
+    module.setNextHop(kRemoteNode, 0);
+    TEST_ASSERT_EQUAL_UINT8(0, module.getNextHopHint(kRemoteNode));
+
+    // Last-write-wins on re-confirmation.
+    module.setNextHop(kTargetNode, 0x99);
+    TEST_ASSERT_EQUAL_UINT8(0x99, module.getNextHopHint(kTargetNode));
+}
+
+/**
+ * The headline scenario: a node carrying a next hop in the hot NodeInfoLite DB
+ * is warm-loaded into the TMM cache, then the hot DB is "rolled" (the node ages
+ * out entirely). The hint must still be served — now exclusively from TMM.
+ */
+static void test_tm_nextHop_servedAfterNodeDbRoll(void)
+{
+    TrafficManagementModuleTestShim module;
+
+    // Seed the hot NodeInfoLite DB with a node that has a confirmed next hop.
+    mockNodeDB->setHotNode(kTargetNode, 0x42);
+
+    // Warm-start the overflow cache from the hot DB.
+    module.preloadNextHopsFromNodeDB();
+    TEST_ASSERT_EQUAL_UINT8(0x42, module.getNextHopHint(kTargetNode));
+
+    // Roll the main NodeInfoLite DB: the node is evicted from the hot store.
+    mockNodeDB->rollHotStore();
+    TEST_ASSERT_NULL(nodeDB->getMeshNode(kTargetNode)); // gone from the hot store
+
+    // Hit is still served — proving it now comes from the TMM overflow cache.
+    TEST_ASSERT_EQUAL_UINT8(0x42, module.getNextHopHint(kTargetNode));
+}
+
+/**
+ * Preload must not clobber a freshly-learned (confirmed) hop with a possibly
+ * stale persisted one from NodeInfoLite.
+ */
+static void test_tm_nextHop_preloadDoesNotClobberLearned(void)
+{
+    TrafficManagementModuleTestShim module;
+
+    // A fresher confirmed hop is already cached.
+    module.setNextHop(kTargetNode, 0x99);
+
+    // The hot DB carries an older next hop for the same node.
+    mockNodeDB->setHotNode(kTargetNode, 0x42);
+
+    module.preloadNextHopsFromNodeDB();
+
+    // The freshly-learned hop survives.
+    TEST_ASSERT_EQUAL_UINT8(0x99, module.getNextHopHint(kTargetNode));
+}
+
+/**
+ * A pure routing hint (no dedup/rate/unknown state) must survive the maintenance
+ * sweep — next_hop != 0 keeps the slot alive even though it has no TTL.
+ */
+static void test_tm_nextHop_keptAliveAcrossMaintenanceSweep(void)
+{
+    TrafficManagementModuleTestShim module;
+
+    module.setNextHop(kTargetNode, 0x42);
+
+    // The sweep frees slots whose sub-stores are all empty; next_hop must veto that.
+    module.runOnce();
+
+    TEST_ASSERT_EQUAL_UINT8(0x42, module.getNextHopHint(kTargetNode));
+}
+
 } // namespace
 
 void setUp(void)
@@ -1139,6 +1250,10 @@ TM_TEST_ENTRY void setup()
     RUN_TEST(test_tm_alterReceived_exhaustFlag_isPacketScoped);
     RUN_TEST(test_tm_runOnce_disabledReturnsMaxInterval);
     RUN_TEST(test_tm_runOnce_enabledReturnsMaintenanceInterval);
+    RUN_TEST(test_tm_nextHop_setAndGetRoundTrip);
+    RUN_TEST(test_tm_nextHop_servedAfterNodeDbRoll);
+    RUN_TEST(test_tm_nextHop_preloadDoesNotClobberLearned);
+    RUN_TEST(test_tm_nextHop_keptAliveAcrossMaintenanceSweep);
     exit(UNITY_END());
 }
 
