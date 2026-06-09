@@ -77,6 +77,21 @@ bool isWithinWindow(uint32_t nowMs, uint32_t startMs, uint32_t intervalMs)
 }
 
 /**
+ * Slide an 8-bit relative timestamp back by a wall-clock slab during epoch rebase.
+ *
+ * Entries older than the slab clamp to 0 (then reclaimed by the maintenance sweep);
+ * live entries keep their reconstructed age minus a sub-tick remainder. Each field
+ * slides by its own resolution's worth of ticks, so a single slab covers all three.
+ */
+inline void slideRelativeTime(uint8_t &ticks, uint32_t slabMs, uint16_t resolutionSecs)
+{
+    if (ticks == 0 || resolutionSecs == 0)
+        return;
+    uint32_t dec = slabMs / (static_cast<uint32_t>(resolutionSecs) * 1000UL);
+    ticks = (ticks > dec) ? static_cast<uint8_t>(ticks - dec) : 0;
+}
+
+/**
  * Truncate lat/lon to specified precision for position deduplication.
  *
  * The truncation works by masking off lower bits and rounding to the center
@@ -830,6 +845,43 @@ void TrafficManagementModule::resetEpoch(uint32_t nowMs)
 #endif
 }
 
+/**
+ * Sliding-epoch rebase — preserve cached state past the 8-bit timestamp horizon.
+ *
+ * Instead of flushing the whole cache when offsets approach overflow, advance the
+ * epoch by a fixed slab and shift every live entry's relative timestamps back by
+ * the same wall-clock amount. A valid entry's window is only a handful of ticks
+ * wide (TTL auto-scales with resolution), so live entries comfortably survive;
+ * already-expired entries clamp to 0 and are reclaimed by the maintenance sweep in
+ * the same locked pass. Reconstructed absolute time is preserved (minus a sub-tick
+ * remainder), so in-flight TTL checks remain correct across the rebase.
+ *
+ * Caller must hold cacheLock.
+ */
+void TrafficManagementModule::rebaseEpoch(uint32_t nowMs)
+{
+#if TRAFFIC_MANAGEMENT_CACHE_SIZE > 0
+    (void)nowMs;
+
+    // Slab stays well below the 200-tick reset threshold so a single rebase drops
+    // the offset back into range (~200 -> ~72 ticks) while live entries survive.
+    const uint32_t slabMs = 128UL * maxResolution() * 1000UL;
+    cacheEpochMs += slabMs;
+
+    TM_LOG_DEBUG("Rebasing cache epoch by %lus", static_cast<unsigned long>(slabMs / 1000UL));
+
+    for (uint16_t i = 0; i < cacheSize(); i++) {
+        if (cache[i].node == 0)
+            continue;
+        slideRelativeTime(cache[i].pos_time, slabMs, posTimeResolution);
+        slideRelativeTime(cache[i].rate_time, slabMs, rateTimeResolution);
+        slideRelativeTime(cache[i].unknown_time, slabMs, unknownTimeResolution);
+    }
+#else
+    (void)nowMs;
+#endif
+}
+
 // =============================================================================
 // Position Hash (Compact Mode)
 // =============================================================================
@@ -1042,13 +1094,6 @@ int32_t TrafficManagementModule::runOnce()
 #if TRAFFIC_MANAGEMENT_CACHE_SIZE > 0
     const uint32_t nowMs = millis();
 
-    // Check if epoch reset needed (~3.5 hours approaching 8-bit minute overflow)
-    if (needsEpochReset(nowMs)) {
-        concurrency::LockGuard guard(&cacheLock);
-        resetEpoch(nowMs);
-        return kMaintenanceIntervalMs;
-    }
-
     // Calculate TTLs for cache expiration
     const uint32_t positionIntervalMs = secsToMs(Default::getConfiguredOrDefault(
         moduleConfig.traffic_management.position_min_interval_secs, default_traffic_mgmt_position_min_interval_secs));
@@ -1065,6 +1110,13 @@ int32_t TrafficManagementModule::runOnce()
     const uint32_t sweepStartMs = millis();
 
     concurrency::LockGuard guard(&cacheLock);
+
+    // Slide the epoch instead of flushing when offsets approach 8-bit overflow.
+    // Rebase preserves live entries; only already-expired ones clamp to 0 and are
+    // reclaimed by the sweep below in this same locked pass.
+    if (needsEpochReset(nowMs))
+        rebaseEpoch(nowMs);
+
     for (uint16_t i = 0; i < cacheSize(); i++) {
         if (cache[i].node == 0)
             continue;

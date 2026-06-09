@@ -55,6 +55,10 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     int32_t runOnce() override;
     // Protected so test shims can force epoch rollover behavior.
     void resetEpoch(uint32_t nowMs);
+    // Sliding-epoch rebase: advance the epoch and shift live entries back by the
+    // same wall-clock amount instead of flushing, so cached state survives past the
+    // ~19h horizon. Caller must hold cacheLock.
+    void rebaseEpoch(uint32_t nowMs);
 
   private:
     // =========================================================================
@@ -213,17 +217,20 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     uint8_t toRelativeUnknownTime(uint32_t nowMs) const { return toRelativeTime(nowMs, unknownTimeResolution); }
     uint32_t fromRelativeUnknownTime(uint8_t t) const { return fromRelativeTime(t, unknownTimeResolution); }
 
-    // Epoch reset when any timestamp approaches overflow
-    // With max resolution of 339 sec, 200 ticks = ~19 hours (safe margin for 24h max)
-    bool needsEpochReset(uint32_t nowMs) const
+    // Coarsest of the three per-feature resolutions (seconds per tick).
+    uint16_t maxResolution() const
     {
         uint16_t maxRes = posTimeResolution;
         if (rateTimeResolution > maxRes)
             maxRes = rateTimeResolution;
         if (unknownTimeResolution > maxRes)
             maxRes = unknownTimeResolution;
-        return (nowMs - cacheEpochMs) > (200UL * maxRes * 1000UL);
+        return maxRes;
     }
+
+    // True when relative offsets approach 8-bit overflow.
+    // With max resolution of 339 sec, 200 ticks = ~19 hours (safe margin for 24h max).
+    bool needsEpochReset(uint32_t nowMs) const { return (nowMs - cacheEpochMs) > (200UL * maxResolution() * 1000UL); }
     // =========================================================================
     // Position Fingerprint
     // =========================================================================
