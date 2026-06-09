@@ -823,6 +823,76 @@ void TrafficManagementModule::cacheNodeInfoPacket(const meshtastic_MeshPacket &m
 }
 
 // =============================================================================
+// Next-Hop Overflow Cache
+// =============================================================================
+//
+// A routing hint store. The byte is the last byte of the NodeNum to use as next
+// hop to reach `dest`. It is written ONLY from NextHopRouter's ACK-confirmed
+// decision (a bidirectionally-verified relay) — never inferred one-way from
+// relayed traffic. The TMM cache holds confirmed next-hops that have aged out of
+// the hot NodeDB (NodeInfoLite), and NextHopRouter::getNextHop() consults it as a
+// fallback after the hot store.
+
+void TrafficManagementModule::setNextHop(NodeNum dest, uint8_t nextHopByte)
+{
+#if TRAFFIC_MANAGEMENT_CACHE_SIZE > 0
+    if (!cache || dest == 0 || nextHopByte == 0)
+        return;
+
+    concurrency::LockGuard guard(&cacheLock);
+    bool isNew = false;
+    UnifiedCacheEntry *entry = findOrCreateEntry(dest, &isNew);
+    if (entry)
+        entry->next_hop = nextHopByte; // last-write-wins; only confirmed bytes reach here
+#else
+    (void)dest;
+    (void)nextHopByte;
+#endif
+}
+
+uint8_t TrafficManagementModule::getNextHopHint(NodeNum dest)
+{
+#if TRAFFIC_MANAGEMENT_CACHE_SIZE > 0
+    if (!cache || dest == 0)
+        return 0;
+
+    concurrency::LockGuard guard(&cacheLock);
+    UnifiedCacheEntry *entry = findEntry(dest);
+    return entry ? entry->next_hop : 0;
+#else
+    (void)dest;
+    return 0;
+#endif
+}
+
+void TrafficManagementModule::preloadNextHopsFromNodeDB()
+{
+#if TRAFFIC_MANAGEMENT_CACHE_SIZE > 0
+    if (!cache || !nodeDB)
+        return;
+
+    uint16_t seeded = 0;
+    concurrency::LockGuard guard(&cacheLock);
+    const size_t count = nodeDB->getNumMeshNodes();
+    for (size_t i = 0; i < count; i++) {
+        meshtastic_NodeInfoLite *node = nodeDB->getMeshNodeByIndex(i);
+        if (!node || node->num == 0 || node->next_hop == 0)
+            continue;
+
+        bool isNew = false;
+        UnifiedCacheEntry *entry = findOrCreateEntry(node->num, &isNew);
+        // Don't clobber a freshly-learned confirmed hop with a (possibly stale) persisted one.
+        if (entry && entry->next_hop == 0) {
+            entry->next_hop = node->next_hop;
+            seeded++;
+        }
+    }
+
+    TM_LOG_INFO("Preloaded %u next-hop hints from NodeDB", static_cast<unsigned>(seeded));
+#endif
+}
+
+// =============================================================================
 // Epoch Management
 // =============================================================================
 
@@ -1094,6 +1164,14 @@ int32_t TrafficManagementModule::runOnce()
 #if TRAFFIC_MANAGEMENT_CACHE_SIZE > 0
     const uint32_t nowMs = millis();
 
+    // Warm-start the next-hop cache from persisted NodeInfoLite hints once nodeDB
+    // is populated. Done here (not in the constructor) so nodeDB has finished
+    // loading. Takes its own lock, so call before acquiring the sweep guard below.
+    if (!nextHopPreloaded) {
+        preloadNextHopsFromNodeDB();
+        nextHopPreloaded = true;
+    }
+
     // Calculate TTLs for cache expiration
     const uint32_t positionIntervalMs = secsToMs(Default::getConfiguredOrDefault(
         moduleConfig.traffic_management.position_min_interval_secs, default_traffic_mgmt_position_min_interval_secs));
@@ -1155,6 +1233,11 @@ int32_t TrafficManagementModule::runOnce()
                 anyValid = true;
             }
         }
+
+        // A confirmed next-hop hint has no TTL of its own and keeps the slot alive,
+        // so an aged-out routing hint outlives the dedup/rate/unknown state.
+        if (cache[i].next_hop != 0)
+            anyValid = true;
 
         // If all data expired, free the slot entirely
         if (!anyValid) {

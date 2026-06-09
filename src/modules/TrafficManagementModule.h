@@ -38,6 +38,19 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     void resetStats();
     void recordRouterHopPreserved();
 
+    // Next-hop overflow cache (routing hint).
+    // setNextHop: store a confirmed last-byte next hop for `dest`. Called by
+    //   NextHopRouter from its ACK-confirmed decision (see sniffReceived). The
+    //   byte must come from a bidirectionally-verified relay, not one-way inference.
+    // getNextHopHint: return the cached next-hop byte for `dest`, 0 if unknown.
+    void setNextHop(NodeNum dest, uint8_t nextHopByte);
+    uint8_t getNextHopHint(NodeNum dest);
+
+    // Warm-start the next-hop cache from persisted NodeInfoLite hints so confirmed
+    // hops survive later hot-store (NodeDB) eviction. Idempotent; runs once after
+    // nodeDB is populated (lazily on first maintenance pass).
+    void preloadNextHopsFromNodeDB();
+
     /**
      * Check if this packet should have its hops exhausted.
      * Called from perhapsRebroadcast() to force hop_limit = 0 regardless of
@@ -66,7 +79,7 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     // =========================================================================
     //
     // A single compact structure used across ESP32, NRF52, and all other platforms.
-    // Memory: 10 bytes × 2048 entries = 20KB
+    // Memory: 11 bytes × 2048 entries = 22KB
     //
     // Position Fingerprinting:
     //   Instead of storing full coordinates (8 bytes) or a computed hash,
@@ -94,6 +107,16 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     //   [7]     pos_time        - Position timestamp (1 byte, adaptive resolution)
     //   [8]     rate_time       - Rate window start (1 byte, adaptive resolution)
     //   [9]     unknown_time    - Unknown tracking start (1 byte, adaptive resolution)
+    //   [10]    next_hop        - Last-byte relay to reach `node` (1 byte, 0 = none)
+    //
+    // next_hop semantics:
+    //   A routing hint: the last byte of the NodeNum to use as next hop to reach
+    //   `node`. Written ONLY from NextHopRouter's ACK-confirmed decision (a
+    //   bidirectionally-verified relay), never inferred one-way from relayed
+    //   traffic. The TMM cache acts as an overflow store for confirmed next-hops
+    //   that have aged out of the hot NodeDB (NodeInfoLite). Unlike the other
+    //   fields it has no TTL of its own — it keeps its slot alive (see runOnce)
+    //   and is refreshed only on the next confirmed exchange.
     //
     struct __attribute__((packed)) UnifiedCacheEntry {
         NodeNum node;            // 4 bytes - Node identifier (0 = empty slot)
@@ -103,8 +126,9 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
         uint8_t pos_time;        // 1 byte  - Position timestamp (adaptive resolution)
         uint8_t rate_time;       // 1 byte  - Rate window start (adaptive resolution)
         uint8_t unknown_time;    // 1 byte  - Unknown tracking start (adaptive resolution)
+        uint8_t next_hop;        // 1 byte  - Last-byte relay to reach `node` (0 = none). See note below.
     };
-    static_assert(sizeof(UnifiedCacheEntry) == 10, "UnifiedCacheEntry should be 10 bytes");
+    static_assert(sizeof(UnifiedCacheEntry) == 11, "UnifiedCacheEntry should be 11 bytes");
 
     // =========================================================================
     // Cuckoo Hash Table Implementation
@@ -299,6 +323,9 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     bool exhaustRequested = false;
     NodeNum exhaustRequestedFrom = 0;
     PacketId exhaustRequestedId = 0;
+
+    // One-shot guard: warm-start next-hop cache from NodeDB on first maintenance pass.
+    bool nextHopPreloaded = false;
 
     // =========================================================================
     // Cache Operations
