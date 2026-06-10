@@ -1,5 +1,6 @@
 #include "MeshTypes.h" // Include BEFORE TestUtil.h — provides HAS_TRAFFIC_MANAGEMENT (via mesh-pb-constants.h)
 #include "TestUtil.h"
+#include <cstdlib>
 #include <unity.h>
 
 #if defined(ARCH_PORTDUINO)
