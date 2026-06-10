@@ -5,7 +5,12 @@ GROUP(-lgcc -lc -lnosys)
 
 MEMORY
 {
-  FLASH (rx)     : ORIGIN = 0x27000, LENGTH = 0xED000 - 0x27000
+  /* App region ends at 0xEA000, not 0xED000: the internal LittleFS partition
+   * is expanded 28 KB -> 40 KB (10 pages at 0xEA000) to hold the 150-node
+   * nodes.proto -- see extra_scripts/nrf52_littlefs_expand.py, which patches
+   * the framework partition constants and post-link-guards boards that use
+   * the framework-default linker script. */
+  FLASH (rx)     : ORIGIN = 0x27000, LENGTH = 0xEA000 - 0x27000
 
   /* SRAM required by Softdevice depend on
    * - Attribute Table Size (Number of Services and Characteristics)

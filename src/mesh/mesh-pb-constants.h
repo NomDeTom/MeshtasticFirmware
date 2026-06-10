@@ -78,21 +78,26 @@ static_assert(sizeof(meshtastic_NodeInfoLite) <= 130, "NodeInfoLite size increas
 /// max number of nodes allowed in the nodeDB (the full-NodeInfoLite "hot +
 /// short-tail" store; see .notes/nodedb-3tier-sizing.md). Long-tail identity
 /// retention for evicted nodes is handled by the warm tier (WARM_NODE_COUNT).
+/// 150 on nRF52 requires the expanded 40 KB LittleFS partition
+/// (extra_scripts/nrf52_littlefs_expand.py) — nodes.proto is ~17 KB typical /
+/// ~30 KB worst case at this count.
 #ifndef MAX_NUM_NODES
 #if defined(ARCH_STM32WL)
 #define MAX_NUM_NODES 10
 #else
-#define MAX_NUM_NODES 80
-#endif
+#define MAX_NUM_NODES 150
+#endif // STM32WL
 #endif
 
 /// Cap on each satellite map (position/telemetry/environment/status). Only the
 /// MAX_SATELLITE_NODES most-recently-heard nodes keep satellite payloads; the
 /// rest of the hot store carries just the 96 B NodeInfoLite header. This is
 /// what bounds both heap (the maps are ~408 B/node worst case) and the
-/// nodes.proto file size.
+/// satellite share of nodes.proto. Deliberately NOT scaled with MAX_NUM_NODES:
+/// the tier-1 "rich data" population stays at 40 regardless of how long the
+/// short tail grows.
 #ifndef MAX_SATELLITE_NODES
-#define MAX_SATELLITE_NODES (MAX_NUM_NODES / 2)
+#define MAX_SATELLITE_NODES 40
 #endif
 
 /// Warm tier: number of 40 B {num, last_heard, public_key} records retained
@@ -103,7 +108,10 @@ static_assert(sizeof(meshtastic_NodeInfoLite) <= 130, "NodeInfoLite size increas
 #if defined(ARCH_STM32WL)
 #define WARM_NODE_COUNT 0
 #elif defined(ARCH_NRF52)
-#define WARM_NODE_COUNT 128 // warm.dat ~5.1 KB; must fit the 28 KB internal-flash LittleFS
+// warm.dat ~5.1 KB. Budgeted against the expanded 40 KB LittleFS on nRF52840
+// (28 KB on non-840 parts) alongside a ~17 KB typical nodes.proto at 150 hot
+// nodes, prefs and the message store.
+#define WARM_NODE_COUNT 128
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
 #define WARM_NODE_COUNT 2000 // PSRAM-backed when available; warm.dat ~80 KB
 #else
