@@ -76,16 +76,16 @@ static_assert(sizeof(meshtastic_NodeInfoLite) <= 130, "NodeInfoLite size increas
 #endif
 
 /// max number of nodes allowed in the nodeDB (the full-NodeInfoLite "hot +
-/// short-tail" store; see .notes/nodedb-3tier-sizing.md). Long-tail identity
-/// retention for evicted nodes is handled by the warm tier (WARM_NODE_COUNT).
-/// 150 on nRF52 requires the expanded 40 KB LittleFS partition
-/// (extra_scripts/nrf52_littlefs_expand.py) — nodes.proto is ~17 KB typical /
-/// ~30 KB worst case at this count.
+/// short-tail" store; see .notes/nodedb-3tier-sizing-implemented.md).
+/// Long-tail identity retention for evicted nodes is handled by the warm tier
+/// (WARM_NODE_COUNT). 120 keeps nodes.proto (~14 KB typical / ~27 KB worst)
+/// comfortably inside the stock 28 KB nRF52 LittleFS alongside prefs and the
+/// message store — the warm tier persists outside LittleFS on nRF52840.
 #ifndef MAX_NUM_NODES
 #if defined(ARCH_STM32WL)
 #define MAX_NUM_NODES 10
 #else
-#define MAX_NUM_NODES 150
+#define MAX_NUM_NODES 120
 #endif // STM32WL
 #endif
 
@@ -108,10 +108,10 @@ static_assert(sizeof(meshtastic_NodeInfoLite) <= 130, "NodeInfoLite size increas
 #if defined(ARCH_STM32WL)
 #define WARM_NODE_COUNT 0
 #elif defined(ARCH_NRF52)
-// warm.dat ~5.1 KB. Budgeted against the expanded 40 KB LittleFS on nRF52840
-// (28 KB on non-840 parts) alongside a ~17 KB typical nodes.proto at 150 hot
-// nodes, prefs and the message store.
-#define WARM_NODE_COUNT 128
+// Persisted in the dedicated 12 KB raw-flash record-ring below LittleFS
+// (3 × 4 KB pages, append + replay + compact-on-rotate; see WarmNodeStore.h).
+// 200 live entries across 306 record slots.
+#define WARM_NODE_COUNT 200
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
 #define WARM_NODE_COUNT 2000 // PSRAM-backed when available; warm.dat ~80 KB
 #else

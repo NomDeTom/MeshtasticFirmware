@@ -5,11 +5,11 @@ GROUP(-lgcc -lc -lnosys)
 
 MEMORY
 {
-  /* App region ends at 0xEA000, not 0xED000: the internal LittleFS partition
-   * is expanded 28 KB -> 40 KB (10 pages at 0xEA000) to hold the 150-node
-   * nodes.proto -- see extra_scripts/nrf52_littlefs_expand.py, which patches
-   * the framework partition constants and post-link-guards boards that use
-   * the framework-default linker script. */
+  /* App region ends at 0xEA000, not 0xED000: the 12 KB warm-node-store
+   * record-ring (3 x 4 KB pages, src/mesh/WarmNodeStore.h) occupies
+   * 0xEA000-0xED000, directly below the stock LittleFS partition. Boards on
+   * the framework-default linker script are covered by the post-link guard
+   * in extra_scripts/nrf52_warm_region.py instead. */
   FLASH (rx)     : ORIGIN = 0x27000, LENGTH = 0xEA000 - 0x27000
 
   /* SRAM required by Softdevice depend on
