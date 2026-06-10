@@ -75,28 +75,42 @@ static_assert(sizeof(meshtastic_NodeInfoLite) <= 130, "NodeInfoLite size increas
 #endif
 #endif
 
-/// max number of nodes allowed in the nodeDB
+/// max number of nodes allowed in the nodeDB (the full-NodeInfoLite "hot +
+/// short-tail" store; see .notes/nodedb-3tier-sizing.md). Long-tail identity
+/// retention for evicted nodes is handled by the warm tier (WARM_NODE_COUNT).
 #ifndef MAX_NUM_NODES
 #if defined(ARCH_STM32WL)
 #define MAX_NUM_NODES 10
-#elif defined(ARCH_NRF52)
-#define MAX_NUM_NODES 150
-#elif defined(CONFIG_IDF_TARGET_ESP32S3)
-#include "Esp.h"
-static inline int get_max_num_nodes()
-{
-    uint32_t flash_size = ESP.getFlashChipSize() / (1024 * 1024); // Convert Bytes to MB
-    if (flash_size >= 15) {
-        return 250;
-    } else if (flash_size >= 7) {
-        return 200;
-    } else {
-        return 100;
-    }
-}
-#define MAX_NUM_NODES get_max_num_nodes()
 #else
-#define MAX_NUM_NODES 100
+#define MAX_NUM_NODES 80
+#endif
+#endif
+
+/// Cap on each satellite map (position/telemetry/environment/status). Only the
+/// MAX_SATELLITE_NODES most-recently-heard nodes keep satellite payloads; the
+/// rest of the hot store carries just the 96 B NodeInfoLite header. This is
+/// what bounds both heap (the maps are ~408 B/node worst case) and the
+/// nodes.proto file size.
+#ifndef MAX_SATELLITE_NODES
+#define MAX_SATELLITE_NODES (MAX_NUM_NODES / 2)
+#endif
+
+/// Warm tier: number of 40 B {num, last_heard, public_key} records retained
+/// for nodes evicted from the hot store, primarily so DMs to/from them keep
+/// decrypting. 0 disables the tier entirely.
+/// nRF52840: sized to fill the two 16 KB raw-flash copies reclaimed from the
+/// app region after LTO (see WarmNodeStore.h); (16384 - 16) / 40 = 409.
+#ifndef WARM_NODE_COUNT
+#if defined(ARCH_STM32WL)
+#define WARM_NODE_COUNT 0
+#elif defined(NRF52840_XXAA)
+#define WARM_NODE_COUNT 400
+#elif defined(ARCH_NRF52)
+#define WARM_NODE_COUNT 128 // non-840 nRF52: file-backed in the 28 KB LittleFS, keep small
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+#define WARM_NODE_COUNT 2000 // PSRAM-backed when available
+#else
+#define WARM_NODE_COUNT 320
 #endif
 #endif
 

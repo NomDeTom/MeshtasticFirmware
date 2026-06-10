@@ -695,6 +695,39 @@ template <typename Map> std::vector<NodeNum> snapshotSatelliteNodeNums(const Map
     }
     return result;
 }
+
+// Drop the stalest entry of `map` (staleness proxied via the owner's
+// last_heard; 0 = owner evicted, i.e. an orphan — first out). Never evicts our
+// own node's entry. Caller holds satelliteMutex. Returns false if nothing
+// could be evicted.
+template <typename Map> bool evictStalestSatellite(NodeDB &db, Map &map)
+{
+    auto victim = map.end();
+    uint32_t victimTs = UINT32_MAX;
+    for (auto it = map.begin(); it != map.end(); ++it) {
+        if (it->first == db.getNodeNum())
+            continue;
+        uint32_t ts = db.hotNodeLastHeard(it->first);
+        if (ts < victimTs) {
+            victimTs = ts;
+            victim = it;
+        }
+    }
+    if (victim == map.end())
+        return false;
+    map.erase(victim);
+    return true;
+}
+
+// Keep `map` within MAX_SATELLITE_NODES ahead of inserting `incoming` (the
+// tier-1/tier-2 split: only the freshest MAX_SATELLITE_NODES nodes carry
+// satellite payloads). Caller holds satelliteMutex.
+template <typename Map> void evictSatelliteOverCap(NodeDB &db, Map &map, NodeNum incoming)
+{
+    if (map.size() < MAX_SATELLITE_NODES || map.count(incoming))
+        return;
+    evictStalestSatellite(db, map);
+}
 } // namespace
 
 void NodeDB::resetRadioConfig(bool is_fresh_install)
@@ -734,6 +767,12 @@ bool NodeDB::factoryReset(bool eraseBleBonds)
     if (transmitHistory) {
         transmitHistory->clear();
     }
+#if WARM_NODE_COUNT > 0
+    // On nRF52840 the warm tier lives in raw flash outside /prefs, so rmDir
+    // didn't touch it; clear it and persist the empty store.
+    warmStore.clear();
+    warmStore.saveIfDirty();
+#endif
     // second, install default state (this will deal with the duplicate mac address issue)
     installDefaultNodeDatabase();
     installDefaultDeviceState();
@@ -1304,6 +1343,9 @@ void NodeDB::resetNodes(bool keepFavorites)
         std::fill(nodeDatabase.nodes.begin() + 1, nodeDatabase.nodes.end(), meshtastic_NodeInfoLite());
     }
     (void)ourNum;
+#if WARM_NODE_COUNT > 0
+    warmStore.clear(); // warm entries are never favorites; a DB reset clears them too
+#endif
     devicestate.has_rx_waypoint = false;
     saveNodeDatabaseToDisk();
     saveDeviceStateToDisk();
@@ -1325,6 +1367,10 @@ void NodeDB::removeNodeByNum(NodeNum nodeNum)
               meshtastic_NodeInfoLite());
     if (removed)
         eraseNodeSatellites(nodeNum);
+#if WARM_NODE_COUNT > 0
+    // Explicit user removal: don't let the warm tier resurrect the node
+    warmStore.remove(nodeNum);
+#endif
     LOG_DEBUG("NodeDB::removeNodeByNum purged %d entries. Save changes", removed);
     saveNodeDatabaseToDisk();
 }
@@ -1438,6 +1484,7 @@ void NodeDB::setNodeStatus(NodeNum n, const meshtastic_StatusMessage &status)
     (void)status;
 #else
     concurrency::LockGuard guard(&satelliteMutex);
+    evictSatelliteOverCap(*this, nodeStatus, n);
     nodeStatus[n] = status;
 #endif
 }
@@ -1449,6 +1496,7 @@ void NodeDB::touchNodePositionTime(NodeNum n, uint32_t time)
     (void)time;
 #else
     concurrency::LockGuard guard(&satelliteMutex);
+    evictSatelliteOverCap(*this, nodePositions, n);
     nodePositions[n].time = time;
 #endif
 }
@@ -1470,6 +1518,34 @@ void NodeDB::eraseNodeSatellites(NodeNum n)
 #endif
 }
 
+void NodeDB::enforceSatelliteCaps()
+{
+    concurrency::LockGuard guard(&satelliteMutex);
+    auto trim = [this](auto &map, const char *name) {
+        const size_t before = map.size();
+        while (map.size() > MAX_SATELLITE_NODES) {
+            if (!evictStalestSatellite(*this, map))
+                break;
+        }
+        if (map.size() != before)
+            LOG_INFO("Trimmed %s satellites %u -> %u (cap %d)", name, (unsigned)before, (unsigned)map.size(),
+                     MAX_SATELLITE_NODES);
+    };
+#if !MESHTASTIC_EXCLUDE_POSITIONDB
+    trim(nodePositions, "position");
+#endif
+#if !MESHTASTIC_EXCLUDE_TELEMETRYDB
+    trim(nodeTelemetry, "telemetry");
+#endif
+#if !MESHTASTIC_EXCLUDE_ENVIRONMENTDB
+    trim(nodeEnvironment, "environment");
+#endif
+#if !MESHTASTIC_EXCLUDE_STATUSDB
+    trim(nodeStatus, "status");
+#endif
+    (void)trim; // all four maps may be compiled out
+}
+
 void NodeDB::cleanupMeshDB()
 {
     int newPos = 0, removed = 0;
@@ -1488,8 +1564,15 @@ void NodeDB::cleanupMeshDB()
         } else {
             // No user info - drop this node and its satellites
             const NodeNum gone = n.num;
-            if (gone)
+            if (gone) {
+#if WARM_NODE_COUNT > 0
+                // Keep any key we learned (e.g. via a DM before the NodeInfo
+                // exchange completed) rather than losing it with the purge.
+                if (n.public_key.size == 32)
+                    warmStore.absorb(gone, n.last_heard, n.public_key.bytes);
+#endif
                 eraseNodeSatellites(gone);
+            }
             removed++;
         }
     }
@@ -1711,6 +1794,14 @@ void NodeDB::loadFromDisk()
         numMeshNodes = MAX_NUM_NODES;
     }
     meshNodes->resize(MAX_NUM_NODES);
+
+    // Files written before the satellite cap (or by a larger-cap build) can
+    // carry more satellite entries than we keep; trim to the freshest.
+    enforceSatelliteCaps();
+
+#if WARM_NODE_COUNT > 0
+    warmStore.load();
+#endif
 
     // static DeviceState scratch; We no longer read into a tempbuf because this structure is 15KB of valuable RAM
     state = loadProto(deviceStateFileName, meshtastic_DeviceState_size, sizeof(meshtastic_DeviceState),
@@ -2092,6 +2183,11 @@ bool NodeDB::saveNodeDatabaseToDisk()
     nodeDatabase.environment.shrink_to_fit();
     nodeDatabase.status.clear();
     nodeDatabase.status.shrink_to_fit();
+#if WARM_NODE_COUNT > 0
+    // Same cadence as the node DB; failure is logged but must not propagate —
+    // a false return from here would trigger saveToDisk()'s fsFormat() path.
+    warmStore.saveIfDirty();
+#endif
     return ok;
 }
 
@@ -2312,6 +2408,7 @@ void NodeDB::updatePosition(uint32_t nodeId, const meshtastic_Position &p, RxSou
 #else
     {
         concurrency::LockGuard guard(&satelliteMutex);
+        evictSatelliteOverCap(*this, nodePositions, nodeId);
         meshtastic_PositionLite &slot = nodePositions[nodeId]; // creates default-zero entry if missing
 
         if (src == RX_SRC_LOCAL) {
@@ -2369,6 +2466,7 @@ void NodeDB::updateTelemetry(uint32_t nodeId, const meshtastic_Telemetry &t, RxS
         }
 #if !MESHTASTIC_EXCLUDE_TELEMETRYDB
         concurrency::LockGuard guard(&satelliteMutex);
+        evictSatelliteOverCap(*this, nodeTelemetry, nodeId);
         nodeTelemetry[nodeId] = t.variant.device_metrics;
 #endif
     } else if (t.which_variant == meshtastic_Telemetry_environment_metrics_tag) {
@@ -2379,6 +2477,7 @@ void NodeDB::updateTelemetry(uint32_t nodeId, const meshtastic_Telemetry &t, RxS
         }
 #if !MESHTASTIC_EXCLUDE_ENVIRONMENTDB
         concurrency::LockGuard guard(&satelliteMutex);
+        evictSatelliteOverCap(*this, nodeEnvironment, nodeId);
         nodeEnvironment[nodeId] = t.variant.environment_metrics;
 #endif
     } else {
@@ -2414,6 +2513,9 @@ void NodeDB::addFromContact(meshtastic_SharedContact contact)
         nodeInfoLiteSetBit(info, NODEINFO_BITFIELD_IS_IGNORED_MASK, true);
         nodeInfoLiteSetBit(info, NODEINFO_BITFIELD_IS_FAVORITE_MASK, false);
         eraseNodeSatellites(contact.node_num);
+#if WARM_NODE_COUNT > 0
+        warmStore.remove(contact.node_num); // ignored: drop the retained key too
+#endif
         info->public_key.size = 0;
         memset(info->public_key.bytes, 0, sizeof(info->public_key.bytes));
     } else {
@@ -2709,6 +2811,30 @@ bool NodeDB::isFull()
     return (numMeshNodes >= MAX_NUM_NODES) || (memGet.getFreeHeap() < MINIMUM_SAFE_FREE_HEAP);
 }
 
+uint32_t NodeDB::hotNodeLastHeard(NodeNum n) const
+{
+    for (int i = 0; i < numMeshNodes; i++)
+        if (meshNodes->at(i).num == n)
+            return meshNodes->at(i).last_heard;
+    return 0;
+}
+
+bool NodeDB::copyPublicKey(NodeNum n, meshtastic_NodeInfoLite_public_key_t &out)
+{
+    const meshtastic_NodeInfoLite *info = getMeshNode(n);
+    if (info && info->public_key.size == 32) {
+        out = info->public_key;
+        return true;
+    }
+#if WARM_NODE_COUNT > 0
+    if (warmStore.copyKey(n, out.bytes)) {
+        out.size = 32;
+        return true;
+    }
+#endif
+    return false;
+}
+
 /// Find a node in our DB, create an empty NodeInfo if missing
 meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
 {
@@ -2745,7 +2871,14 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
             }
 
             if (oldestIndex != -1) {
-                eraseNodeSatellites(meshNodes->at(oldestIndex).num);
+                const meshtastic_NodeInfoLite &evicted = meshNodes->at(oldestIndex);
+#if WARM_NODE_COUNT > 0
+                // Demote to the warm tier so the identity (and crucially the
+                // PKI key) outlives the hot-store slot.
+                warmStore.absorb(evicted.num, evicted.last_heard,
+                                 evicted.public_key.size == 32 ? evicted.public_key.bytes : NULL);
+#endif
+                eraseNodeSatellites(evicted.num);
                 // Shove the remaining nodes down the chain
                 for (int i = oldestIndex; i < numMeshNodes - 1; i++) {
                     meshNodes->at(i) = meshNodes->at(i + 1);
@@ -2759,6 +2892,18 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
         // everything is missing except the nodenum
         memset(lite, 0, sizeof(*lite));
         lite->num = n;
+#if WARM_NODE_COUNT > 0
+        // Re-admission: restore what the warm tier kept for this node
+        WarmNodeEntry warm;
+        if (warmStore.take(n, warm)) {
+            lite->last_heard = warm.last_heard;
+            if (!memfll(warm.public_key, 0, sizeof(warm.public_key))) {
+                lite->public_key.size = 32;
+                memcpy(lite->public_key.bytes, warm.public_key, 32);
+            }
+            LOG_INFO("Rehydrated node 0x%x from warm tier (key=%d)", n, lite->public_key.size == 32);
+        }
+#endif
         LOG_INFO("Adding node to database with %i nodes and %u bytes free!", numMeshNodes, memGet.getFreeHeap());
     }
 
