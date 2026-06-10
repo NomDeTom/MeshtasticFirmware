@@ -10,6 +10,10 @@
 
 #if HAS_TRAFFIC_MANAGEMENT
 
+#include "airtime.h"
+#if HAS_VARIABLE_HOPS
+#include "modules/HopScalingModule.h"
+#endif
 #include "mesh/CryptoEngine.h"
 #include "mesh/MeshService.h"
 #include "mesh/NodeDB.h"
@@ -27,6 +31,45 @@ namespace
 constexpr NodeNum kLocalNode = 0x11111111;
 constexpr NodeNum kRemoteNode = 0x22222222;
 constexpr NodeNum kTargetNode = 0x33333333;
+
+// Telemetry hop exhaustion is gated on channel congestion (alterReceived checks
+// airTime->isTxAllowedChannelUtil/isTxAllowedAirUtil). Installs a global
+// airTime reporting 100% channel utilization for the enclosing scope.
+class ScopedBusyAirTime
+{
+  public:
+    ScopedBusyAirTime() : previous(airTime)
+    {
+        for (uint32_t i = 0; i < CHANNEL_UTILIZATION_PERIODS; i++)
+            busy.channelUtilization[i] = 10000; // 10 s of airtime per 10 s period
+        airTime = &busy;
+    }
+    ~ScopedBusyAirTime() { airTime = previous; }
+
+  private:
+    AirTime busy;
+    AirTime *previous;
+};
+
+#if HAS_VARIABLE_HOPS
+// Telemetry exhaustion also fires once a relayed broadcast has traveled the
+// HopScaling-recommended radius. Installs a global hopScalingModule pinned to
+// `requiredHop` for the enclosing scope.
+class ScopedMeshRadius
+{
+  public:
+    explicit ScopedMeshRadius(uint8_t requiredHop) : previous(hopScalingModule)
+    {
+        shim.setLastRequiredHop(requiredHop);
+        hopScalingModule = &shim;
+    }
+    ~ScopedMeshRadius() { hopScalingModule = previous; }
+
+  private:
+    HopScalingModule shim;
+    HopScalingModule *previous;
+};
+#endif
 
 class MockNodeDB : public NodeDB
 {
@@ -673,12 +716,15 @@ static void test_tm_nodeinfo_directResponse_psramMissDoesNotFallbackToNodeDb(voi
 #endif
 
 /**
- * Verify relayed telemetry broadcasts are hop-exhausted when enabled.
+ * Verify relayed telemetry broadcasts are hop-exhausted when enabled AND the
+ * channel is congested (telemetry exhaustion is gated on channel utilization,
+ * unlike position exhaustion).
  * Important to prevent further mesh propagation while still allowing one relay step.
  */
 static void test_tm_alterReceived_exhaustsRelayedTelemetryBroadcast(void)
 {
     moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    ScopedBusyAirTime busyChannel;
     TrafficManagementModuleTestShim module;
     meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, NODENUM_BROADCAST);
     packet.hop_start = 5;
@@ -693,6 +739,74 @@ static void test_tm_alterReceived_exhaustsRelayedTelemetryBroadcast(void)
     TEST_ASSERT_EQUAL_UINT32(1, stats.hop_exhausted_packets);
 }
 
+#if HAS_VARIABLE_HOPS
+/**
+ * Verify relayed telemetry broadcasts are exhausted on a QUIET channel once
+ * they have traveled the HopScaling-recommended hop radius — mesh density is
+ * a pressure signal independent of instantaneous airtime.
+ */
+static void test_tm_alterReceived_exhaustsTelemetryBeyondMeshRadius(void)
+{
+    moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    ScopedMeshRadius meshRadius(2); // recommended radius 2; packet below has traveled 2
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, NODENUM_BROADCAST);
+    packet.hop_start = 5;
+    packet.hop_limit = 3;
+
+    module.alterReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT8(0, packet.hop_limit);
+    TEST_ASSERT_TRUE(module.shouldExhaustHops(packet));
+    TEST_ASSERT_EQUAL_UINT32(1, stats.hop_exhausted_packets);
+}
+
+/**
+ * Verify relayed telemetry broadcasts still within the recommended radius are
+ * NOT exhausted on a quiet channel.
+ */
+static void test_tm_alterReceived_telemetryWithinMeshRadius_notExhausted(void)
+{
+    moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    ScopedMeshRadius meshRadius(5); // recommended radius 5; packet has only traveled 2
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, NODENUM_BROADCAST);
+    packet.hop_start = 5;
+    packet.hop_limit = 3;
+
+    module.alterReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT8(3, packet.hop_limit);
+    TEST_ASSERT_FALSE(module.shouldExhaustHops(packet));
+    TEST_ASSERT_EQUAL_UINT32(0, stats.hop_exhausted_packets);
+}
+#endif // HAS_VARIABLE_HOPS
+
+/**
+ * Verify relayed telemetry broadcasts are NOT exhausted when the channel is
+ * quiet — telemetry exhaustion only fires under congestion, mirroring the
+ * airtime checks that gate self-generated telemetry.
+ */
+static void test_tm_alterReceived_telemetryNotExhaustedWhenChannelQuiet(void)
+{
+    moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    // No (or quiet) airTime: channelBusy is false, so the packet must pass through untouched
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, NODENUM_BROADCAST);
+    packet.hop_start = 5;
+    packet.hop_limit = 3;
+
+    module.alterReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT8(3, packet.hop_limit);
+    TEST_ASSERT_EQUAL_UINT8(5, packet.hop_start);
+    TEST_ASSERT_FALSE(module.shouldExhaustHops(packet));
+    TEST_ASSERT_EQUAL_UINT32(0, stats.hop_exhausted_packets);
+}
+
 /**
  * Verify hop exhaustion skips unicast and local-origin packets.
  * Important to avoid mutating traffic that should retain normal forwarding behavior.
@@ -700,6 +814,7 @@ static void test_tm_alterReceived_exhaustsRelayedTelemetryBroadcast(void)
 static void test_tm_alterReceived_skipsLocalAndUnicast(void)
 {
     moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    ScopedBusyAirTime busyChannel; // congestion satisfied, so only the skip conditions are under test
     TrafficManagementModuleTestShim module;
 
     meshtastic_MeshPacket unicast = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, kTargetNode);
@@ -817,8 +932,11 @@ static void test_tm_positionDedup_precision32_allowsDistinctPositions(void)
 }
 
 /**
- * Verify invalid precision=0 is treated as full precision.
- * Important so invalid config does not collapse all positions into one fingerprint.
+ * Verify precision=0 falls back to the default precision (same contract as
+ * >32: getConfiguredOrDefault + sanitizePositionPrecision treat 0 as unset).
+ * Important so invalid config does not collapse all positions into one
+ * fingerprint — positions in different default-precision grid cells must
+ * still be distinct.
  */
 static void test_tm_positionDedup_precisionZero_allowsDistinctPositions(void)
 {
@@ -828,7 +946,7 @@ static void test_tm_positionDedup_precisionZero_allowsDistinctPositions(void)
     TrafficManagementModuleTestShim module;
 
     meshtastic_MeshPacket first = makePositionPacket(kRemoteNode, 374221234, -1220845678);
-    meshtastic_MeshPacket second = makePositionPacket(kRemoteNode, 374221235, -1220845677);
+    meshtastic_MeshPacket second = makePositionPacket(kRemoteNode, 384221234, -1210845678);
 
     ProcessMessage r1 = module.handleReceived(first);
     ProcessMessage r2 = module.handleReceived(second);
@@ -1016,6 +1134,7 @@ static void test_tm_alterReceived_exhaustsRelayedPositionBroadcast(void)
 static void test_tm_alterReceived_skipsUndecodedPackets(void)
 {
     moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    ScopedBusyAirTime busyChannel; // congestion satisfied, so only the undecoded skip is under test
     TrafficManagementModuleTestShim module;
     meshtastic_MeshPacket packet = makeUnknownPacket(kRemoteNode, NODENUM_BROADCAST);
     packet.hop_start = 5;
@@ -1037,6 +1156,7 @@ static void test_tm_alterReceived_skipsUndecodedPackets(void)
 static void test_tm_alterReceived_resetExhaustFlagOnNextPacket(void)
 {
     moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    ScopedBusyAirTime busyChannel; // telemetry exhaust only fires under congestion
     TrafficManagementModuleTestShim module;
 
     meshtastic_MeshPacket telemetry = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, NODENUM_BROADCAST);
@@ -1062,6 +1182,7 @@ static void test_tm_alterReceived_resetExhaustFlagOnNextPacket(void)
 static void test_tm_alterReceived_exhaustFlag_isPacketScoped(void)
 {
     moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    ScopedBusyAirTime busyChannel; // telemetry exhaust only fires under congestion
     TrafficManagementModuleTestShim module;
 
     meshtastic_MeshPacket exhausted = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, NODENUM_BROADCAST);
@@ -1232,6 +1353,11 @@ TM_TEST_ENTRY void setup()
     RUN_TEST(test_tm_nodeinfo_directResponse_psramMissDoesNotFallbackToNodeDb);
 #endif
     RUN_TEST(test_tm_alterReceived_exhaustsRelayedTelemetryBroadcast);
+    RUN_TEST(test_tm_alterReceived_telemetryNotExhaustedWhenChannelQuiet);
+#if HAS_VARIABLE_HOPS
+    RUN_TEST(test_tm_alterReceived_exhaustsTelemetryBeyondMeshRadius);
+    RUN_TEST(test_tm_alterReceived_telemetryWithinMeshRadius_notExhausted);
+#endif
     RUN_TEST(test_tm_alterReceived_skipsLocalAndUnicast);
     RUN_TEST(test_tm_positionDedup_allowsDuplicateAfterIntervalExpires);
     RUN_TEST(test_tm_positionDedup_intervalZero_neverDrops);

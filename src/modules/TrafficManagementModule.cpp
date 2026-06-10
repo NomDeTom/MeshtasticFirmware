@@ -1,5 +1,9 @@
 #include "TrafficManagementModule.h"
 
+#if HAS_VARIABLE_HOPS
+#include "HopScalingModule.h"
+#endif
+
 #if HAS_TRAFFIC_MANAGEMENT
 
 #include "Default.h"
@@ -1124,11 +1128,24 @@ void TrafficManagementModule::alterReceived(meshtastic_MeshPacket &mp)
     const auto &cfg = moduleConfig.traffic_management;
     const bool isTelemetry = mp.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP;
     const bool isPosition = mp.decoded.portnum == meshtastic_PortNum_POSITION_APP;
-    // Only exhaust telemetry hops when channel is actually congested, mirroring the same
-    // airtime checks that gate self-generated telemetry in the telemetry modules.
+    // Telemetry exhaustion fires on either pressure signal:
+    //  - channelBusy: instantaneous local RF congestion, mirroring the airtime
+    //    checks that gate self-generated telemetry in the telemetry modules.
+    //  - beyondMeshRadius: the packet has already traveled the hop radius the
+    //    HopScaling histogram says reaches the target node population (the same
+    //    limit Router applies to our own routine broadcasts), so further relays
+    //    are diminishing returns regardless of current channel load.
+    //    getLastRequiredHop() stays at HOP_MAX until the histogram warms, so
+    //    this is a no-op on cold boot and on sparse meshes.
     const bool channelBusy = airTime && (!airTime->isTxAllowedChannelUtil(true) || !airTime->isTxAllowedAirUtil());
-    const bool shouldExhaust =
-        ((channelBusy && isTelemetry && cfg.exhaust_hop_telemetry) || (isPosition && cfg.exhaust_hop_position));
+#if HAS_VARIABLE_HOPS
+    const int8_t hopsUsed = getHopsAway(mp);
+    const bool beyondMeshRadius = hopScalingModule && hopsUsed >= 0 && hopsUsed >= hopScalingModule->getLastRequiredHop();
+#else
+    const bool beyondMeshRadius = false;
+#endif
+    const bool shouldExhaust = (((channelBusy || beyondMeshRadius) && isTelemetry && cfg.exhaust_hop_telemetry) ||
+                                (isPosition && cfg.exhaust_hop_position));
 
     if (!shouldExhaust || !isBroadcast(mp.to))
         return;
@@ -1473,7 +1490,11 @@ bool TrafficManagementModule::isRateLimited(NodeNum from, uint32_t nowMs)
         return false;
     }
 
-    // Increment counter (saturates at 255)
+    // Increment counter (saturates at 255). Capture saturation first: once the
+    // counter is pinned at 255, `count > threshold` can never fire for a
+    // clamped threshold of 255, which would silently disable rate limiting for
+    // any configured threshold >= 255.
+    const bool alreadySaturated = (entry->rate_count == UINT8_MAX);
     saturatingIncrement(entry->rate_count);
 
     // Check against threshold (uint8_t max is 255, but config is uint32_t)
@@ -1481,7 +1502,7 @@ bool TrafficManagementModule::isRateLimited(NodeNum from, uint32_t nowMs)
     if (threshold > 255)
         threshold = 255;
 
-    bool limited = entry->rate_count > threshold;
+    bool limited = entry->rate_count > threshold || (alreadySaturated && threshold == 255);
     if (limited || entry->rate_count == threshold) {
         TM_LOG_DEBUG("Rate limit 0x%08x: count=%u threshold=%u -> %s", from, entry->rate_count, threshold,
                      limited ? "DROP" : "at-limit");
@@ -1516,7 +1537,9 @@ bool TrafficManagementModule::shouldDropUnknown(const meshtastic_MeshPacket *p, 
         entry->unknown_count = 0;
     }
 
-    // Increment counter (saturates at 255)
+    // Increment counter (saturates at 255). Same saturation handling as
+    // isRateLimited: without it, a clamped threshold of 255 can never fire.
+    const bool alreadySaturated = (entry->unknown_count == UINT8_MAX);
     saturatingIncrement(entry->unknown_count);
 
     // Check against threshold
@@ -1524,7 +1547,7 @@ bool TrafficManagementModule::shouldDropUnknown(const meshtastic_MeshPacket *p, 
     if (threshold > 255)
         threshold = 255;
 
-    bool drop = entry->unknown_count > threshold;
+    bool drop = entry->unknown_count > threshold || (alreadySaturated && threshold == 255);
     if (drop || entry->unknown_count == threshold) {
         TM_LOG_DEBUG("Unknown packets 0x%08x: count=%u threshold=%u -> %s", p->from, entry->unknown_count, threshold,
                      drop ? "DROP" : "at-limit");
