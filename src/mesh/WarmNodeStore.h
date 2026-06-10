@@ -27,17 +27,6 @@ struct WarmNodeEntry {
 };
 static_assert(sizeof(WarmNodeEntry) == 40, "WarmNodeEntry must stay 40 B — persistence format depends on it");
 
-#ifdef NRF52840_XXAA
-// Persistence on nRF52840 uses two raw internal-flash copies (ping-pong) in
-// the top 8 pages of the app region — space reclaimed by whole-image LTO.
-// The linker script caps the image at WARM_FLASH_REGION_BASE and
-// extra_scripts/nrf52_warm_region.py fails the build if an image grows into
-// the region. LittleFS (28 KB at 0xED000) is untouched.
-#define WARM_FLASH_COPY_BYTES 16384u                                            // 4 × 4 KB pages per copy
-#define WARM_FLASH_REGION_BASE (0xED000u - 2u * WARM_FLASH_COPY_BYTES)          // 0xE5000
-#define WARM_FLASH_COPY_ADDR(i) (WARM_FLASH_REGION_BASE + (i)*WARM_FLASH_COPY_BYTES)
-#endif
-
 class WarmNodeStore
 {
   public:

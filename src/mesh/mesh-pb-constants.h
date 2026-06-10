@@ -97,18 +97,15 @@ static_assert(sizeof(meshtastic_NodeInfoLite) <= 130, "NodeInfoLite size increas
 
 /// Warm tier: number of 40 B {num, last_heard, public_key} records retained
 /// for nodes evicted from the hot store, primarily so DMs to/from them keep
-/// decrypting. 0 disables the tier entirely.
-/// nRF52840: sized to fill the two 16 KB raw-flash copies reclaimed from the
-/// app region after LTO (see WarmNodeStore.h); (16384 - 16) / 40 = 409.
+/// decrypting. 0 disables the tier entirely. Persisted to /prefs/warm.dat,
+/// so the count is bounded by the platform's filesystem budget.
 #ifndef WARM_NODE_COUNT
 #if defined(ARCH_STM32WL)
 #define WARM_NODE_COUNT 0
-#elif defined(NRF52840_XXAA)
-#define WARM_NODE_COUNT 400
 #elif defined(ARCH_NRF52)
-#define WARM_NODE_COUNT 128 // non-840 nRF52: file-backed in the 28 KB LittleFS, keep small
+#define WARM_NODE_COUNT 128 // warm.dat ~5.1 KB; must fit the 28 KB internal-flash LittleFS
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
-#define WARM_NODE_COUNT 2000 // PSRAM-backed when available
+#define WARM_NODE_COUNT 2000 // PSRAM-backed when available; warm.dat ~80 KB
 #else
 #define WARM_NODE_COUNT 320
 #endif

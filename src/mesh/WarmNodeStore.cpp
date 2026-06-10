@@ -10,15 +10,10 @@
 #include <ErriezCRC32.h>
 #include <vector>
 
-#ifdef NRF52840_XXAA
-#include "flash/flash_nrf5x.h"
-#endif
-
-// Shared by the raw-flash and file backends. The header is written after the
-// entries so a torn write leaves a CRC mismatch instead of a plausible record.
+// warm.dat layout: this header followed by count packed WarmNodeEntry records.
 struct WarmStoreHeader {
     uint32_t magic;     // WARM_STORE_MAGIC
-    uint32_t seq;       // ping-pong generation counter (0 for the file backend)
+    uint32_t reserved;  // 0; kept so the header stays 16 B
     uint16_t count;     // entries persisted
     uint16_t entrySize; // sizeof(WarmNodeEntry), format guard
     uint32_t crc;       // crc32 over count * entrySize bytes
@@ -27,7 +22,7 @@ static_assert(sizeof(WarmStoreHeader) == 16, "header layout is part of the persi
 
 #define WARM_STORE_MAGIC 0x314D5257u // "WRM1"
 
-#if !defined(NRF52840_XXAA) && defined(FSCom)
+#ifdef FSCom
 static const char *warmFileName = "/prefs/warm.dat";
 #endif
 
@@ -189,99 +184,9 @@ bool WarmNodeStore::saveIfDirty()
     return ok;
 }
 
-#ifdef NRF52840_XXAA
+#ifdef FSCom
 
-// ---- Raw internal-flash ping-pong backend (nRF52840) -----------------------
-// Two 16 KB copies just below the LittleFS partition, in app-region flash
-// reclaimed by LTO. flash_nrf5x_* is the same SoftDevice-safe HAL InternalFS
-// uses; spiLock serializes us against LittleFS's shared page cache.
-
-static bool readHeader(uint32_t addr, WarmStoreHeader &h)
-{
-    flash_nrf5x_read(&h, addr, sizeof(h));
-    return h.magic == WARM_STORE_MAGIC && h.entrySize == sizeof(WarmNodeEntry) && h.count <= WARM_NODE_COUNT &&
-           sizeof(WarmStoreHeader) + (size_t)h.count * sizeof(WarmNodeEntry) <= WARM_FLASH_COPY_BYTES;
-}
-
-void WarmNodeStore::load()
-{
-    if (!entries)
-        return;
-    concurrency::LockGuard g(spiLock);
-
-    uint32_t bestSeq = 0;
-    int best = -1;
-    for (int i = 0; i < 2; i++) {
-        WarmStoreHeader h;
-        if (!readHeader(WARM_FLASH_COPY_ADDR(i), h))
-            continue;
-        // Validate the CRC before trusting the copy
-        std::vector<WarmNodeEntry> buf(h.count);
-        if (h.count)
-            flash_nrf5x_read(buf.data(), WARM_FLASH_COPY_ADDR(i) + sizeof(h), h.count * sizeof(WarmNodeEntry));
-        if (crc32Buffer(buf.data(), h.count * sizeof(WarmNodeEntry)) != h.crc)
-            continue;
-        if (best < 0 || (int32_t)(h.seq - bestSeq) > 0) {
-            best = i;
-            bestSeq = h.seq;
-        }
-    }
-    if (best < 0) {
-        LOG_INFO("WarmStore: no valid flash copy found, starting empty");
-        return;
-    }
-
-    WarmStoreHeader h;
-    readHeader(WARM_FLASH_COPY_ADDR(best), h);
-    if (h.count)
-        flash_nrf5x_read(entries, WARM_FLASH_COPY_ADDR(best) + sizeof(h), h.count * sizeof(WarmNodeEntry));
-    LOG_INFO("WarmStore: loaded %u warm nodes (copy %d, seq %u)", h.count, best, (unsigned)h.seq);
-}
-
-bool WarmNodeStore::save()
-{
-    if (!entries)
-        return false;
-    if (!powerHAL_isPowerLevelSafe()) {
-        LOG_ERROR("Error: trying to save WarmStore on unsafe device power level.");
-        return false;
-    }
-    concurrency::LockGuard g(spiLock);
-
-    // Figure out which copy is current so we overwrite the other one
-    uint32_t curSeq = 0;
-    int cur = -1;
-    for (int i = 0; i < 2; i++) {
-        WarmStoreHeader h;
-        if (readHeader(WARM_FLASH_COPY_ADDR(i), h) && (cur < 0 || (int32_t)(h.seq - curSeq) > 0)) {
-            cur = i;
-            curSeq = h.seq;
-        }
-    }
-    const int target = (cur == 0) ? 1 : 0;
-    const uint32_t addr = WARM_FLASH_COPY_ADDR(target);
-
-    std::vector<WarmNodeEntry> packed(WARM_NODE_COUNT);
-    WarmStoreHeader h;
-    h.magic = WARM_STORE_MAGIC;
-    h.seq = curSeq + 1;
-    h.count = packEntries(entries, packed.data());
-    h.entrySize = sizeof(WarmNodeEntry);
-    h.crc = crc32Buffer(packed.data(), h.count * sizeof(WarmNodeEntry));
-
-    // Entries first, header last: a torn write fails CRC and load() falls back
-    // to the other copy.
-    if (h.count)
-        flash_nrf5x_write(addr + sizeof(h), packed.data(), h.count * sizeof(WarmNodeEntry));
-    flash_nrf5x_write(addr, &h, sizeof(h));
-    flash_nrf5x_flush();
-    LOG_DEBUG("WarmStore: saved %u warm nodes (copy %d, seq %u)", h.count, target, (unsigned)h.seq);
-    return true;
-}
-
-#elif defined(FSCom)
-
-// ---- File backend (ESP32 / RP2040 / portduino / non-840 nRF52) -------------
+// ---- File persistence: /prefs/warm.dat on the platform filesystem ----------
 
 void WarmNodeStore::load()
 {
@@ -319,7 +224,7 @@ bool WarmNodeStore::save()
     std::vector<WarmNodeEntry> packed(WARM_NODE_COUNT);
     WarmStoreHeader h;
     h.magic = WARM_STORE_MAGIC;
-    h.seq = 0;
+    h.reserved = 0;
     h.count = packEntries(entries, packed.data());
     h.entrySize = sizeof(WarmNodeEntry);
     h.crc = crc32Buffer(packed.data(), h.count * sizeof(WarmNodeEntry));
