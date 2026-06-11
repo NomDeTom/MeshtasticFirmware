@@ -69,8 +69,8 @@ typedef PB_BYTES_ARRAY_T(32) meshtastic_NodeInfoLite_public_key_t;
 typedef struct _meshtastic_NodeInfoLite {
     /* The node number */
     uint32_t num;
-    /* Returns the Signal-to-noise ratio (SNR) of the last received message,
- as measured by the receiver. Return SNR of the last received message in dB */
+    /* In-memory SNR of the last received message in dB. Not serialised directly:
+ always zeroed before encode; persisted as snr_q4 = 19 below. */
     float snr;
     /* Set to indicate the last time we received a packet from this node */
     uint32_t last_heard;
@@ -94,7 +94,9 @@ typedef struct _meshtastic_NodeInfoLite {
     meshtastic_Config_DeviceConfig_Role role;
     /* The public key of the user's device, for PKI-based encrypted DMs. */
     meshtastic_NodeInfoLite_public_key_t public_key;
-    /* Q4-encoded SNR: dB x4, sint32 zigzag. Decode: snr = snr_q4 / 4.0f */
+    /* Q4-encoded SNR: dB × 4, sint32 zigzag. Matches RouteDiscovery convention.
+ Encode: snr_q4 = (int32_t)(snr * 4.0f). Decode: snr = snr_q4 / 4.0f.
+ float snr is always zeroed on disk; this field carries all persisted SNR. */
     int32_t snr_q4;
 } meshtastic_NodeInfoLite;
 
