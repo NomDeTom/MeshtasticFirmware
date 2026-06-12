@@ -33,9 +33,9 @@ NRF52 PRO MICRO PIN ASSIGNMENT
 | P0.20 | GPS_TX      |     | P0.29    | BUSY         | DIO0  |
 | P0.22 | GPS_RX      |     | P0.02    | MISO         | MISO  |
 | P0.24 | GPS_EN      |     | P1.15    | MOSI         | MOSI  |
-| P1.00 | BUTTON_PIN  |     | P1.13    | CS           | CS    |
+| P1.00 | SDA  |     | P1.13    | CS           | CS    |
 | P0.11 | SCL         |     | P1.11    | SCK          | SCK   |
-| P1.04 | SDA         |     | P0.10    | DIO1/IRQ     | DIO1  |
+| P1.04 | BUTTON_PIN         |     | P0.10    | DIO1/IRQ     | DIO1  |
 | P1.06 | Free pin    |     | P0.09    | RESET        | RST   |
 |       |             |     |          |              |       |
 |       | Mid board   |     |          | Internal     |       |
@@ -76,7 +76,7 @@ NRF52 PRO MICRO PIN ASSIGNMENT
 // WIRE IC AND IIC PINS
 #define WIRE_INTERFACES_COUNT 1
 
-#define PIN_WIRE_SDA (32 + 4) // P1.04
+#define PIN_WIRE_SDA (32 + 0) // P1.00
 #define PIN_WIRE_SCL (0 + 11) // P0.11
 
 // LED
@@ -86,7 +86,7 @@ NRF52 PRO MICRO PIN ASSIGNMENT
 #define LED_STATE_ON 1 // State when LED is lit
 
 // Button
-#define BUTTON_PIN (32 + 0) // P1.00
+#define BUTTON_PIN (32 + 4) // P1.04
 
 // GPS
 #define GPS_TX_PIN (0 + 20) // P0.20 - This is data from the MCU
