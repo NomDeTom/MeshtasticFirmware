@@ -1,11 +1,16 @@
 #include "TrafficManagementModule.h"
 
+#if HAS_VARIABLE_HOPS
+#include "HopScalingModule.h"
+#endif
+
 #if HAS_TRAFFIC_MANAGEMENT
 
 #include "Channels.h"
 #include "Default.h"
 #include "MeshService.h"
 #include "NodeDB.h"
+#include "PositionPrecision.h"
 #include "Router.h"
 #include "TypeConversions.h"
 #include "airtime.h"
@@ -117,6 +122,26 @@ int32_t truncateLatLon(int32_t value, uint8_t precision)
 }
 
 /**
+ * Routine broadcast: the periodic per-node chatter (position, telemetry,
+ * nodeinfo, neighborinfo) that the role-aware throttles judge. Text, DMs,
+ * traceroute, waypoints, routing and admin traffic never qualify.
+ */
+bool isRoutineBroadcast(const meshtastic_MeshPacket &mp)
+{
+    if (mp.which_payload_variant != meshtastic_MeshPacket_decoded_tag || !isBroadcast(mp.to))
+        return false;
+    switch (mp.decoded.portnum) {
+    case meshtastic_PortNum_POSITION_APP:
+    case meshtastic_PortNum_TELEMETRY_APP:
+    case meshtastic_PortNum_NODEINFO_APP:
+    case meshtastic_PortNum_NEIGHBORINFO_APP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/**
  * Saturating increment for uint8_t counters.
  * Prevents overflow by capping at UINT8_MAX (255).
  */
@@ -184,8 +209,14 @@ TrafficManagementModule::TrafficManagementModule() : MeshModule("TrafficManageme
     // Resolution = max(60, min(339, interval/2)) for ~24 hour range with good precision
     posTimeResolution = calcTimeResolution(Default::getConfiguredOrDefault(
         moduleConfig.traffic_management.position_min_interval_secs, default_traffic_mgmt_position_min_interval_secs));
-    rateTimeResolution = calcTimeResolution(moduleConfig.traffic_management.rate_limit_window_secs);
+    rateTimeResolution = calcTimeResolution(Default::getConfiguredOrDefault(
+        moduleConfig.traffic_management.rate_limit_window_secs, default_traffic_mgmt_rate_limit_window_secs));
     unknownTimeResolution = calcTimeResolution(kUnknownResetMs / 1000); // ~5 min default
+    portTimeResolution = calcTimeResolution(ONE_DAY / 2);               // telem/info intervals span up to 12h -> max range
+
+    // Unscaled fallback until the first maintenance pass snapshots node count
+    cachedRateWindowMs = secsToMs(Default::getConfiguredOrDefault(moduleConfig.traffic_management.rate_limit_window_secs,
+                                                                  default_traffic_mgmt_rate_limit_window_secs));
 
     const auto &cfg = moduleConfig.traffic_management;
     TM_LOG_INFO("Enabled: pos_dedup=%d nodeinfo_resp=%d rate_limit=%d drop_unknown=%d exhaust_telem=%d exhaust_pos=%d "
@@ -362,6 +393,10 @@ TrafficManagementModule::UnifiedCacheEntry *TrafficManagementModule::findOrCreat
             recency = e.rate_time;
         if (e.unknown_time > recency)
             recency = e.unknown_time;
+        if (e.telem_time > recency)
+            recency = e.telem_time;
+        if (e.info_time > recency)
+            recency = e.info_time;
         if (!victim || (hasHop == victimHasHop ? recency < victimRecency : !hasHop)) {
             victim = &e;
             victimHasHop = hasHop;
@@ -637,6 +672,8 @@ void TrafficManagementModule::rebaseEpoch(uint32_t nowMs)
         slideRelativeTime(cache[i].pos_time, slabMs, posTimeResolution);
         slideRelativeTime(cache[i].rate_time, slabMs, rateTimeResolution);
         slideRelativeTime(cache[i].unknown_time, slabMs, unknownTimeResolution);
+        slideRelativeTime(cache[i].telem_time, slabMs, portTimeResolution);
+        slideRelativeTime(cache[i].info_time, slabMs, portTimeResolution);
     }
 #else
     (void)nowMs;
@@ -705,6 +742,8 @@ ProcessMessage TrafficManagementModule::handleReceived(const meshtastic_MeshPack
     exhaustRequested = false; // Reset per-packet; may be set by alterReceived() below
     exhaustRequestedFrom = 0;
     exhaustRequestedId = 0;
+    politenessExhaustPending = false;
+    portIntervalExhaustPending = false;
     incrementStat(&stats.packets_inspected);
 
     const auto &cfg = moduleConfig.traffic_management;
@@ -762,7 +801,50 @@ ProcessMessage TrafficManagementModule::handleReceived(const meshtastic_MeshPack
     // GPS jitter within the configured precision.
 
     if (!isFromUs(&mp) && !isToUs(&mp)) {
-        if (cfg.position_dedup_enabled && channels.isPublicChannel(mp.channel) &&
+        const bool routine = isRoutineBroadcast(mp);
+        const meshtastic_Config_DeviceConfig_Role senderRole =
+            routine ? lookupSenderRole(getFrom(&mp)) : meshtastic_Config_DeviceConfig_Role_CLIENT;
+
+        // ---------------------------------------------------------------------
+        // Deprecated Roles
+        // ---------------------------------------------------------------------
+        // REPEATER and ROUTER_CLIENT are deprecated; their routine broadcasts
+        // are dropped outright. Their DMs/text/routing traffic still passes.
+
+        if (routine && (senderRole == meshtastic_Config_DeviceConfig_Role_REPEATER ||
+                        senderRole == meshtastic_Config_DeviceConfig_Role_ROUTER_CLIENT)) {
+            logAction("drop", &mp, "deprecated-role");
+            incrementStat(&stats.deprecated_role_drops);
+            ignoreRequest = true;        // Suppress NAK
+            return ProcessMessage::STOP; // Consumed — will not be rebroadcast
+        }
+
+#if USERPREFS_EVENT_MODE
+        // Event mode: event-set default channels should not carry relayed
+        // position broadcasts at all — drop rather than clamp.
+        if (cfg.precision_clamp_enabled && !owner.is_licensed && routine &&
+            mp.decoded.portnum == meshtastic_PortNum_POSITION_APP &&
+            (channels.isWellKnownChannel(mp.channel) || cfg.apply_to_private_channels)) {
+            logAction("drop", &mp, "event-mode-position");
+            incrementStat(&stats.precision_clamps);
+            ignoreRequest = true;        // Suppress NAK
+            return ProcessMessage::STOP; // Consumed — will not be rebroadcast
+        }
+#endif
+
+        // ---------------------------------------------------------------------
+        // Per-Port Frequency Policing
+        // ---------------------------------------------------------------------
+        // Judge routine broadcast frequency against the SENDER role's own
+        // scaled interval. Runs before position dedup so it sees the previous
+        // pos_time; a violation only exhausts hops (in alterReceived), never
+        // drops, so the sender's local area is still served.
+
+        if (cfg.port_interval_enabled && routine && (channels.isWellKnownChannel(mp.channel) || cfg.apply_to_private_channels)) {
+            checkPortInterval(mp, senderRole, nowMs);
+        }
+
+        if (cfg.position_dedup_enabled && channels.isWellKnownChannel(mp.channel) &&
             mp.decoded.portnum == meshtastic_PortNum_POSITION_APP) {
             meshtastic_Position pos = meshtastic_Position_init_zero;
             if (pb_decode_from_bytes(mp.decoded.payload.bytes, mp.decoded.payload.size, &meshtastic_Position_msg, &pos)) {
@@ -776,18 +858,51 @@ ProcessMessage TrafficManagementModule::handleReceived(const meshtastic_MeshPack
         }
 
         // ---------------------------------------------------------------------
-        // Rate Limiting
+        // Rate Limiting + Politeness Ladder
         // ---------------------------------------------------------------------
-        // Throttle nodes sending too many packets within a time window.
-        // Excludes routing and admin packets which are essential for mesh operation.
+        // Throttle nodes sending too many routine broadcasts per window, with
+        // the allowance derived from the SENDER's role baseline (a router is
+        // judged against router cadence, a client against client cadence).
+        // Text, DMs, traceroute, routing and admin traffic are never counted.
 
-        if (cfg.rate_limit_enabled && cfg.rate_limit_window_secs > 0 && cfg.rate_limit_max_packets > 0) {
-            if (mp.decoded.portnum != meshtastic_PortNum_ROUTING_APP && mp.decoded.portnum != meshtastic_PortNum_ADMIN_APP) {
-                if (isRateLimited(mp.from, nowMs)) {
-                    logAction("drop", &mp, "rate-limit");
-                    incrementStat(&stats.rate_limit_drops);
+        if (cfg.rate_limit_enabled && routine) {
+            uint32_t clientBaseline =
+                Default::getConfiguredOrDefault(cfg.rate_limit_max_packets, default_traffic_mgmt_rate_limit_max_packets);
+            if (clientBaseline > 255)
+                clientBaseline = 255;
+            const uint8_t allowedCount = Default::roleRateAllowance(senderRole, static_cast<uint8_t>(clientBaseline));
+
+            uint8_t rateCount = 0;
+            if (isRateLimited(getFrom(&mp), nowMs, allowedCount, &rateCount)) {
+                logAction("drop", &mp, "rate-limit");
+                incrementStat(&stats.rate_limit_drops);
+                ignoreRequest = true;        // Suppress NAK
+                return ProcessMessage::STOP; // Consumed — throttled packet will not be rebroadcast
+            }
+
+            // Politeness ladder: act on nodes that are BOTH frequent and loud,
+            //   rudeness = (observed_rate / allowed_rate) x (hop_start / suggested_hops)
+            // in x8 fixed point. Only evaluated on an active mesh (online nodes
+            // above the congestion-scaling threshold, or the channel is busy) —
+            // on a quiet mesh even a rude node is moderately OK. Senders that
+            // don't report hop_start (legacy) are skipped.
+            const bool meshActive = (cachedOnlineNodes > default_hop_scaling_min_target_nodes) ||
+                                    (airTime && (!airTime->isTxAllowedChannelUtil(true) || !airTime->isTxAllowedAirUtil()));
+            if (meshActive && mp.hop_start > 0 && allowedCount > 0) {
+                const uint8_t allowedHops = allowedHopsForSender(senderRole, mp.decoded.portnum);
+                const uint32_t rudeness8 = (static_cast<uint32_t>(rateCount) * mp.hop_start * 8U) /
+                                           (static_cast<uint32_t>(allowedCount) * (allowedHops ? allowedHops : 1));
+                uint32_t threshold8 =
+                    Default::getConfiguredOrDefault(cfg.politeness_threshold, default_traffic_mgmt_politeness_threshold_8ths);
+                if (rudeness8 > 2 * threshold8) {
+                    logAction("drop", &mp, "politeness");
+                    incrementStat(&stats.politeness_drops);
                     ignoreRequest = true;        // Suppress NAK
-                    return ProcessMessage::STOP; // Consumed — throttled packet will not be rebroadcast
+                    return ProcessMessage::STOP; // Consumed — extreme offender
+                }
+                if (rudeness8 > threshold8) {
+                    // Exhaustion is performed by alterReceived() on this packet
+                    politenessExhaustPending = true;
                 }
             }
         }
@@ -807,26 +922,77 @@ void TrafficManagementModule::alterReceived(meshtastic_MeshPacket &mp)
     if (isFromUs(&mp))
         return;
 
+    const auto &cfg = moduleConfig.traffic_management;
+    const bool isTelemetry = mp.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP;
+    const bool isPosition = mp.decoded.portnum == meshtastic_PortNum_POSITION_APP;
+
+    // -------------------------------------------------------------------------
+    // Position Precision Clamp (anti-doxing)
+    // -------------------------------------------------------------------------
+    // On well-known channels (single-byte or absent PSK with a default preset
+    // name), rewrite relayed position payloads that are more precise than the
+    // ceiling. Helps others not to dox themselves; never increases precision.
+    // Disabled entirely in ham mode — licensed traffic is in the clear by law
+    // and is not ours to rewrite.
+
+    if (cfg.precision_clamp_enabled && isPosition && isBroadcast(mp.to) && !owner.is_licensed &&
+        (channels.isWellKnownChannel(mp.channel) || cfg.apply_to_private_channels)) {
+        uint32_t maxBits = Default::getConfiguredOrDefault(cfg.precision_clamp_bits, default_traffic_mgmt_precision_clamp_bits);
+        if (maxBits < min_traffic_mgmt_precision_clamp_bits)
+            maxBits = min_traffic_mgmt_precision_clamp_bits;
+        if (maxBits > 32)
+            maxBits = 32;
+        bool clamped = false;
+        if (clampRelayedPositionPrecision(mp, maxBits, &clamped) && clamped) {
+            logAction("clamp", &mp, "precision");
+            incrementStat(&stats.precision_clamps);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Relayed Broadcast Hop Exhaustion
     // -------------------------------------------------------------------------
     // For relayed telemetry or position broadcasts from other nodes, optionally
     // set hop_limit=0 so they don't propagate further through the mesh.
+    // Exhaustion fires on either pressure signal:
+    //  - channelBusy: instantaneous local RF congestion, mirroring the airtime
+    //    checks that gate self-generated telemetry in the telemetry modules.
+    //  - beyondGraceRadius: the packet has already traveled the radius granted
+    //    to its SENDER — the HopScaling recommendation floored by the sender's
+    //    role, plus the configured hop grace — so other nodes always get
+    //    moderately more reach than we grant our own routine broadcasts.
+    //    getLastRequiredHop() stays at HOP_MAX until the histogram warms, so
+    //    this is a no-op on cold boot and on sparse meshes.
+    // The politeness ladder and port-interval policing (evaluated in
+    // handleReceived, which runs first) also request exhaustion via the
+    // pending flags, regardless of channel pressure.
 
-    const auto &cfg = moduleConfig.traffic_management;
-    const bool isTelemetry = mp.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP;
-    const bool isPosition = mp.decoded.portnum == meshtastic_PortNum_POSITION_APP;
-    // Only exhaust telemetry hops when channel is actually congested, mirroring the same
-    // airtime checks that gate self-generated telemetry in the telemetry modules.
     const bool channelBusy = airTime && (!airTime->isTxAllowedChannelUtil(true) || !airTime->isTxAllowedAirUtil());
-    const bool shouldExhaust =
-        ((channelBusy && isTelemetry && cfg.exhaust_hop_telemetry) || (isPosition && cfg.exhaust_hop_position));
+#if HAS_VARIABLE_HOPS
+    const int8_t hopsUsed = getHopsAway(mp);
+    const bool beyondGraceRadius =
+        hopScalingModule && hopsUsed >= 0 && hopsUsed >= allowedHopsForSender(lookupSenderRole(getFrom(&mp)), mp.decoded.portnum);
+#else
+    const bool beyondGraceRadius = false;
+#endif
+    const bool pressureExhaust = (channelBusy || beyondGraceRadius) &&
+                                 ((isTelemetry && cfg.exhaust_hop_telemetry) || (isPosition && cfg.exhaust_hop_position));
+    const bool shouldExhaust = pressureExhaust || politenessExhaustPending || portIntervalExhaustPending;
 
     if (!shouldExhaust || !isBroadcast(mp.to))
         return;
 
     if (mp.hop_limit > 0) {
-        const char *reason = isTelemetry ? "exhaust-hop-telemetry" : "exhaust-hop-position";
+        const char *reason;
+        if (pressureExhaust) {
+            reason = isTelemetry ? "exhaust-hop-telemetry" : "exhaust-hop-position";
+        } else if (politenessExhaustPending) {
+            reason = "politeness";
+            incrementStat(&stats.politeness_exhausts);
+        } else {
+            reason = "port-interval";
+            incrementStat(&stats.port_interval_exhausts);
+        }
         logAction("exhaust", &mp, reason);
         // Adjust hop_start so downstream nodes compute correct hopsAway (hop_start - hop_limit).
         // Without this, hop_limit=0 with original hop_start would show inflated hopsAway.
@@ -864,15 +1030,50 @@ int32_t TrafficManagementModule::runOnce()
         nextHopPreloaded = true;
     }
 
+    // -------------------------------------------------------------------------
+    // Per-pass snapshots for packet-rate paths
+    // -------------------------------------------------------------------------
+    // Online node count, congestion-stretched rate window, and the per-role
+    // per-port allowed intervals all involve O(n) walks or float math, so they
+    // are refreshed here once a minute instead of per packet.
+    {
+        const auto &cfg = moduleConfig.traffic_management;
+        cachedOnlineNodes = nodeDB ? static_cast<uint16_t>(nodeDB->getNumOnlineMeshNodes(true)) : 0;
+        cachedRateWindowMs = Default::getConfiguredOrDefaultMsScaled(
+            cfg.rate_limit_window_secs, default_traffic_mgmt_rate_limit_window_secs, cachedOnlineNodes);
+
+        uint32_t perm8 = Default::getConfiguredOrDefault(cfg.port_interval_permissiveness,
+                                                         default_traffic_mgmt_port_interval_permissiveness_8ths);
+        if (perm8 < 1)
+            perm8 = 1;
+        if (perm8 > 8)
+            perm8 = 8;
+
+        const meshtastic_Config_DeviceConfig_Role roles[2] = {meshtastic_Config_DeviceConfig_Role_CLIENT,
+                                                              meshtastic_Config_DeviceConfig_Role_ROUTER};
+        const TrafficType types[3] = {TrafficType::POSITION, TrafficType::TELEMETRY, TrafficType::NODEINFO};
+        for (int r = 0; r < 2; r++) {
+            for (int t = 0; t < 3; t++) {
+                const uint64_t ownMs = Default::roleScaledIntervalMs(roles[r], types[t], cachedOnlineNodes);
+                // Router positions get the full role interval with no
+                // permissiveness slack; everything else is scaled by perm8/8.
+                const bool noSlack = (r == 1 && types[t] == TrafficType::POSITION);
+                cachedPortIntervalMs[r][t] = static_cast<uint32_t>(noSlack ? ownMs : (ownMs * perm8) >> 3);
+            }
+        }
+    }
+
     // Calculate TTLs for cache expiration
     const uint32_t positionIntervalMs = secsToMs(Default::getConfiguredOrDefault(
         moduleConfig.traffic_management.position_min_interval_secs, default_traffic_mgmt_position_min_interval_secs));
     const uint32_t positionTtlMs = positionIntervalMs * 4;
 
-    const uint32_t rateIntervalMs = secsToMs(moduleConfig.traffic_management.rate_limit_window_secs);
-    const uint32_t rateTtlMs = (rateIntervalMs > 0) ? rateIntervalMs * 2 : (10 * 60 * 1000UL);
+    const uint32_t rateTtlMs = (cachedRateWindowMs > 0) ? cachedRateWindowMs * 2 : (10 * 60 * 1000UL);
 
     const uint32_t unknownTtlMs = kUnknownResetMs * 5;
+
+    // Telem/info port state spans up to the 12h router interval; keep two windows.
+    const uint32_t portTtlMs = secsToMs(ONE_DAY);
 
     // Sweep cache and clear expired entries
     uint16_t activeEntries = 0;
@@ -921,6 +1122,22 @@ int32_t TrafficManagementModule::runOnce()
             if (!isWithinWindow(nowMs, unknownTimeMs, unknownTtlMs)) {
                 cache[i].unknown_count = 0;
                 cache[i].unknown_time = 0;
+            } else {
+                anyValid = true;
+            }
+        }
+
+        // Check and clear expired per-port interval state
+        if (cache[i].telem_time != 0) {
+            if (!isWithinWindow(nowMs, fromRelativePortTime(cache[i].telem_time), portTtlMs)) {
+                cache[i].telem_time = 0;
+            } else {
+                anyValid = true;
+            }
+        }
+        if (cache[i].info_time != 0) {
+            if (!isWithinWindow(nowMs, fromRelativePortTime(cache[i].info_time), portTtlMs)) {
+                cache[i].info_time = 0;
             } else {
                 anyValid = true;
             }
@@ -1139,15 +1356,20 @@ bool TrafficManagementModule::isMinHopsFromRequestor(const meshtastic_MeshPacket
     return result;
 }
 
-bool TrafficManagementModule::isRateLimited(NodeNum from, uint32_t nowMs)
+bool TrafficManagementModule::isRateLimited(NodeNum from, uint32_t nowMs, uint8_t allowedCount, uint8_t *rateCountOut)
 {
+    if (rateCountOut)
+        *rateCountOut = 0;
 #if TRAFFIC_MANAGEMENT_CACHE_SIZE == 0
     (void)from;
     (void)nowMs;
+    (void)allowedCount;
     return false;
 #else
-    const uint32_t windowMs = secsToMs(moduleConfig.traffic_management.rate_limit_window_secs);
-    if (windowMs == 0 || moduleConfig.traffic_management.rate_limit_max_packets == 0)
+    // Window is the congestion-stretched snapshot from the maintenance pass
+    // (unscaled fallback from the constructor before the first pass).
+    const uint32_t windowMs = cachedRateWindowMs;
+    if (windowMs == 0 || allowedCount == 0)
         return false;
 
     bool isNew = false;
@@ -1160,23 +1382,126 @@ bool TrafficManagementModule::isRateLimited(NodeNum from, uint32_t nowMs)
     if (isNew || !isWithinWindow(nowMs, fromRelativeRateTime(entry->rate_time), windowMs)) {
         entry->rate_time = toRelativeRateTime(nowMs);
         entry->rate_count = 1;
+        if (rateCountOut)
+            *rateCountOut = 1;
         return false;
     }
 
-    // Increment counter (saturates at 255)
+    // Increment counter (saturates at 255). Capture saturation first: once the
+    // counter is pinned at 255, `count > threshold` can never fire for a
+    // clamped threshold of 255, which would silently disable rate limiting for
+    // any configured threshold >= 255.
+    const bool alreadySaturated = (entry->rate_count == UINT8_MAX);
     saturatingIncrement(entry->rate_count);
+    if (rateCountOut)
+        *rateCountOut = entry->rate_count;
 
-    // Check against threshold (uint8_t max is 255, but config is uint32_t)
-    uint32_t threshold = moduleConfig.traffic_management.rate_limit_max_packets;
-    if (threshold > 255)
-        threshold = 255;
-
-    bool limited = entry->rate_count > threshold;
+    const uint8_t threshold = allowedCount;
+    bool limited = entry->rate_count > threshold || (alreadySaturated && threshold == 255);
     if (limited || entry->rate_count == threshold) {
         TM_LOG_DEBUG("Rate limit 0x%08x: count=%u threshold=%u -> %s", from, entry->rate_count, threshold,
                      limited ? "DROP" : "at-limit");
     }
     return limited;
+#endif
+}
+
+meshtastic_Config_DeviceConfig_Role TrafficManagementModule::lookupSenderRole(NodeNum from) const
+{
+    const meshtastic_NodeInfoLite *node = nodeDB ? nodeDB->getMeshNode(from) : nullptr;
+    // Unknown senders are judged against the CLIENT baseline
+    return node ? node->role : meshtastic_Config_DeviceConfig_Role_CLIENT;
+}
+
+uint8_t TrafficManagementModule::allowedHopsForSender(meshtastic_Config_DeviceConfig_Role senderRole,
+                                                      meshtastic_PortNum port) const
+{
+#if HAS_VARIABLE_HOPS
+    if (hopScalingModule) {
+        uint32_t grace =
+            Default::getConfiguredOrDefault(moduleConfig.traffic_management.hop_grace, default_traffic_mgmt_hop_grace);
+        if (grace > max_traffic_mgmt_hop_grace)
+            grace = max_traffic_mgmt_hop_grace;
+        return hopScalingModule->getAllowedHopsForSender(senderRole, static_cast<uint8_t>(grace), port);
+    }
+#else
+    (void)senderRole;
+    (void)port;
+#endif
+    return HOP_MAX;
+}
+
+void TrafficManagementModule::checkPortInterval(const meshtastic_MeshPacket &mp, meshtastic_Config_DeviceConfig_Role senderRole,
+                                                uint32_t nowMs)
+{
+#if TRAFFIC_MANAGEMENT_CACHE_SIZE == 0
+    (void)mp;
+    (void)senderRole;
+    (void)nowMs;
+#else
+    // Reporting roles are exempt from position policing: they legitimately run
+    // at the smart-broadcast minimum and already get rate/politeness coverage.
+    const bool reportingRole = senderRole == meshtastic_Config_DeviceConfig_Role_TRACKER ||
+                               senderRole == meshtastic_Config_DeviceConfig_Role_TAK_TRACKER ||
+                               senderRole == meshtastic_Config_DeviceConfig_Role_SENSOR;
+    const bool routerRole =
+        senderRole == meshtastic_Config_DeviceConfig_Role_ROUTER || senderRole == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE;
+
+    int typeIdx;
+    switch (mp.decoded.portnum) {
+    case meshtastic_PortNum_POSITION_APP:
+        if (reportingRole)
+            return;
+        typeIdx = 0;
+        break;
+    case meshtastic_PortNum_TELEMETRY_APP:
+        typeIdx = 1;
+        break;
+    case meshtastic_PortNum_NODEINFO_APP:
+        typeIdx = 2;
+        break;
+    default:
+        return; // NEIGHBORINFO is low-cadence; rate limiting covers it
+    }
+
+    const uint32_t allowedMs = cachedPortIntervalMs[routerRole ? 1 : 0][typeIdx];
+    if (allowedMs == 0)
+        return; // not initialized yet (first maintenance pass pending)
+
+    concurrency::LockGuard guard(&cacheLock);
+    UnifiedCacheEntry *entry = findOrCreateEntry(getFrom(&mp), nullptr);
+    if (!entry)
+        return;
+
+    uint8_t *slot;
+    uint16_t resolution;
+    switch (typeIdx) {
+    case 0:
+        slot = &entry->pos_time;
+        resolution = posTimeResolution;
+        break;
+    case 1:
+        slot = &entry->telem_time;
+        resolution = portTimeResolution;
+        break;
+    default:
+        slot = &entry->info_time;
+        resolution = portTimeResolution;
+        break;
+    }
+
+    if (*slot != 0 && isWithinWindow(nowMs, fromRelativeTime(*slot, resolution), allowedMs)) {
+        // Inside the allowed interval: request hop exhaustion (alterReceived
+        // performs it). Keep the original timestamp so a steady stream is
+        // judged against the first packet of the window, not the previous one.
+        portIntervalExhaustPending = true;
+        return;
+    }
+
+    // Position shares pos_time with dedup, which refreshes it in
+    // shouldDropPosition; only refresh here when dedup won't.
+    if (typeIdx != 0 || !moduleConfig.traffic_management.position_dedup_enabled)
+        *slot = toRelativeTime(nowMs, resolution);
 #endif
 }
 

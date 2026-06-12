@@ -13,6 +13,7 @@
 
 #include "airtime.h"
 #if HAS_VARIABLE_HOPS
+#include "modules/HopScalingModule.h"
 #endif
 #include "mesh/CryptoEngine.h"
 #include "mesh/MeshService.h"
@@ -50,6 +51,26 @@ class ScopedBusyAirTime
     AirTime busy;
     AirTime *previous;
 };
+
+#if HAS_VARIABLE_HOPS
+// Telemetry exhaustion also fires once a relayed broadcast has traveled the
+// HopScaling-recommended radius. Installs a global hopScalingModule pinned to
+// `requiredHop` for the enclosing scope.
+class ScopedMeshRadius
+{
+  public:
+    explicit ScopedMeshRadius(uint8_t requiredHop) : previous(hopScalingModule)
+    {
+        shim.setLastRequiredHop(requiredHop);
+        hopScalingModule = &shim;
+    }
+    ~ScopedMeshRadius() { hopScalingModule = previous; }
+
+  private:
+    HopScalingModule shim;
+    HopScalingModule *previous;
+};
+#endif
 
 class MockNodeDB : public NodeDB
 {
@@ -393,6 +414,38 @@ static void test_tm_rateLimit_dropsOnlyAfterThreshold(void)
     TEST_ASSERT_EQUAL_UINT32(1, stats.rate_limit_drops);
     TEST_ASSERT_TRUE(module.ignoreRequestFlag());
 }
+
+/**
+ * Verify non-routine traffic is exempt from rate limiting: routing/admin
+ * (mesh control), text broadcasts and DMs (user traffic). Only routine
+ * broadcasts (position/telemetry/nodeinfo/neighborinfo) are counted.
+ */
+static void test_tm_rateLimit_skipsNonRoutinePorts(void)
+{
+    moduleConfig.traffic_management.rate_limit_enabled = true;
+    moduleConfig.traffic_management.rate_limit_window_secs = 60;
+    moduleConfig.traffic_management.rate_limit_max_packets = 1;
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket routingPacket = makeDecodedPacket(meshtastic_PortNum_ROUTING_APP, kRemoteNode);
+    meshtastic_MeshPacket adminPacket = makeDecodedPacket(meshtastic_PortNum_ADMIN_APP, kRemoteNode);
+    meshtastic_MeshPacket textBroadcast = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kRemoteNode);
+    meshtastic_MeshPacket telemetryDm = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, kTargetNode);
+
+    for (int i = 0; i < 4; i++) {
+        ProcessMessage rr = module.handleReceived(routingPacket);
+        ProcessMessage ar = module.handleReceived(adminPacket);
+        ProcessMessage tr = module.handleReceived(textBroadcast);
+        ProcessMessage dr = module.handleReceived(telemetryDm);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(rr));
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(ar));
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(tr));
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(dr));
+    }
+
+    meshtastic_TrafficManagementStats stats = module.getStats();
+    TEST_ASSERT_EQUAL_UINT32(0, stats.rate_limit_drops);
+}
+
 /**
  * Verify packets sourced from this node bypass dedup and rate limiting.
  * Important so local transmissions are not accidentally self-throttled.
@@ -737,7 +790,75 @@ static void test_tm_alterReceived_exhaustsRelayedTelemetryBroadcast(void)
 }
 
 #if HAS_VARIABLE_HOPS
+/**
+ * Verify relayed telemetry broadcasts are exhausted on a QUIET channel once
+ * they have traveled the HopScaling-recommended hop radius — mesh density is
+ * a pressure signal independent of instantaneous airtime.
+ */
+static void test_tm_alterReceived_exhaustsTelemetryBeyondMeshRadius(void)
+{
+    moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    // Recommended radius 1; the CLIENT sender gets +1 hop grace, so the
+    // allowed radius is 2 — and the packet below has traveled exactly 2.
+    ScopedMeshRadius meshRadius(1);
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, NODENUM_BROADCAST);
+    packet.hop_start = 5;
+    packet.hop_limit = 3;
+
+    module.alterReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT8(0, packet.hop_limit);
+    TEST_ASSERT_TRUE(module.shouldExhaustHops(packet));
+    TEST_ASSERT_EQUAL_UINT32(1, stats.hop_exhausted_packets);
+}
+
+/**
+ * Verify relayed telemetry broadcasts still within the recommended radius are
+ * NOT exhausted on a quiet channel.
+ */
+static void test_tm_alterReceived_telemetryWithinMeshRadius_notExhausted(void)
+{
+    moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    ScopedMeshRadius meshRadius(5); // recommended radius 5; packet has only traveled 2
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, NODENUM_BROADCAST);
+    packet.hop_start = 5;
+    packet.hop_limit = 3;
+
+    module.alterReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT8(3, packet.hop_limit);
+    TEST_ASSERT_FALSE(module.shouldExhaustHops(packet));
+    TEST_ASSERT_EQUAL_UINT32(0, stats.hop_exhausted_packets);
+}
 #endif // HAS_VARIABLE_HOPS
+
+/**
+ * Verify relayed telemetry broadcasts are NOT exhausted when the channel is
+ * quiet — telemetry exhaustion only fires under congestion, mirroring the
+ * airtime checks that gate self-generated telemetry.
+ */
+static void test_tm_alterReceived_telemetryNotExhaustedWhenChannelQuiet(void)
+{
+    moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    // No (or quiet) airTime: channelBusy is false, so the packet must pass through untouched
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, NODENUM_BROADCAST);
+    packet.hop_start = 5;
+    packet.hop_limit = 3;
+
+    module.alterReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT8(3, packet.hop_limit);
+    TEST_ASSERT_EQUAL_UINT8(5, packet.hop_start);
+    TEST_ASSERT_FALSE(module.shouldExhaustHops(packet));
+    TEST_ASSERT_EQUAL_UINT32(0, stats.hop_exhausted_packets);
+}
+
 /**
  * Verify hop exhaustion skips unicast and local-origin packets.
  * Important to avoid mutating traffic that should retain normal forwarding behavior.
@@ -967,6 +1088,30 @@ static void test_tm_rateLimit_resetsAfterWindowExpires(void)
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(r3));
     TEST_ASSERT_EQUAL_UINT32(1, stats.rate_limit_drops);
 }
+
+/**
+ * Verify rate-limit thresholds above 255 effectively clamp to 255.
+ * Important because counters are uint8_t and must not overflow behavior.
+ */
+static void test_tm_rateLimit_thresholdAbove255_clamps(void)
+{
+    moduleConfig.traffic_management.rate_limit_enabled = true;
+    moduleConfig.traffic_management.rate_limit_window_secs = 60;
+    moduleConfig.traffic_management.rate_limit_max_packets = 300;
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+
+    for (int i = 0; i < 255; i++) {
+        ProcessMessage result = module.handleReceived(packet);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(result));
+    }
+    ProcessMessage dropped = module.handleReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::STOP), static_cast<int>(dropped));
+    TEST_ASSERT_EQUAL_UINT32(1, stats.rate_limit_drops);
+}
+
 /**
  * Verify unknown-packet tracking resets after its active window expires.
  * Important so old unknown traffic does not trigger delayed drops.
@@ -1035,6 +1180,28 @@ static void test_tm_alterReceived_exhaustsRelayedPositionBroadcast(void)
     TEST_ASSERT_TRUE(module.shouldExhaustHops(packet));
     TEST_ASSERT_EQUAL_UINT32(1, stats.hop_exhausted_packets);
 }
+
+/**
+ * Verify relayed position broadcasts pass untouched on a quiet channel within
+ * the allowed radius — position exhaustion is now pressure-gated, matching
+ * telemetry (previously it fired unconditionally when enabled).
+ */
+static void test_tm_alterReceived_positionNotExhaustedWhenChannelQuiet(void)
+{
+    moduleConfig.traffic_management.exhaust_hop_position = true;
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makePositionPacket(kRemoteNode, 374221234, -1220845678, NODENUM_BROADCAST);
+    packet.hop_start = 5;
+    packet.hop_limit = 3;
+
+    module.alterReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT8(3, packet.hop_limit);
+    TEST_ASSERT_FALSE(module.shouldExhaustHops(packet));
+    TEST_ASSERT_EQUAL_UINT32(0, stats.hop_exhausted_packets);
+}
+
 /**
  * Verify hop exhaustion ignores undecoded/encrypted packets.
  * Important so we never mutate packets that were not decoded by this module.
@@ -1222,8 +1389,386 @@ static void test_tm_nextHop_keptAliveAcrossMaintenanceSweep(void)
 
     TEST_ASSERT_EQUAL_UINT8(0x42, module.getNextHopHint(kTargetNode));
 }
+
+// ---------------------------------------------------------------------------
+// Role-aware throttles, politeness ladder, precision clamp, port intervals
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify routine broadcasts from deprecated roles (REPEATER/ROUTER_CLIENT) are
+ * dropped outright, while their non-routine traffic still passes.
+ */
+static void test_tm_deprecatedRole_dropsRoutineBroadcasts(void)
+{
+    mockNodeDB->setCachedNode(kRemoteNode);
+    mockNodeDB->setCachedNodeRole(meshtastic_Config_DeviceConfig_Role_REPEATER);
+    TrafficManagementModuleTestShim module;
+
+    meshtastic_MeshPacket telemetry = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    meshtastic_MeshPacket text = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kRemoteNode);
+    meshtastic_MeshPacket telemetryDm = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode, kTargetNode);
+
+    ProcessMessage broadcastResult = module.handleReceived(telemetry);
+    ProcessMessage textResult = module.handleReceived(text);
+    ProcessMessage dmResult = module.handleReceived(telemetryDm);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::STOP), static_cast<int>(broadcastResult));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(textResult));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(dmResult));
+    TEST_ASSERT_EQUAL_UINT32(1, stats.deprecated_role_drops);
+}
+
+/**
+ * Verify ROUTER senders are judged against the router rate baseline (2/window
+ * at the default client baseline of 5), not the client one.
+ */
+static void test_tm_rateLimit_routerRoleAllowance(void)
+{
+    moduleConfig.traffic_management.rate_limit_enabled = true;
+    // window/max stay 0 -> compiled defaults (3600 s window, client baseline 5)
+    mockNodeDB->setCachedNode(kRemoteNode);
+    mockNodeDB->setCachedNodeRole(meshtastic_Config_DeviceConfig_Role_ROUTER);
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+
+    ProcessMessage r1 = module.handleReceived(packet);
+    ProcessMessage r2 = module.handleReceived(packet);
+    ProcessMessage r3 = module.handleReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(r1));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(r2));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::STOP), static_cast<int>(r3));
+    TEST_ASSERT_EQUAL_UINT32(1, stats.rate_limit_drops);
+}
+
+/**
+ * Verify TRACKER senders get the generous reporting allowance (14/window) —
+ * the 5-minute smart-broadcast minimum is legitimate traffic.
+ */
+static void test_tm_rateLimit_trackerRoleAllowance(void)
+{
+    moduleConfig.traffic_management.rate_limit_enabled = true;
+    mockNodeDB->setCachedNode(kRemoteNode);
+    mockNodeDB->setCachedNodeRole(meshtastic_Config_DeviceConfig_Role_TRACKER);
+    TrafficManagementModuleTestShim module;
+    meshtastic_MeshPacket packet = makePositionPacket(kRemoteNode, 374221234, -1220845678);
+
+    for (int i = 0; i < 14; i++) {
+        ProcessMessage result = module.handleReceived(packet);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(result));
+    }
+    ProcessMessage dropped = module.handleReceived(packet);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::STOP), static_cast<int>(dropped));
+    TEST_ASSERT_EQUAL_UINT32(1, stats.rate_limit_drops);
+}
+
 #if HAS_VARIABLE_HOPS
+/**
+ * Verify ROUTER senders earn the +1 hop bonus for TELEMETRY only: with a
+ * recommended radius of 2 and grace 1, a router telemetry packet is allowed
+ * 4 hops while a router position packet is allowed only 3.
+ */
+static void test_tm_hopGrace_routerTelemetryBonusNotForPosition(void)
+{
+    moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    moduleConfig.traffic_management.exhaust_hop_position = true;
+    ScopedMeshRadius meshRadius(2);
+    mockNodeDB->setCachedNode(kRemoteNode);
+    mockNodeDB->setCachedNodeRole(meshtastic_Config_DeviceConfig_Role_ROUTER);
+    TrafficManagementModuleTestShim module;
+
+    // Telemetry traveled 3 hops: under the router telemetry allowance (4) — untouched.
+    meshtastic_MeshPacket telemetry3 = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    telemetry3.hop_start = 5;
+    telemetry3.hop_limit = 2;
+    module.alterReceived(telemetry3);
+    TEST_ASSERT_EQUAL_UINT8(2, telemetry3.hop_limit);
+
+    // Telemetry traveled 4 hops: at the allowance — exhausted.
+    meshtastic_MeshPacket telemetry4 = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    telemetry4.hop_start = 6;
+    telemetry4.hop_limit = 2;
+    module.alterReceived(telemetry4);
+    TEST_ASSERT_EQUAL_UINT8(0, telemetry4.hop_limit);
+
+    // Position traveled 3 hops: no router bonus for positions (allowance 3) — exhausted.
+    meshtastic_MeshPacket position3 = makePositionPacket(kRemoteNode, 374221234, -1220845678);
+    position3.hop_start = 5;
+    position3.hop_limit = 2;
+    module.alterReceived(position3);
+    TEST_ASSERT_EQUAL_UINT8(0, position3.hop_limit);
+}
+
+/**
+ * Verify TRACKER senders keep their role floor: with a recommended radius of 1
+ * and grace 1, a tracker is allowed floor(2)+1 = 3 hops.
+ */
+static void test_tm_hopGrace_trackerSenderFloor(void)
+{
+    moduleConfig.traffic_management.exhaust_hop_telemetry = true;
+    ScopedMeshRadius meshRadius(1);
+    mockNodeDB->setCachedNode(kRemoteNode);
+    mockNodeDB->setCachedNodeRole(meshtastic_Config_DeviceConfig_Role_TRACKER);
+    TrafficManagementModuleTestShim module;
+
+    meshtastic_MeshPacket traveled2 = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    traveled2.hop_start = 5;
+    traveled2.hop_limit = 3;
+    module.alterReceived(traveled2);
+    TEST_ASSERT_EQUAL_UINT8(3, traveled2.hop_limit);
+
+    meshtastic_MeshPacket traveled3 = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    traveled3.hop_start = 6;
+    traveled3.hop_limit = 3;
+    module.alterReceived(traveled3);
+    TEST_ASSERT_EQUAL_UINT8(0, traveled3.hop_limit);
+}
+
+/**
+ * Verify the politeness ladder on an active (busy) mesh: a node that is both
+ * frequent and loud first gets its hops exhausted (rudeness > 1.5), then gets
+ * dropped (rudeness > 3.0). Allowed: 5/window (CLIENT), 2 hops (radius 1 +
+ * grace 1); hop_start 7 makes rudeness8 = count * 7 * 8 / 10 = count * 5.6.
+ */
+static void test_tm_politeness_exhaustsThenDropsOnActiveMesh(void)
+{
+    moduleConfig.traffic_management.rate_limit_enabled = true; // ladder lives inside the rate-limit pass
+    ScopedBusyAirTime busyChannel;                             // meshActive via channel pressure
+    ScopedMeshRadius meshRadius(1);
+    TrafficManagementModuleTestShim module;
+
+    // alterReceived rewrites hop_start/hop_limit on exhaustion, so use a fresh
+    // packet per observation (each is a distinct over-the-air reception anyway).
+    auto loudTelemetry = []() {
+        meshtastic_MeshPacket p = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+        p.hop_start = 7;
+        p.hop_limit = 7;
+        return p;
+    };
+
+    // Counts 1-2: rudeness8 = count*7*8/10 = 5.6, 11.2 vs threshold 12 — no action.
+    for (int i = 0; i < 2; i++) {
+        meshtastic_MeshPacket p = loudTelemetry();
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(module.handleReceived(p)));
+        module.alterReceived(p);
+        TEST_ASSERT_EQUAL_UINT8(7, p.hop_limit);
+    }
+
+    // Counts 3-4: rudeness8 16.8, 22.4 > 12 — exhausted but still relayed one hop.
+    for (int i = 0; i < 2; i++) {
+        meshtastic_MeshPacket p = loudTelemetry();
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(module.handleReceived(p)));
+        module.alterReceived(p);
+        TEST_ASSERT_EQUAL_UINT8(0, p.hop_limit);
+    }
+
+    // Count 5: rudeness8 28 > 24 — extreme offender, dropped.
+    meshtastic_MeshPacket p = loudTelemetry();
+    ProcessMessage dropped = module.handleReceived(p);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::STOP), static_cast<int>(dropped));
+    TEST_ASSERT_EQUAL_UINT32(2, stats.politeness_exhausts);
+    TEST_ASSERT_EQUAL_UINT32(1, stats.politeness_drops);
+}
+
+/**
+ * Verify the politeness ladder takes no action on a quiet mesh — high
+ * frequency at max hops is moderately OK when nobody is affected.
+ */
+static void test_tm_politeness_quietMesh_noAction(void)
+{
+    moduleConfig.traffic_management.rate_limit_enabled = true;
+    ScopedMeshRadius meshRadius(1);
+    // No busy airtime, no online nodes: mesh is quiet.
+    TrafficManagementModuleTestShim module;
+
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    packet.hop_start = 7;
+    packet.hop_limit = 7;
+
+    for (int i = 0; i < 5; i++) {
+        ProcessMessage result = module.handleReceived(packet);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(result));
+        module.alterReceived(packet);
+        TEST_ASSERT_EQUAL_UINT8(7, packet.hop_limit);
+    }
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT32(0, stats.politeness_exhausts);
+    TEST_ASSERT_EQUAL_UINT32(0, stats.politeness_drops);
+}
 #endif // HAS_VARIABLE_HOPS
+
+/**
+ * Verify the precision clamp rewrites an over-precise relayed position on a
+ * well-known channel down to the 13-bit default, and counts it.
+ */
+static void test_tm_precisionClamp_clampsHighPrecisionOnWellKnownChannel(void)
+{
+    installWellKnownPrimaryChannel();
+    moduleConfig.traffic_management.precision_clamp_enabled = true;
+    TrafficManagementModuleTestShim module;
+
+    const int32_t lat = 374221234, lon = -1220845678;
+    meshtastic_MeshPacket packet = makePositionPacketWithPrecision(kRemoteNode, lat, lon, 32);
+    module.alterReceived(packet);
+
+    meshtastic_Position out;
+    TEST_ASSERT_TRUE(decodePositionPayload(packet, out));
+    TEST_ASSERT_EQUAL_UINT32(13, out.precision_bits);
+    // Truncated to a 13-bit grid: lower 19 bits carry only the cell-center offset.
+    TEST_ASSERT_EQUAL_UINT32(1u << (31 - 13), static_cast<uint32_t>(out.latitude_i) & ((1u << (32 - 13)) - 1));
+    TEST_ASSERT_NOT_EQUAL(lat, out.latitude_i);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+    TEST_ASSERT_EQUAL_UINT32(1, stats.precision_clamps);
+}
+
+/**
+ * Verify a position with precision_bits == 0 but full-precision coordinates
+ * (the classic doxing case) is clamped too.
+ */
+static void test_tm_precisionClamp_treatsPrecisionZeroWithCoordsAsFull(void)
+{
+    installWellKnownPrimaryChannel();
+    moduleConfig.traffic_management.precision_clamp_enabled = true;
+    TrafficManagementModuleTestShim module;
+
+    meshtastic_MeshPacket packet = makePositionPacket(kRemoteNode, 374221234, -1220845678); // precision_bits 0
+    module.alterReceived(packet);
+
+    meshtastic_Position out;
+    TEST_ASSERT_TRUE(decodePositionPayload(packet, out));
+    TEST_ASSERT_EQUAL_UINT32(13, out.precision_bits);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+    TEST_ASSERT_EQUAL_UINT32(1, stats.precision_clamps);
+}
+
+/**
+ * Verify already-coarse positions are never made MORE precise, and pass
+ * through untouched.
+ */
+static void test_tm_precisionClamp_neverIncreasesPrecision(void)
+{
+    installWellKnownPrimaryChannel();
+    moduleConfig.traffic_management.precision_clamp_enabled = true;
+    TrafficManagementModuleTestShim module;
+
+    meshtastic_MeshPacket packet = makePositionPacketWithPrecision(kRemoteNode, 0x12340000, 0x45600000, 11);
+    const uint16_t originalSize = packet.decoded.payload.size;
+    module.alterReceived(packet);
+
+    meshtastic_Position out;
+    TEST_ASSERT_TRUE(decodePositionPayload(packet, out));
+    TEST_ASSERT_EQUAL_UINT32(11, out.precision_bits);
+    TEST_ASSERT_EQUAL_UINT16(originalSize, packet.decoded.payload.size);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+    TEST_ASSERT_EQUAL_UINT32(0, stats.precision_clamps);
+}
+
+/**
+ * Verify the clamp also fires on a default-PSK channel carrying ANY preset
+ * name (here "LongFast" while the radio preset is MediumFast), but never on a
+ * private-PSK channel and never in ham mode.
+ */
+static void test_tm_precisionClamp_gatingByChannelAndLicense(void)
+{
+    installWellKnownPrimaryChannel();
+    strncpy(channelFile.channels[0].settings.name, "LongFast", sizeof(channelFile.channels[0].settings.name));
+    config.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST;
+    moduleConfig.traffic_management.precision_clamp_enabled = true;
+
+    {
+        TrafficManagementModuleTestShim module;
+        meshtastic_MeshPacket packet = makePositionPacketWithPrecision(kRemoteNode, 374221234, -1220845678, 32);
+        module.alterReceived(packet);
+        meshtastic_Position out;
+        TEST_ASSERT_TRUE(decodePositionPayload(packet, out));
+        TEST_ASSERT_EQUAL_UINT32(13, out.precision_bits); // cross-preset name still well-known
+    }
+
+    {
+        // Private (high-entropy) PSK: hands-off even with a preset name.
+        channelFile.channels[0].settings.psk.size = 16;
+        TrafficManagementModuleTestShim module;
+        meshtastic_MeshPacket packet = makePositionPacketWithPrecision(kRemoteNode, 374221234, -1220845678, 32);
+        module.alterReceived(packet);
+        meshtastic_Position out;
+        TEST_ASSERT_TRUE(decodePositionPayload(packet, out));
+        TEST_ASSERT_EQUAL_UINT32(32, out.precision_bits);
+        channelFile.channels[0].settings.psk.size = 1;
+    }
+
+    {
+        // Ham mode: licensed traffic is never rewritten.
+        owner.is_licensed = true;
+        TrafficManagementModuleTestShim module;
+        meshtastic_MeshPacket packet = makePositionPacketWithPrecision(kRemoteNode, 374221234, -1220845678, 32);
+        module.alterReceived(packet);
+        meshtastic_Position out;
+        TEST_ASSERT_TRUE(decodePositionPayload(packet, out));
+        TEST_ASSERT_EQUAL_UINT32(32, out.precision_bits);
+        owner.is_licensed = false;
+    }
+}
+
+/**
+ * Verify per-port frequency policing: a second telemetry broadcast inside the
+ * sender-role allowed interval gets its hops exhausted (never dropped), on
+ * well-known channels only.
+ */
+static void test_tm_portInterval_exhaustsTooFrequentTelemetry(void)
+{
+    installWellKnownPrimaryChannel();
+    moduleConfig.traffic_management.port_interval_enabled = true;
+    TrafficManagementModuleTestShim module;
+    module.runOnce(); // snapshot online nodes + per-role allowed intervals
+
+    meshtastic_MeshPacket first = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    first.hop_limit = 3;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(module.handleReceived(first)));
+    module.alterReceived(first);
+    TEST_ASSERT_EQUAL_UINT8(3, first.hop_limit); // first packet of the window is untouched
+
+    meshtastic_MeshPacket second = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    second.hop_limit = 3;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(module.handleReceived(second)));
+    module.alterReceived(second);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT8(0, second.hop_limit); // exhausted, still relayed one hop
+    TEST_ASSERT_EQUAL_UINT32(1, stats.port_interval_exhausts);
+}
+
+/**
+ * Verify port-interval policing leaves private-PSK channels alone.
+ */
+static void test_tm_portInterval_skipsPrivateChannels(void)
+{
+    installWellKnownPrimaryChannel();
+    channelFile.channels[0].settings.psk.size = 16; // high-entropy key
+    moduleConfig.traffic_management.port_interval_enabled = true;
+    TrafficManagementModuleTestShim module;
+    module.runOnce();
+
+    meshtastic_MeshPacket packet = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    packet.hop_limit = 3;
+    module.handleReceived(packet);
+    module.alterReceived(packet);
+    meshtastic_MeshPacket again = makeDecodedPacket(meshtastic_PortNum_TELEMETRY_APP, kRemoteNode);
+    again.hop_limit = 3;
+    module.handleReceived(again);
+    module.alterReceived(again);
+    meshtastic_TrafficManagementStats stats = module.getStats();
+
+    TEST_ASSERT_EQUAL_UINT8(3, again.hop_limit);
+    TEST_ASSERT_EQUAL_UINT32(0, stats.port_interval_exhausts);
+}
+
 } // namespace
 
 void setUp(void)
@@ -1247,6 +1792,7 @@ TM_TEST_ENTRY void setup()
     RUN_TEST(test_tm_positionDedup_dropsDuplicateWithinWindow);
     RUN_TEST(test_tm_positionDedup_allowsMovedPosition);
     RUN_TEST(test_tm_rateLimit_dropsOnlyAfterThreshold);
+    RUN_TEST(test_tm_rateLimit_skipsNonRoutinePorts);
     RUN_TEST(test_tm_fromUs_bypassesPositionAndRateFilters);
     RUN_TEST(test_tm_localDestination_bypassesTransitFilters);
     RUN_TEST(test_tm_nodeinfo_routerClamp_skipsWhenTooManyHops);
@@ -1261,7 +1807,10 @@ TM_TEST_ENTRY void setup()
     RUN_TEST(test_tm_nodeinfo_directResponse_psramMissDoesNotFallbackToNodeDb);
 #endif
     RUN_TEST(test_tm_alterReceived_exhaustsRelayedTelemetryBroadcast);
+    RUN_TEST(test_tm_alterReceived_telemetryNotExhaustedWhenChannelQuiet);
 #if HAS_VARIABLE_HOPS
+    RUN_TEST(test_tm_alterReceived_exhaustsTelemetryBeyondMeshRadius);
+    RUN_TEST(test_tm_alterReceived_telemetryWithinMeshRadius_notExhausted);
 #endif
     RUN_TEST(test_tm_alterReceived_skipsLocalAndUnicast);
     RUN_TEST(test_tm_positionDedup_allowsDuplicateAfterIntervalExpires);
@@ -1272,9 +1821,11 @@ TM_TEST_ENTRY void setup()
     RUN_TEST(test_tm_positionDedup_epochReset_doesNotDropFirstPacketAfterReset);
     RUN_TEST(test_tm_positionDedup_priorRateState_doesNotDropFirstFingerprintZero);
     RUN_TEST(test_tm_rateLimit_resetsAfterWindowExpires);
+    RUN_TEST(test_tm_rateLimit_thresholdAbove255_clamps);
     RUN_TEST(test_tm_unknownPackets_resetAfterWindowExpires);
     RUN_TEST(test_tm_unknownPackets_thresholdAbove255_clamps);
     RUN_TEST(test_tm_alterReceived_exhaustsRelayedPositionBroadcast);
+    RUN_TEST(test_tm_alterReceived_positionNotExhaustedWhenChannelQuiet);
     RUN_TEST(test_tm_alterReceived_skipsUndecodedPackets);
     RUN_TEST(test_tm_alterReceived_resetExhaustFlagOnNextPacket);
     RUN_TEST(test_tm_alterReceived_exhaustFlag_isPacketScoped);
@@ -1284,8 +1835,21 @@ TM_TEST_ENTRY void setup()
     RUN_TEST(test_tm_nextHop_servedAfterNodeDbRoll);
     RUN_TEST(test_tm_nextHop_preloadDoesNotClobberLearned);
     RUN_TEST(test_tm_nextHop_keptAliveAcrossMaintenanceSweep);
+    RUN_TEST(test_tm_deprecatedRole_dropsRoutineBroadcasts);
+    RUN_TEST(test_tm_rateLimit_routerRoleAllowance);
+    RUN_TEST(test_tm_rateLimit_trackerRoleAllowance);
 #if HAS_VARIABLE_HOPS
+    RUN_TEST(test_tm_hopGrace_routerTelemetryBonusNotForPosition);
+    RUN_TEST(test_tm_hopGrace_trackerSenderFloor);
+    RUN_TEST(test_tm_politeness_exhaustsThenDropsOnActiveMesh);
+    RUN_TEST(test_tm_politeness_quietMesh_noAction);
 #endif
+    RUN_TEST(test_tm_precisionClamp_clampsHighPrecisionOnWellKnownChannel);
+    RUN_TEST(test_tm_precisionClamp_treatsPrecisionZeroWithCoordsAsFull);
+    RUN_TEST(test_tm_precisionClamp_neverIncreasesPrecision);
+    RUN_TEST(test_tm_precisionClamp_gatingByChannelAndLicense);
+    RUN_TEST(test_tm_portInterval_exhaustsTooFrequentTelemetry);
+    RUN_TEST(test_tm_portInterval_skipsPrivateChannels);
     exit(UNITY_END());
 }
 

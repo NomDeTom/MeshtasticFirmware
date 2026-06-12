@@ -181,6 +181,67 @@ void test_scaled_overflow_saturates()
     TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(INT32_MAX), res);
 }
 
+// --- Sender-role baselines used by the always-on TrafficManagementModule ---
+
+void test_roleDefaultIntervalSecs_perRole()
+{
+    // Position/telemetry: router roles get the 12h cadence, everyone else 1h.
+    TEST_ASSERT_EQUAL_UINT32(ONE_DAY / 2,
+                             Default::roleDefaultIntervalSecs(meshtastic_Config_DeviceConfig_Role_ROUTER, TrafficType::POSITION));
+    TEST_ASSERT_EQUAL_UINT32(
+        ONE_DAY / 2, Default::roleDefaultIntervalSecs(meshtastic_Config_DeviceConfig_Role_ROUTER_LATE, TrafficType::TELEMETRY));
+    TEST_ASSERT_EQUAL_UINT32(60 * 60,
+                             Default::roleDefaultIntervalSecs(meshtastic_Config_DeviceConfig_Role_CLIENT, TrafficType::POSITION));
+    TEST_ASSERT_EQUAL_UINT32(
+        60 * 60, Default::roleDefaultIntervalSecs(meshtastic_Config_DeviceConfig_Role_TRACKER, TrafficType::TELEMETRY));
+    // NodeInfo cadence is role-independent.
+    TEST_ASSERT_EQUAL_UINT32(3 * 60 * 60,
+                             Default::roleDefaultIntervalSecs(meshtastic_Config_DeviceConfig_Role_ROUTER, TrafficType::NODEINFO));
+    TEST_ASSERT_EQUAL_UINT32(3 * 60 * 60,
+                             Default::roleDefaultIntervalSecs(meshtastic_Config_DeviceConfig_Role_CLIENT, TrafficType::NODEINFO));
+}
+
+void test_roleRateAllowance_perRole()
+{
+    // CLIENT baseline 5: routers scale to 2, reporting roles get 14, deprecated roles get 0.
+    TEST_ASSERT_EQUAL_UINT8(5, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_CLIENT, 5));
+    TEST_ASSERT_EQUAL_UINT8(5, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE, 5));
+    TEST_ASSERT_EQUAL_UINT8(2, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_ROUTER, 5));
+    TEST_ASSERT_EQUAL_UINT8(2, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_ROUTER_LATE, 5));
+    TEST_ASSERT_EQUAL_UINT8(14, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_TRACKER, 5));
+    TEST_ASSERT_EQUAL_UINT8(14, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_TAK_TRACKER, 5));
+    TEST_ASSERT_EQUAL_UINT8(14, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_SENSOR, 5));
+    TEST_ASSERT_EQUAL_UINT8(0, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_REPEATER, 5));
+    TEST_ASSERT_EQUAL_UINT8(0, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_ROUTER_CLIENT, 5));
+
+    // Router allowance scales with a raised baseline but never drops below 2.
+    TEST_ASSERT_EQUAL_UINT8(4, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_ROUTER, 10));
+    TEST_ASSERT_EQUAL_UINT8(2, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_ROUTER, 1));
+    // A baseline above the tracker floor wins for reporting roles.
+    TEST_ASSERT_EQUAL_UINT8(20, Default::roleRateAllowance(meshtastic_Config_DeviceConfig_Role_TRACKER, 20));
+}
+
+void test_roleScaledIntervalMs_congestionAndExemptions()
+{
+    config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT; // our own role must not matter
+    config.lora.use_preset = false;
+    config.lora.spread_factor = 9;
+    config.lora.bandwidth = 250;
+
+    // Below the threshold nothing scales.
+    TEST_ASSERT_EQUAL_UINT32(
+        3600000U, Default::roleScaledIntervalMs(meshtastic_Config_DeviceConfig_Role_CLIENT, TrafficType::POSITION, 40));
+    // Above it, client intervals stretch...
+    TEST_ASSERT_GREATER_THAN_UINT32(
+        3600000U, Default::roleScaledIntervalMs(meshtastic_Config_DeviceConfig_Role_CLIENT, TrafficType::POSITION, 100));
+    // ...but router and tracker senders stay exempt, like their own broadcasts.
+    TEST_ASSERT_EQUAL_UINT32(
+        static_cast<uint32_t>(ONE_DAY / 2) * 1000U,
+        Default::roleScaledIntervalMs(meshtastic_Config_DeviceConfig_Role_ROUTER, TrafficType::POSITION, 100));
+    TEST_ASSERT_EQUAL_UINT32(
+        3600000U, Default::roleScaledIntervalMs(meshtastic_Config_DeviceConfig_Role_TRACKER, TrafficType::TELEMETRY, 100));
+}
+
 void setup()
 {
     // Small delay to match other test mains
@@ -201,6 +262,9 @@ void setup()
     RUN_TEST(test_ms_default_clamps);
     RUN_TEST(test_ms_result_is_int32_safe);
     RUN_TEST(test_scaled_overflow_saturates);
+    RUN_TEST(test_roleDefaultIntervalSecs_perRole);
+    RUN_TEST(test_roleRateAllowance_perRole);
+    RUN_TEST(test_roleScaledIntervalMs_congestionAndExemptions);
     exit(UNITY_END());
 }
 

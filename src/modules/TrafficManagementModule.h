@@ -24,7 +24,7 @@
  * per-node features instead of separate per-feature caches. Timestamps are
  * stored as 8-bit relative offsets from a rolling epoch to further reduce
  * memory footprint. LoRa packet rates are low enough that an O(n) scan of
- * ~1000 11-byte entries is negligible next to packet processing.
+ * ~1000 13-byte entries is negligible next to packet processing.
  */
 class TrafficManagementModule : public MeshModule, private concurrency::OSThread
 {
@@ -77,11 +77,11 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
 
   private:
     // =========================================================================
-    // Unified Cache Entry (11 bytes) - Same for ALL platforms
+    // Unified Cache Entry (13 bytes) - Same for ALL platforms
     // =========================================================================
     //
     // A single compact structure used across ESP32, NRF52, and all other platforms.
-    // Memory: 11 bytes × 2048 entries = 22KB
+    // Memory: 13 bytes × 2048 entries = 26KB
     //
     // Position Fingerprinting:
     //   Instead of storing full coordinates (8 bytes) or a computed hash,
@@ -110,6 +110,8 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     //   [8]     rate_time       - Rate window start (1 byte, adaptive resolution)
     //   [9]     unknown_time    - Unknown tracking start (1 byte, adaptive resolution)
     //   [10]    next_hop        - Last-byte relay to reach `node` (1 byte, 0 = none)
+    //   [11]    telem_time      - Last telemetry broadcast (1 byte, adaptive resolution)
+    //   [12]    info_time       - Last nodeinfo broadcast (1 byte, adaptive resolution)
     //
     // next_hop semantics:
     //   A routing hint: the last byte of the NodeNum to use as next hop to reach
@@ -129,15 +131,17 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
         uint8_t rate_time;       // 1 byte  - Rate window start (adaptive resolution)
         uint8_t unknown_time;    // 1 byte  - Unknown tracking start (adaptive resolution)
         uint8_t next_hop;        // 1 byte  - Last-byte relay to reach `node` (0 = none). See note below.
+        uint8_t telem_time;      // 1 byte  - Last telemetry broadcast (adaptive resolution)
+        uint8_t info_time;       // 1 byte  - Last nodeinfo broadcast (adaptive resolution)
     };
-    static_assert(sizeof(UnifiedCacheEntry) == 11, "UnifiedCacheEntry should be 11 bytes");
+    static_assert(sizeof(UnifiedCacheEntry) == 13, "UnifiedCacheEntry should be 13 bytes");
 
     // =========================================================================
     // Flat unified cache
     // =========================================================================
     //
     // Plain array, linear scan (same idiom as WarmNodeStore). A lookup walks at
-    // most cacheSize() × 11 B — microseconds at LoRa packet rates, not worth a
+    // most cacheSize() × 13 B — microseconds at LoRa packet rates, not worth a
     // hash table. Insertion on a full cache evicts the stalest entry,
     // preferring entries without a next_hop hint (those are the long-tail
     // routing state this cache exists to keep).
@@ -168,6 +172,7 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     uint16_t posTimeResolution = 60;     // Seconds per tick for position
     uint16_t rateTimeResolution = 60;    // Seconds per tick for rate limiting
     uint16_t unknownTimeResolution = 60; // Seconds per tick for unknown tracking
+    uint16_t portTimeResolution = 339;   // Seconds per tick for telem/info port intervals (max range)
 
     // Calculate resolution from configured interval (called once at startup)
     static uint16_t calcTimeResolution(uint32_t intervalSecs)
@@ -213,6 +218,9 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     uint8_t toRelativeUnknownTime(uint32_t nowMs) const { return toRelativeTime(nowMs, unknownTimeResolution); }
     uint32_t fromRelativeUnknownTime(uint8_t t) const { return fromRelativeTime(t, unknownTimeResolution); }
 
+    uint8_t toRelativePortTime(uint32_t nowMs) const { return toRelativeTime(nowMs, portTimeResolution); }
+    uint32_t fromRelativePortTime(uint8_t t) const { return fromRelativeTime(t, portTimeResolution); }
+
     // Coarsest of the per-feature resolutions (seconds per tick).
     uint16_t maxResolution() const
     {
@@ -221,6 +229,8 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
             maxRes = rateTimeResolution;
         if (unknownTimeResolution > maxRes)
             maxRes = unknownTimeResolution;
+        if (portTimeResolution > maxRes)
+            maxRes = portTimeResolution;
         return maxRes;
     }
 
@@ -293,6 +303,23 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     NodeNum exhaustRequestedFrom = 0;
     PacketId exhaustRequestedId = 0;
 
+    // Per-packet flags set in handleReceived() (which runs first) and consumed
+    // by alterReceived() on the same packet to perform hop exhaustion. Reset at
+    // the start of handleReceived().
+    bool politenessExhaustPending = false;
+    bool portIntervalExhaustPending = false;
+
+    // Snapshots refreshed once per maintenance pass (runOnce) so packet-rate
+    // paths avoid O(n) NodeDB walks and float interval math.
+    uint16_t cachedOnlineNodes = 0;
+    uint32_t cachedRateWindowMs = 0; // congestion-stretched rate window
+    // Allowed per-port intervals for OTHER nodes, permissiveness pre-applied
+    // (except router positions, which get the full role interval with no slack).
+    // Rows: 0 = non-router sender, 1 = ROUTER/ROUTER_LATE sender.
+    // Cols: 0 = POSITION, 1 = TELEMETRY, 2 = NODEINFO.
+    // All-zero until the first maintenance pass; policing is skipped until then.
+    uint32_t cachedPortIntervalMs[2][3] = {};
+
     // One-shot guard: warm-start next-hop cache from NodeDB on first maintenance pass.
     bool nextHopPreloaded = false;
 
@@ -319,8 +346,23 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     bool shouldDropPosition(const meshtastic_MeshPacket *p, const meshtastic_Position *pos, uint32_t nowMs);
     bool shouldRespondToNodeInfo(const meshtastic_MeshPacket *p, bool sendResponse);
     bool isMinHopsFromRequestor(const meshtastic_MeshPacket *p) const;
-    bool isRateLimited(NodeNum from, uint32_t nowMs);
+    bool isRateLimited(NodeNum from, uint32_t nowMs, uint8_t allowedCount, uint8_t *rateCountOut);
     bool shouldDropUnknown(const meshtastic_MeshPacket *p, uint32_t nowMs);
+
+    // Role of the packet originator from NodeDB; CLIENT baseline when unknown.
+    meshtastic_Config_DeviceConfig_Role lookupSenderRole(NodeNum from) const;
+
+    // Relay radius granted to a packet of `port` originated by `senderRole`:
+    // hopscaling recommendation floored by the SENDER's role, plus the
+    // configured hop grace (router telemetry bonus included). HOP_MAX when
+    // hopscaling is unavailable.
+    uint8_t allowedHopsForSender(meshtastic_Config_DeviceConfig_Role senderRole, meshtastic_PortNum port) const;
+
+    // Per-port frequency policing against the sender-role baseline. Reads and
+    // refreshes the port timestamp; sets portIntervalExhaustPending when the
+    // packet arrived inside the allowed interval. Must run BEFORE
+    // shouldDropPosition so dedup still sees the previous pos_time.
+    void checkPortInterval(const meshtastic_MeshPacket &mp, meshtastic_Config_DeviceConfig_Role senderRole, uint32_t nowMs);
 
     void logAction(const char *action, const meshtastic_MeshPacket *p, const char *reason) const;
     void incrementStat(uint32_t *field);

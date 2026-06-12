@@ -31,11 +31,20 @@
 #define min_neighbor_info_broadcast_secs 4 * 60 * 60
 #define default_map_publish_interval_secs 60 * 60
 
-enum class TrafficType { POSITION, TELEMETRY };
+enum class TrafficType { POSITION, TELEMETRY, NODEINFO };
 
 // Traffic management defaults
 #define default_traffic_mgmt_position_precision_bits 19               // ~90m grid cells (±45m)
 #define default_traffic_mgmt_position_min_interval_secs (ONE_DAY / 2) // 12 hours between identical positions
+#define default_traffic_mgmt_rate_limit_window_secs (60 * 60)         // per-hour budget framing
+#define default_traffic_mgmt_rate_limit_max_packets 5                 // CLIENT baseline: own ~2.5/h routine budget + 1-2
+#define default_traffic_mgmt_rate_limit_max_packets_tracker 14        // 5-min smart-min positions + telemetry headroom
+#define default_traffic_mgmt_hop_grace 1                              // extra hops for others beyond our recommendation
+#define max_traffic_mgmt_hop_grace 2
+#define default_traffic_mgmt_port_interval_permissiveness_8ths 4 // others' interval = sender-role interval x 4/8
+#define default_traffic_mgmt_precision_clamp_bits 13             // what the default channel grants our own node
+#define min_traffic_mgmt_precision_clamp_bits 10
+#define default_traffic_mgmt_politeness_threshold_8ths 12 // (rate/allowed)x(hop_start/suggested) > 1.5 acts
 
 // Hop scaling defaults
 #define default_hop_scaling_min_target_nodes 40          // walk threshold: first hop reaching this cumulative count
@@ -76,6 +85,22 @@ class Default
                                                    TrafficType type);
     static uint8_t getConfiguredOrDefaultHopLimit(uint8_t configured);
     static uint32_t getConfiguredOrMinimumValue(uint32_t configured, uint32_t minValue);
+
+    // Default broadcast interval the firmware would impose on a node of the
+    // given role (the IF_ROUTER values evaluated for an arbitrary role rather
+    // than our own config.device.role). Used to judge OTHER nodes' traffic
+    // against their role's baseline, never cross-role.
+    static uint32_t roleDefaultIntervalSecs(meshtastic_Config_DeviceConfig_Role role, TrafficType type);
+
+    // roleDefaultIntervalSecs in ms with the same congestion scaling and
+    // regional throttling a well-behaved node of that role would apply to its
+    // own broadcasts (roles exempt from congestion scaling stay exempt).
+    static uint32_t roleScaledIntervalMs(meshtastic_Config_DeviceConfig_Role role, TrafficType type, uint32_t numOnlineNodes);
+
+    // Routine-broadcast packets per rate window allowed from a sender of the
+    // given role, derived from the CLIENT baseline (configured or default).
+    // 0 means the role's routine broadcasts are dropped (deprecated roles).
+    static uint8_t roleRateAllowance(meshtastic_Config_DeviceConfig_Role role, uint8_t clientBaseline);
 
   private:
     // Note: Kept as uint32_t to match the public API parameter type

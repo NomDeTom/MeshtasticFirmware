@@ -1111,16 +1111,18 @@ void NodeDB::initConfigIntervals()
 
 // Always-on traffic management defaults. Only booleans are written; every
 // numeric field stays 0 and resolves to its default_traffic_mgmt_* macro at
-// use (e.g. position dedup precision/interval), so fork-wide tuning changes
-// take effect without another migration. Rate limiting and the features that
-// exhaust or reshape relayed traffic (exhaust_hop_*, drop_unknown_enabled,
-// nodeinfo_direct_response) stay opt-in.
+// use, so fork-wide tuning changes take effect without another migration.
+// Features that exhaust or reshape relayed traffic beyond dedup/rate/clamp
+// (exhaust_hop_*, port_interval_enabled, nodeinfo_direct_response,
+// drop_unknown_enabled) stay opt-in.
 static void installTrafficManagementDefaults(meshtastic_LocalModuleConfig &mc)
 {
     mc.has_traffic_management = true;
     mc.traffic_management = meshtastic_ModuleConfig_TrafficManagementConfig_init_zero;
     mc.traffic_management.enabled = true;
     mc.traffic_management.position_dedup_enabled = true;
+    mc.traffic_management.rate_limit_enabled = true;
+    mc.traffic_management.precision_clamp_enabled = true;
 }
 
 void NodeDB::installDefaultModuleConfig()

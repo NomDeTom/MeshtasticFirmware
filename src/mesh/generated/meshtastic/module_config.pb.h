@@ -260,6 +260,33 @@ typedef struct _meshtastic_ModuleConfig_TrafficManagementConfig {
     bool exhaust_hop_position;
     /* Preserve hop_limit for router-to-router traffic */
     bool router_preserve_hops;
+    /* Extra hops granted to other nodes' broadcasts beyond our own
+ hop-scaling recommendation before exhaustion applies.
+ 0 = compiled default (1). Clamped to 1..2. */
+    uint32_t hop_grace;
+    /* Enable per-port frequency policing of routine broadcasts
+ (position/telemetry/nodeinfo) on well-known channels. */
+    bool port_interval_enabled;
+    /* Fraction (in eighths) of the sender-role's own scaled broadcast
+ interval that other nodes must respect before hop exhaustion.
+ 0 = compiled default (4 = half our interval, twice our frequency). */
+    uint32_t port_interval_permissiveness;
+    /* Clamp the precision of relayed position broadcasts on well-known
+ channels (single-byte or absent PSK with a default preset name).
+ Disabled entirely in ham mode (owner.is_licensed). */
+    bool precision_clamp_enabled;
+    /* Maximum precision bits allowed on relayed positions before clamping.
+ 0 = compiled default (13, ~1.5 km). Sanitized to 10..32. */
+    uint32_t precision_clamp_bits;
+    /* Rudeness threshold for the politeness ladder, fixed point x8:
+ rudeness = (observed_rate / allowed_rate) * (hop_start / suggested_hops).
+ Exhaust hops above threshold, drop above 2x threshold. Only evaluated
+ on an active mesh. 0 = compiled default (12 = 1.5). */
+    uint32_t politeness_threshold;
+    /* Apply port-interval policing and precision clamping to channels with
+ user-supplied (high-entropy) PSKs as well. Default off: traffic we
+ were trusted with via private keys is not shaped or rewritten. */
+    bool apply_to_private_channels;
 } meshtastic_ModuleConfig_TrafficManagementConfig;
 
 /* Serial Config */
@@ -588,7 +615,7 @@ extern "C" {
 #define meshtastic_ModuleConfig_DetectionSensorConfig_init_default {0, 0, 0, 0, "", 0, _meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_MIN, 0}
 #define meshtastic_ModuleConfig_AudioConfig_init_default {0, 0, _meshtastic_ModuleConfig_AudioConfig_Audio_Baud_MIN, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_PaxcounterConfig_init_default {0, 0, 0, 0}
-#define meshtastic_ModuleConfig_TrafficManagementConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_ModuleConfig_TrafficManagementConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_SerialConfig_init_default {0, 0, 0, 0, _meshtastic_ModuleConfig_SerialConfig_Serial_Baud_MIN, 0, _meshtastic_ModuleConfig_SerialConfig_Serial_Mode_MIN, 0}
 #define meshtastic_ModuleConfig_ExternalNotificationConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_StoreForwardConfig_init_default {0, 0, 0, 0, 0, 0}
@@ -607,7 +634,7 @@ extern "C" {
 #define meshtastic_ModuleConfig_DetectionSensorConfig_init_zero {0, 0, 0, 0, "", 0, _meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_MIN, 0}
 #define meshtastic_ModuleConfig_AudioConfig_init_zero {0, 0, _meshtastic_ModuleConfig_AudioConfig_Audio_Baud_MIN, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_PaxcounterConfig_init_zero {0, 0, 0, 0}
-#define meshtastic_ModuleConfig_TrafficManagementConfig_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_ModuleConfig_TrafficManagementConfig_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_SerialConfig_init_zero {0, 0, 0, 0, _meshtastic_ModuleConfig_SerialConfig_Serial_Baud_MIN, 0, _meshtastic_ModuleConfig_SerialConfig_Serial_Mode_MIN, 0}
 #define meshtastic_ModuleConfig_ExternalNotificationConfig_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_StoreForwardConfig_init_zero {0, 0, 0, 0, 0, 0}
@@ -670,6 +697,13 @@ extern "C" {
 #define meshtastic_ModuleConfig_TrafficManagementConfig_exhaust_hop_telemetry_tag 12
 #define meshtastic_ModuleConfig_TrafficManagementConfig_exhaust_hop_position_tag 13
 #define meshtastic_ModuleConfig_TrafficManagementConfig_router_preserve_hops_tag 14
+#define meshtastic_ModuleConfig_TrafficManagementConfig_hop_grace_tag 15
+#define meshtastic_ModuleConfig_TrafficManagementConfig_port_interval_enabled_tag 16
+#define meshtastic_ModuleConfig_TrafficManagementConfig_port_interval_permissiveness_tag 17
+#define meshtastic_ModuleConfig_TrafficManagementConfig_precision_clamp_enabled_tag 18
+#define meshtastic_ModuleConfig_TrafficManagementConfig_precision_clamp_bits_tag 19
+#define meshtastic_ModuleConfig_TrafficManagementConfig_politeness_threshold_tag 20
+#define meshtastic_ModuleConfig_TrafficManagementConfig_apply_to_private_channels_tag 21
 #define meshtastic_ModuleConfig_SerialConfig_enabled_tag 1
 #define meshtastic_ModuleConfig_SerialConfig_echo_tag 2
 #define meshtastic_ModuleConfig_SerialConfig_rxd_tag 3
@@ -880,7 +914,14 @@ X(a, STATIC,   SINGULAR, BOOL,     drop_unknown_enabled,  10) \
 X(a, STATIC,   SINGULAR, UINT32,   unknown_packet_threshold,  11) \
 X(a, STATIC,   SINGULAR, BOOL,     exhaust_hop_telemetry,  12) \
 X(a, STATIC,   SINGULAR, BOOL,     exhaust_hop_position,  13) \
-X(a, STATIC,   SINGULAR, BOOL,     router_preserve_hops,  14)
+X(a, STATIC,   SINGULAR, BOOL,     router_preserve_hops,  14) \
+X(a, STATIC,   SINGULAR, UINT32,   hop_grace,        15) \
+X(a, STATIC,   SINGULAR, BOOL,     port_interval_enabled,  16) \
+X(a, STATIC,   SINGULAR, UINT32,   port_interval_permissiveness,  17) \
+X(a, STATIC,   SINGULAR, BOOL,     precision_clamp_enabled,  18) \
+X(a, STATIC,   SINGULAR, UINT32,   precision_clamp_bits,  19) \
+X(a, STATIC,   SINGULAR, UINT32,   politeness_threshold,  20) \
+X(a, STATIC,   SINGULAR, BOOL,     apply_to_private_channels,  21)
 #define meshtastic_ModuleConfig_TrafficManagementConfig_CALLBACK NULL
 #define meshtastic_ModuleConfig_TrafficManagementConfig_DEFAULT NULL
 
@@ -1053,7 +1094,7 @@ extern const pb_msgdesc_t meshtastic_RemoteHardwarePin_msg;
 #define meshtastic_ModuleConfig_StoreForwardConfig_size 24
 #define meshtastic_ModuleConfig_TAKConfig_size   4
 #define meshtastic_ModuleConfig_TelemetryConfig_size 50
-#define meshtastic_ModuleConfig_TrafficManagementConfig_size 52
+#define meshtastic_ModuleConfig_TrafficManagementConfig_size 88
 #define meshtastic_ModuleConfig_size             227
 #define meshtastic_RemoteHardwarePin_size        21
 

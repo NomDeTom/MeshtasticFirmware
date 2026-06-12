@@ -444,6 +444,33 @@ void HopScalingModule::logStatusReport(bool didHourlyUpdate) const
              lastScaledPerHop[7]);
 }
 
+uint8_t HopScalingModule::roleHopFloor(meshtastic_Config_DeviceConfig_Role role)
+{
+    switch (role) {
+    case meshtastic_Config_DeviceConfig_Role_TRACKER:
+    case meshtastic_Config_DeviceConfig_Role_TAK_TRACKER:
+        return 2;
+    case meshtastic_Config_DeviceConfig_Role_SENSOR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+uint8_t HopScalingModule::getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role senderRole, uint8_t graceHops,
+                                                  meshtastic_PortNum port) const
+{
+    uint8_t allowed = std::max(lastRequiredHop, roleHopFloor(senderRole));
+
+    if ((senderRole == meshtastic_Config_DeviceConfig_Role_ROUTER ||
+         senderRole == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE) &&
+        port == meshtastic_PortNum_TELEMETRY_APP)
+        allowed++;
+
+    allowed += graceHops;
+    return (allowed > HOP_MAX) ? HOP_MAX : allowed;
+}
+
 int32_t HopScalingModule::runOnce()
 {
     const bool isFirstRun = !hasCompletedInitialRun;
@@ -467,22 +494,7 @@ int32_t HopScalingModule::runOnce()
 
     if (didHourlyUpdate) {
         uint8_t suggested = (histogramRollCount > 0 && count > 0) ? lastSuggestedHop : HOP_MAX;
-        // Role-based hop floor: TRACKER/TAK_TRACKER always reach at least 2 hops,
-        // SENSOR reaches at least 1, so these reporting roles remain reachable even
-        // on a dense mesh where the histogram recommends a lower hop count.
-        uint8_t roleFloor = 0;
-        switch (config.device.role) {
-        case meshtastic_Config_DeviceConfig_Role_TRACKER:
-        case meshtastic_Config_DeviceConfig_Role_TAK_TRACKER:
-            roleFloor = 2;
-            break;
-        case meshtastic_Config_DeviceConfig_Role_SENSOR:
-            roleFloor = 1;
-            break;
-        default:
-            break;
-        }
-        lastRequiredHop = std::max(suggested, roleFloor);
+        lastRequiredHop = std::max(suggested, roleHopFloor(config.device.role));
     }
 
     logStatusReport(didHourlyUpdate);

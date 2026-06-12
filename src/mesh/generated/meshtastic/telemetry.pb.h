@@ -400,6 +400,17 @@ typedef struct _meshtastic_TrafficManagementStats {
     uint32_t hop_exhausted_packets;
     /* Number of times router hop preservation was applied */
     uint32_t router_hops_preserved;
+    /* Number of relayed broadcasts hop-exhausted for exceeding their
+ sender-role per-port frequency allowance */
+    uint32_t port_interval_exhausts;
+    /* Number of relayed position payloads rewritten to the precision ceiling */
+    uint32_t precision_clamps;
+    /* Number of relayed broadcasts hop-exhausted by the politeness ladder */
+    uint32_t politeness_exhausts;
+    /* Number of relayed broadcasts dropped by the politeness ladder */
+    uint32_t politeness_drops;
+    /* Number of routine broadcasts dropped from deprecated-role senders */
+    uint32_t deprecated_role_drops;
 } meshtastic_TrafficManagementStats;
 
 /* Health telemetry metrics */
@@ -521,7 +532,7 @@ extern "C" {
 #define meshtastic_PowerMetrics_init_default     {false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0}
 #define meshtastic_AirQualityMetrics_init_default {false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0}
 #define meshtastic_LocalStats_init_default       {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-#define meshtastic_TrafficManagementStats_init_default {0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_TrafficManagementStats_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_HealthMetrics_init_default    {false, 0, false, 0, false, 0}
 #define meshtastic_HostMetrics_init_default      {0, 0, 0, false, 0, false, 0, 0, 0, 0, false, ""}
 #define meshtastic_Telemetry_init_default        {0, 0, {meshtastic_DeviceMetrics_init_default}}
@@ -532,7 +543,7 @@ extern "C" {
 #define meshtastic_PowerMetrics_init_zero        {false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0}
 #define meshtastic_AirQualityMetrics_init_zero   {false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0}
 #define meshtastic_LocalStats_init_zero          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-#define meshtastic_TrafficManagementStats_init_zero {0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_TrafficManagementStats_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_HealthMetrics_init_zero       {false, 0, false, 0, false, 0}
 #define meshtastic_HostMetrics_init_zero         {0, 0, 0, false, 0, false, 0, 0, 0, 0, false, ""}
 #define meshtastic_Telemetry_init_zero           {0, 0, {meshtastic_DeviceMetrics_init_zero}}
@@ -631,6 +642,11 @@ extern "C" {
 #define meshtastic_TrafficManagementStats_unknown_packet_drops_tag 5
 #define meshtastic_TrafficManagementStats_hop_exhausted_packets_tag 6
 #define meshtastic_TrafficManagementStats_router_hops_preserved_tag 7
+#define meshtastic_TrafficManagementStats_port_interval_exhausts_tag 8
+#define meshtastic_TrafficManagementStats_precision_clamps_tag 9
+#define meshtastic_TrafficManagementStats_politeness_exhausts_tag 10
+#define meshtastic_TrafficManagementStats_politeness_drops_tag 11
+#define meshtastic_TrafficManagementStats_deprecated_role_drops_tag 12
 #define meshtastic_HealthMetrics_heart_bpm_tag   1
 #define meshtastic_HealthMetrics_spO2_tag        2
 #define meshtastic_HealthMetrics_temperature_tag 3
@@ -773,7 +789,12 @@ X(a, STATIC,   SINGULAR, UINT32,   nodeinfo_cache_hits,   3) \
 X(a, STATIC,   SINGULAR, UINT32,   rate_limit_drops,   4) \
 X(a, STATIC,   SINGULAR, UINT32,   unknown_packet_drops,   5) \
 X(a, STATIC,   SINGULAR, UINT32,   hop_exhausted_packets,   6) \
-X(a, STATIC,   SINGULAR, UINT32,   router_hops_preserved,   7)
+X(a, STATIC,   SINGULAR, UINT32,   router_hops_preserved,   7) \
+X(a, STATIC,   SINGULAR, UINT32,   port_interval_exhausts,   8) \
+X(a, STATIC,   SINGULAR, UINT32,   precision_clamps,   9) \
+X(a, STATIC,   SINGULAR, UINT32,   politeness_exhausts,  10) \
+X(a, STATIC,   SINGULAR, UINT32,   politeness_drops,  11) \
+X(a, STATIC,   SINGULAR, UINT32,   deprecated_role_drops,  12)
 #define meshtastic_TrafficManagementStats_CALLBACK NULL
 #define meshtastic_TrafficManagementStats_DEFAULT NULL
 
@@ -871,7 +892,7 @@ extern const pb_msgdesc_t meshtastic_SEN5XState_msg;
 #define meshtastic_PowerMetrics_size             81
 #define meshtastic_SEN5XState_size               27
 #define meshtastic_Telemetry_size                272
-#define meshtastic_TrafficManagementStats_size   42
+#define meshtastic_TrafficManagementStats_size   72
 
 #ifdef __cplusplus
 } /* extern "C" */

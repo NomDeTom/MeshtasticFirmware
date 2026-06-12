@@ -171,6 +171,22 @@ class HopScalingModule : private concurrency::OSThread
     // -----------------------------------------------------------------------
 
     uint8_t getLastRequiredHop() const { return lastRequiredHop; }
+
+    /// Hop floor for a given role — the same floors runOnce() applies to our
+    /// own role: TRACKER/TAK_TRACKER reach at least 2 hops, SENSOR at least 1,
+    /// so reporting roles remain reachable on a dense mesh where the histogram
+    /// recommends a lower hop count.
+    static uint8_t roleHopFloor(meshtastic_Config_DeviceConfig_Role role);
+
+    /// Allowed relay radius for a packet ORIGINATED by a node of `senderRole`:
+    /// the sender's role-floored recommendation plus `graceHops` of slack, so
+    /// other nodes are judged against their own role's baseline (never ours)
+    /// and always get moderately more reach than we would grant ourselves.
+    /// ROUTER/ROUTER_LATE senders earn one extra hop for TELEMETRY only —
+    /// router positions are fixed, so wide-reach position relays buy nothing.
+    /// Result is clamped to HOP_MAX.
+    uint8_t getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role senderRole, uint8_t graceHops,
+                                    meshtastic_PortNum port) const;
     uint8_t getEntryCount() const { return count; }
     uint8_t getFillPercentage() const { return static_cast<uint8_t>((static_cast<uint16_t>(count) * 100u) / CAPACITY); }
     uint8_t getSamplingDenominator() const { return samplingDenominator; }
@@ -204,6 +220,9 @@ class HopScalingModule : private concurrency::OSThread
     uint16_t getHashSeed() const { return hashSeed; }
     /// Expose hashNodeId for tests that need to compute which node IDs pass a given denominator.
     uint16_t hashNodeIdPublic(uint32_t nodeId) const { return hashNodeId(nodeId); }
+    /// Force the hop recommendation. Use in tests of consumers (e.g. TMM mesh-radius
+    /// exhaustion) that need a deterministic radius without driving 13 h of rollovers.
+    void setLastRequiredHop(uint8_t h) { lastRequiredHop = h; }
 #endif
 
   protected:

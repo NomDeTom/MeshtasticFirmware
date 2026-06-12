@@ -66,6 +66,37 @@ bool applyPositionPrecision(meshtastic_MeshPacket &packet, uint32_t precision)
     return true;
 }
 
+bool clampRelayedPositionPrecision(meshtastic_MeshPacket &packet, uint32_t maxPrecisionBits, bool *clamped)
+{
+    if (clamped)
+        *clamped = false;
+    if (packet.which_payload_variant != meshtastic_MeshPacket_decoded_tag ||
+        packet.decoded.portnum != meshtastic_PortNum_POSITION_APP) {
+        return true;
+    }
+
+    meshtastic_Position position = meshtastic_Position_init_default;
+    if (!pb_decode_from_bytes(packet.decoded.payload.bytes, packet.decoded.payload.size, &meshtastic_Position_msg, &position)) {
+        return false;
+    }
+
+    if (!position.has_latitude_i || !position.has_longitude_i) {
+        return true; // nothing to protect
+    }
+
+    uint32_t current = (position.precision_bits == 0 || position.precision_bits > 32) ? 32 : position.precision_bits;
+    if (current <= maxPrecisionBits) {
+        return true; // never increase precision
+    }
+
+    applyPositionPrecision(position, maxPrecisionBits);
+    packet.decoded.payload.size = pb_encode_to_bytes(packet.decoded.payload.bytes, sizeof(packet.decoded.payload.bytes),
+                                                     &meshtastic_Position_msg, &position);
+    if (clamped)
+        *clamped = true;
+    return true;
+}
+
 bool applyPositionPrecisionForChannel(meshtastic_MeshPacket &packet, uint8_t channelIndex)
 {
     if (packet.which_payload_variant != meshtastic_MeshPacket_decoded_tag ||

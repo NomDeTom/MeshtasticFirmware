@@ -645,6 +645,52 @@ void test_scenario_summary_output()
     TEST_MESSAGE("K: Full at DENOM_MAX drops entry  | 128 entries, samp=filt=128     | count stays 128, LOG_WARN emitted");
 }
 
+// ---------------------------------------------------------------------------
+// Sender-role hop allowances
+// ---------------------------------------------------------------------------
+
+static void test_roleHopFloor_matrix()
+{
+    TEST_ASSERT_EQUAL_UINT8(2, HopScalingModule::roleHopFloor(meshtastic_Config_DeviceConfig_Role_TRACKER));
+    TEST_ASSERT_EQUAL_UINT8(2, HopScalingModule::roleHopFloor(meshtastic_Config_DeviceConfig_Role_TAK_TRACKER));
+    TEST_ASSERT_EQUAL_UINT8(1, HopScalingModule::roleHopFloor(meshtastic_Config_DeviceConfig_Role_SENSOR));
+    TEST_ASSERT_EQUAL_UINT8(0, HopScalingModule::roleHopFloor(meshtastic_Config_DeviceConfig_Role_CLIENT));
+    TEST_ASSERT_EQUAL_UINT8(0, HopScalingModule::roleHopFloor(meshtastic_Config_DeviceConfig_Role_ROUTER));
+    TEST_ASSERT_EQUAL_UINT8(0, HopScalingModule::roleHopFloor(meshtastic_Config_DeviceConfig_Role_REPEATER));
+}
+
+static void test_allowedHopsForSender_gracesAndBonuses()
+{
+    HopScalingTestShim module;
+    module.setLastRequiredHop(2);
+
+    // CLIENT: recommendation + grace.
+    TEST_ASSERT_EQUAL_UINT8(
+        3, module.getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role_CLIENT, 1, meshtastic_PortNum_TELEMETRY_APP));
+    TEST_ASSERT_EQUAL_UINT8(
+        4, module.getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role_CLIENT, 2, meshtastic_PortNum_POSITION_APP));
+
+    // ROUTER: +1 bonus on telemetry only, never positions (they're stationary).
+    TEST_ASSERT_EQUAL_UINT8(
+        4, module.getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role_ROUTER, 1, meshtastic_PortNum_TELEMETRY_APP));
+    TEST_ASSERT_EQUAL_UINT8(
+        3, module.getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role_ROUTER, 1, meshtastic_PortNum_POSITION_APP));
+    TEST_ASSERT_EQUAL_UINT8(
+        4, module.getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role_ROUTER_LATE, 1, meshtastic_PortNum_TELEMETRY_APP));
+
+    // TRACKER floor lifts a low recommendation before grace is added.
+    module.setLastRequiredHop(1);
+    TEST_ASSERT_EQUAL_UINT8(
+        3, module.getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role_TRACKER, 1, meshtastic_PortNum_POSITION_APP));
+    TEST_ASSERT_EQUAL_UINT8(
+        2, module.getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role_SENSOR, 1, meshtastic_PortNum_TELEMETRY_APP));
+
+    // Clamped at HOP_MAX even with every bonus stacked.
+    module.setLastRequiredHop(7);
+    TEST_ASSERT_EQUAL_UINT8(
+        HOP_MAX, module.getAllowedHopsForSender(meshtastic_Config_DeviceConfig_Role_ROUTER, 2, meshtastic_PortNum_TELEMETRY_APP));
+}
+
 static void test_memory_layout()
 {
     TEST_MSG_FMT("%-35s  %6s  %s", "Type", "bytes", "Notes");
@@ -713,6 +759,9 @@ void setup()
     RUN_TEST(test_full_at_denom_max_drops_entry);
 
     printf("\n=== Summary ===\n");
+    RUN_TEST(test_roleHopFloor_matrix);
+    RUN_TEST(test_allowedHopsForSender_gracesAndBonuses);
+
     RUN_TEST(test_memory_layout);
     RUN_TEST(test_scenario_summary_output);
 

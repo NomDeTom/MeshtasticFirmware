@@ -1,6 +1,7 @@
 #include "PositionPrecision.h"
 #include "TestUtil.h"
 #include "mesh-pb-constants.h"
+#include <cstring>
 #include <unity.h>
 
 static meshtastic_Position makePosition()
@@ -90,6 +91,87 @@ static void test_applyPositionPrecision_reencodesPositionPacket()
     TEST_ASSERT_EQUAL_UINT32(16, decoded.precision_bits);
 }
 
+static meshtastic_MeshPacket makePositionPacket(const meshtastic_Position &position)
+{
+    meshtastic_MeshPacket packet = meshtastic_MeshPacket_init_default;
+    packet.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    packet.decoded.portnum = meshtastic_PortNum_POSITION_APP;
+    packet.decoded.payload.size = pb_encode_to_bytes(packet.decoded.payload.bytes, sizeof(packet.decoded.payload.bytes),
+                                                     &meshtastic_Position_msg, &position);
+    return packet;
+}
+
+static void test_clampRelayedPositionPrecision_clampsOverPreciseAndReports()
+{
+    meshtastic_Position position = makePosition();
+    position.precision_bits = 32;
+    meshtastic_MeshPacket packet = makePositionPacket(position);
+
+    bool clamped = false;
+    TEST_ASSERT_TRUE(clampRelayedPositionPrecision(packet, 13, &clamped));
+    TEST_ASSERT_TRUE(clamped);
+
+    meshtastic_Position decoded = meshtastic_Position_init_default;
+    TEST_ASSERT_TRUE(
+        pb_decode_from_bytes(packet.decoded.payload.bytes, packet.decoded.payload.size, &meshtastic_Position_msg, &decoded));
+    TEST_ASSERT_EQUAL_UINT32(13, decoded.precision_bits);
+    // Lower 19 bits carry only the grid-cell-center offset after truncation.
+    TEST_ASSERT_EQUAL_UINT32(1u << (31 - 13), static_cast<uint32_t>(decoded.latitude_i) & ((1u << (32 - 13)) - 1));
+}
+
+static void test_clampRelayedPositionPrecision_precisionZeroWithCoordsIsFullPrecision()
+{
+    meshtastic_Position position = makePosition(); // precision_bits stays 0
+    meshtastic_MeshPacket packet = makePositionPacket(position);
+
+    bool clamped = false;
+    TEST_ASSERT_TRUE(clampRelayedPositionPrecision(packet, 13, &clamped));
+    TEST_ASSERT_TRUE(clamped);
+
+    meshtastic_Position decoded = meshtastic_Position_init_default;
+    TEST_ASSERT_TRUE(
+        pb_decode_from_bytes(packet.decoded.payload.bytes, packet.decoded.payload.size, &meshtastic_Position_msg, &decoded));
+    TEST_ASSERT_EQUAL_UINT32(13, decoded.precision_bits);
+}
+
+static void test_clampRelayedPositionPrecision_neverIncreasesPrecision()
+{
+    meshtastic_Position position = makePosition();
+    position.precision_bits = 11;
+    meshtastic_MeshPacket packet = makePositionPacket(position);
+    const uint16_t originalSize = packet.decoded.payload.size;
+
+    bool clamped = true;
+    TEST_ASSERT_TRUE(clampRelayedPositionPrecision(packet, 13, &clamped));
+    TEST_ASSERT_FALSE(clamped);
+    TEST_ASSERT_EQUAL_UINT16(originalSize, packet.decoded.payload.size);
+}
+
+static void test_clampRelayedPositionPrecision_noCoordinatesIsNoOp()
+{
+    meshtastic_Position position = makePosition();
+    position.has_latitude_i = false;
+    position.has_longitude_i = false;
+    meshtastic_MeshPacket packet = makePositionPacket(position);
+
+    bool clamped = true;
+    TEST_ASSERT_TRUE(clampRelayedPositionPrecision(packet, 13, &clamped));
+    TEST_ASSERT_FALSE(clamped);
+}
+
+static void test_clampRelayedPositionPrecision_decodeFailureReturnsFalse()
+{
+    meshtastic_MeshPacket packet = meshtastic_MeshPacket_init_default;
+    packet.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    packet.decoded.portnum = meshtastic_PortNum_POSITION_APP;
+    memset(packet.decoded.payload.bytes, 0xFF, 8);
+    packet.decoded.payload.size = 8;
+
+    bool clamped = true;
+    TEST_ASSERT_FALSE(clampRelayedPositionPrecision(packet, 13, &clamped));
+    TEST_ASSERT_FALSE(clamped);
+}
+
 static void test_getPositionPrecisionForChannel_explicitPrecisionIsHonored()
 {
     meshtastic_Channel channel = makeChannel(meshtastic_Channel_Role_PRIMARY, true, 16);
@@ -132,6 +214,11 @@ void setup()
     RUN_TEST(test_applyPositionPrecision_fullPrecisionKeepsLatLon);
     RUN_TEST(test_applyPositionPrecision_zeroScrubsLocationButKeepsTime);
     RUN_TEST(test_applyPositionPrecision_reencodesPositionPacket);
+    RUN_TEST(test_clampRelayedPositionPrecision_clampsOverPreciseAndReports);
+    RUN_TEST(test_clampRelayedPositionPrecision_precisionZeroWithCoordsIsFullPrecision);
+    RUN_TEST(test_clampRelayedPositionPrecision_neverIncreasesPrecision);
+    RUN_TEST(test_clampRelayedPositionPrecision_noCoordinatesIsNoOp);
+    RUN_TEST(test_clampRelayedPositionPrecision_decodeFailureReturnsFalse);
     RUN_TEST(test_getPositionPrecisionForChannel_explicitPrecisionIsHonored);
     RUN_TEST(test_getPositionPrecisionForChannel_explicitZeroDisablesPrimary);
     RUN_TEST(test_getPositionPrecisionForChannel_primaryWithoutModuleSettingsFailsClosed);
