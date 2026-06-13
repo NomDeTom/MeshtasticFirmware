@@ -805,20 +805,6 @@ ProcessMessage TrafficManagementModule::handleReceived(const meshtastic_MeshPack
         const meshtastic_Config_DeviceConfig_Role senderRole =
             routine ? lookupSenderRole(getFrom(&mp)) : meshtastic_Config_DeviceConfig_Role_CLIENT;
 
-        // ---------------------------------------------------------------------
-        // Deprecated Roles
-        // ---------------------------------------------------------------------
-        // REPEATER and ROUTER_CLIENT are deprecated; their routine broadcasts
-        // are dropped outright. Their DMs/text/routing traffic still passes.
-
-        if (routine && (senderRole == meshtastic_Config_DeviceConfig_Role_REPEATER ||
-                        senderRole == meshtastic_Config_DeviceConfig_Role_ROUTER_CLIENT)) {
-            logAction("drop", &mp, "deprecated-role");
-            incrementStat(&stats.deprecated_role_drops);
-            ignoreRequest = true;        // Suppress NAK
-            return ProcessMessage::STOP; // Consumed — will not be rebroadcast
-        }
-
 #if USERPREFS_EVENT_MODE
         // Event mode: event-set default channels should not carry relayed
         // position broadcasts at all — drop rather than clamp.
