@@ -284,30 +284,37 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
     case meshtastic_AdminMessage_set_config_tag: {
         LOG_DEBUG("Client set config");
 
+        bool configSaved = false;
+
         // Non-LoRa configs need no further validation.
         if (r->set_config.which_payload_variant != meshtastic_Config_lora_tag) {
             LOG_DEBUG("Non-LoRa config, applying directly");
-            handleSetConfig(r->set_config, fromOthers);
-            break;
+            configSaved = handleSetConfig(r->set_config, fromOthers);
         }
 
         // Only LORA_24 requires hardware capability validation.
-        if (r->set_config.payload_variant.lora.region != meshtastic_Config_LoRaConfig_RegionCode_LORA_24) {
+        else if (r->set_config.payload_variant.lora.region != meshtastic_Config_LoRaConfig_RegionCode_LORA_24) {
             LOG_DEBUG("LoRa config, region is not LORA_24, applying directly");
-            handleSetConfig(r->set_config, fromOthers);
-            break;
+            configSaved = handleSetConfig(r->set_config, fromOthers);
         }
 
         // Hardware supports 2.4 GHz — apply the config.
         // Fail closed: null instance is treated as incapable.
-        if (RadioLibInterface::instance && RadioLibInterface::instance->wideLora()) {
+        else if (RadioLibInterface::instance && RadioLibInterface::instance->wideLora()) {
             LOG_DEBUG("LORA_24 requested, radio hardware supports 2.4 GHz, applying");
-            handleSetConfig(r->set_config, fromOthers);
+            configSaved = handleSetConfig(r->set_config, fromOthers);
+        }
+
+        else {
+            LOG_WARN("Radio hardware does not support 2.4 GHz; rejecting LORA_24 region");
+            myReply = allocErrorResponse(meshtastic_Routing_Error_BAD_REQUEST, &mp);
             break;
         }
 
-        LOG_WARN("Radio hardware does not support 2.4 GHz; rejecting LORA_24 region");
-        myReply = allocErrorResponse(meshtastic_Routing_Error_BAD_REQUEST, &mp);
+        if (!configSaved) {
+            LOG_ERROR("Config applied but save failed; settings will not persist");
+            myReply = allocErrorResponse(meshtastic_Routing_Error_GOT_NAK, &mp);
+        }
         break;
     }
 
@@ -756,7 +763,7 @@ void AdminModule::handleSetOwner(const meshtastic_User &o)
     }
 }
 
-void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
+bool AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
 {
     auto changes = SEGMENT_CONFIG;
     auto existingRole = config.device.role;
@@ -1049,7 +1056,7 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
         disableBluetooth();
     } // end of switch case which_payload_variant
 
-    saveChanges(changes, requiresReboot);
+    return saveChanges(changes, requiresReboot);
 } // end of handleSetConfig
 
 bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
@@ -1545,16 +1552,21 @@ void AdminModule::reboot(int32_t seconds)
     rebootAtMsec = (seconds < 0) ? 0 : (millis() + seconds * 1000);
 }
 
-void AdminModule::saveChanges(int saveWhat, bool shouldReboot)
+bool AdminModule::saveChanges(int saveWhat, bool shouldReboot)
 {
     if (!hasOpenEditTransaction) {
         LOG_INFO("Save changes to disk");
-        service->reloadConfig(saveWhat); // Calls saveToDisk among other things
+        bool saveSuccess = service->reloadConfig(saveWhat); // Calls saveToDisk among other things
+        if (!saveSuccess) {
+            LOG_WARN("Failed to save config changes to disk. Settings may not persist.");
+        }
+        if (shouldReboot && !hasOpenEditTransaction) {
+            reboot(DEFAULT_REBOOT_SECONDS);
+        }
+        return saveSuccess;
     } else {
         LOG_INFO("Delay save of changes to disk until the open transaction is committed");
-    }
-    if (shouldReboot && !hasOpenEditTransaction) {
-        reboot(DEFAULT_REBOOT_SECONDS);
+        return true; // Transaction will be saved later
     }
 }
 

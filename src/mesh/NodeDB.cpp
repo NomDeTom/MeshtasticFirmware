@@ -2700,18 +2700,14 @@ bool NodeDB::saveToDiskNoRetry(int saveWhat)
     }
 
 #ifdef MESHTASTIC_ENCRYPTED_STORAGE
-    // When lockdown is ACTIVE but storage is still locked, encryptAndWrite()
-    // returns false for every file. That would cause saveToDisk()'s nRF52 retry
-    // path to call FSCom.format(), wiping all encrypted proto files from flash.
-    // Return true here — "nothing to save, not an error."
-    //
     // Gate on isLockdownActive(): a lockdown-capable but DISABLED device (never
     // provisioned) also has isUnlocked()==false, but it must persist plaintext
     // normally — skipping here would silently drop every config write (e.g. the
     // LoRa region) until the device is provisioned.
     if (EncryptedStorage::isLockdownActive() && !EncryptedStorage::isUnlocked()) {
-        LOG_WARN("NodeDB: saveToDisk skipped — encrypted storage locked");
-        return true;
+        LOG_ERROR("NodeDB: Config save skipped — encrypted storage is locked. "
+                  "Device must be unlocked to persist settings changes.");
+        return false;
     }
 #endif
 
@@ -2779,6 +2775,21 @@ bool NodeDB::saveToDisk(int saveWhat)
         LOG_ERROR("Error: trying to saveToDisk() on unsafe device power level.");
         return false;
     }
+
+#ifdef MESHTASTIC_ENCRYPTED_STORAGE
+    // When lockdown is ACTIVE but storage is still locked, return false immediately
+    // without triggering the fsFormat() retry path — formatting would wipe all encrypted
+    // proto files. saveToDiskNoRetry() checks this too, but we must bypass the retry here.
+    if (EncryptedStorage::isLockdownActive() && !EncryptedStorage::isUnlocked()) {
+#ifndef MESHTASTIC_LOCKDOWN_QUIET
+        LOG_ERROR("NodeDB::saveToDisk: skipping save — encrypted storage locked [%s%s%s%s%s]",
+                  (saveWhat & SEGMENT_CONFIG) ? "CONFIG " : "", (saveWhat & SEGMENT_MODULECONFIG) ? "MODULECONFIG " : "",
+                  (saveWhat & SEGMENT_DEVICESTATE) ? "DEVICESTATE " : "", (saveWhat & SEGMENT_CHANNELS) ? "CHANNELS " : "",
+                  (saveWhat & SEGMENT_NODEDATABASE) ? "NODEDATABASE" : "");
+#endif
+        return false;
+    }
+#endif
 
     bool success = saveToDiskNoRetry(saveWhat);
 

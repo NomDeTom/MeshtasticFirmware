@@ -41,7 +41,7 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>, public Obser
     uint8_t session_passkey[8] = {0};
     uint session_time = 0;
 
-    void saveChanges(int saveWhat, bool shouldReboot = true);
+    bool saveChanges(int saveWhat, bool shouldReboot = true);
 
     /**
      * Getters
@@ -62,7 +62,7 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>, public Obser
     void handleSetChannel(const meshtastic_Channel &cc);
 
   protected:
-    void handleSetConfig(const meshtastic_Config &c, bool fromOthers);
+    bool handleSetConfig(const meshtastic_Config &c, bool fromOthers);
 
   private:
     bool handleSetModuleConfig(const meshtastic_ModuleConfig &c);
