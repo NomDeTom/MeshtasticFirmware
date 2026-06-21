@@ -506,6 +506,7 @@ void setup()
     OSThread::setup();
 
     fsInit();
+    fsListFiles();
 
 #ifdef MESHTASTIC_ENCRYPTED_STORAGE
     EncryptedStorage::initLocked();

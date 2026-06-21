@@ -176,6 +176,40 @@ std::vector<meshtastic_FileInfo> getFiles(const char *dirname, uint8_t levels)
  * @param levels The number of levels of subdirectories to list.
  * @param del Whether or not to delete the contents of the directory after listing.
  */
+static void listFilesRecursive(const char *path, uint8_t levels)
+{
+#ifdef FSCom
+    File root = FSCom.open(path, FILE_O_READ);
+    if (!root || !root.isDirectory())
+        return;
+    File f = root.openNextFile();
+    while (f && f.name()[0]) {
+#ifdef ARCH_ESP32
+        const char *fpath = f.path();
+#else
+        const char *fpath = f.name();
+#endif
+        if (f.isDirectory() && !String(f.name()).endsWith(".")) {
+            if (levels)
+                listFilesRecursive(fpath, levels - 1);
+            f.close();
+        } else {
+            LOG_INFO("  %-40s %6d B", fpath, (int)f.size());
+            f.close();
+        }
+        f = root.openNextFile();
+    }
+    root.close();
+#endif
+}
+
+void fsListFiles()
+{
+    LOG_INFO("[fs] LittleFS contents:");
+    listFilesRecursive("/", 8);
+    LOG_INFO("[fs] ---");
+}
+
 void listDir(const char *dirname, uint8_t levels, bool del)
 {
 #ifdef FSCom
