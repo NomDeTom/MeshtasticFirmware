@@ -908,15 +908,26 @@ bool AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
             validatedLora.spread_factor = LORA_SF_DEFAULT;
         }
 
+        LOG_DEBUG("[lora-cfg] step:region-check region=%d myRegion=%d", validatedLora.region,
+                  myRegion ? (int)myRegion->code : -1);
+
         // If we're setting a new region, check the region is valid and then init the region or discard the change
         if (validatedLora.region != myRegion->code) {
+            LOG_DEBUG("[lora-cfg] step:region-changed new=%d old=%d", validatedLora.region, myRegion->code);
             //  Region has changed so check whether it is valid for e.g. licensing conditions and if the lora config is valid
-            if (RadioInterface::validateConfigRegion(validatedLora) && RadioInterface::validateConfigLora(validatedLora)) {
+            LOG_DEBUG("[lora-cfg] step:validateConfigRegion");
+            bool regionOk = RadioInterface::validateConfigRegion(validatedLora);
+            LOG_DEBUG("[lora-cfg] step:validateConfigLora regionOk=%d", regionOk);
+            bool loraOk = regionOk && RadioInterface::validateConfigLora(validatedLora);
+            LOG_DEBUG("[lora-cfg] step:region-validation-done loraOk=%d", loraOk);
+            if (loraOk) {
                 // If we're setting region for the first time, init the region and regenerate the keys
                 if (isRegionUnset && validatedLora.region > meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
 #if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN || MESHTASTIC_EXCLUDE_PKI)
                     if (crypto) {
+                        LOG_DEBUG("[lora-cfg] step:ensurePkiKeys");
                         crypto->ensurePkiKeys(config.security, owner);
+                        LOG_DEBUG("[lora-cfg] step:ensurePkiKeys-done");
                     }
 #endif
                     // new region is valid and we're coming from an unset region, so enable tx
@@ -928,7 +939,9 @@ bool AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
                 }
                 // Ensure initRegion() uses the newly validated region
                 config.lora.region = validatedLora.region;
+                LOG_DEBUG("[lora-cfg] step:initRegion");
                 initRegion();
+                LOG_DEBUG("[lora-cfg] step:initRegion-done");
                 if (getEffectiveDutyCycle() < 100) {
                     validatedLora.ignore_mqtt = true; // Ignore MQTT by default if region has a duty cycle limit
                 }
@@ -939,11 +952,15 @@ bool AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
                 changes = SEGMENT_CONFIG | SEGMENT_MODULECONFIG;
             } else {
                 //  Region validation has failed, so just copy all of the old config over the new config
+                LOG_DEBUG("[lora-cfg] step:region-validation-failed restoring old config");
                 validatedLora = oldLoraConfig;
             }
         } // end of new region handling
 
+        LOG_DEBUG("[lora-cfg] step:validate2 region=%d preset=%d use_preset=%d", validatedLora.region, validatedLora.modem_preset,
+                  validatedLora.use_preset);
         if (!RadioInterface::validateConfigLora(validatedLora)) {
+            LOG_DEBUG("[lora-cfg] step:validate2-failed fromOthers=%d", fromOthers);
             if (fromOthers) {
                 // A preset locked to a sibling EU region still swaps the region for remote admin;
                 // any other invalid config is rejected outright.
@@ -962,13 +979,17 @@ bool AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
                 }
             } else {
                 LOG_WARN("Invalid LoRa config received from client, using corrected values");
+                LOG_DEBUG("[lora-cfg] step:clampConfigLora");
                 RadioInterface::clampConfigLora(validatedLora);
+                LOG_DEBUG("[lora-cfg] step:clampConfigLora-done");
             }
             // A preset locked to a sibling EU region swaps the region during the clamp;
             // apply the same housekeeping as an explicit region change.
             if (validatedLora.region != oldLoraConfig.region) {
                 config.lora.region = validatedLora.region;
+                LOG_DEBUG("[lora-cfg] step:initRegion2");
                 initRegion();
+                LOG_DEBUG("[lora-cfg] step:initRegion2-done");
                 if (getEffectiveDutyCycle() < 100) {
                     validatedLora.ignore_mqtt = true; // Ignore MQTT by default if region has a duty cycle limit
                 }
@@ -980,6 +1001,7 @@ bool AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
             }
             //  use_preset and bandwidth are coerced into valid values by the check.
         }
+        LOG_DEBUG("[lora-cfg] step:validation-complete");
 
         // All LoRa radio changes apply live via configChanged observer → reconfigure().
         // reconfigure() puts the radio in standby, reprograms all modem parameters, and restarts receive.
