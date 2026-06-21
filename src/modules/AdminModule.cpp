@@ -905,13 +905,7 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
         if (validatedLora.region != myRegion->code) {
             //  Region has changed so check whether it is valid for e.g. licensing conditions and if the lora config is valid
             if (RadioInterface::validateConfigRegion(validatedLora) && RadioInterface::validateConfigLora(validatedLora)) {
-                // If we're setting region for the first time, init the region and regenerate the keys
                 if (isRegionUnset && validatedLora.region > meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
-#if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN || MESHTASTIC_EXCLUDE_PKI)
-                    if (crypto) {
-                        crypto->ensurePkiKeys(config.security, owner);
-                    }
-#endif
                     // new region is valid and we're coming from an unset region, so enable tx
                     validatedLora.tx_enabled = true;
                 }
@@ -922,6 +916,16 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
                 // Ensure initRegion() uses the newly validated region
                 config.lora.region = validatedLora.region;
                 initRegion();
+                // Generate PKI keys after initRegion() so the radio is configured before any
+                // radio-entropy sampling in ensurePkiKeys(). Calling before initRegion() with
+                // region=UNSET causes setRx() on an unconfigured modem and a hard fault.
+                if (isRegionUnset && validatedLora.region > meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
+#if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN || MESHTASTIC_EXCLUDE_PKI)
+                    if (crypto) {
+                        crypto->ensurePkiKeys(config.security, owner);
+                    }
+#endif
+                }
                 if (getEffectiveDutyCycle() < 100) {
                     validatedLora.ignore_mqtt = true; // Ignore MQTT by default if region has a duty cycle limit
                 }
