@@ -37,7 +37,11 @@ void CryptoEngine::generateKeyPair(uint8_t *pubKey, uint8_t *privKey)
     CryptRNG.begin(optstr(APP_VERSION));
 
     uint8_t hardwareEntropy[64] = {0};
-    if (HardwareRNG::fill(hardwareEntropy, sizeof(hardwareEntropy), true)) {
+    // Do not use radio entropy here: key generation can be called before the radio is configured
+    // for any region (e.g. first-time region set from UNSET). SX126x::randomByte() puts the radio
+    // into RX mode which fires an ISR mid-handler on an unconfigured modem, causing a hard fault.
+    // The hardware TRNG (nRF52840 CC310, ESP32 RNG, etc.) already provides cryptographic entropy.
+    if (HardwareRNG::fill(hardwareEntropy, sizeof(hardwareEntropy), false)) {
         CryptRNG.stir(hardwareEntropy, sizeof(hardwareEntropy));
     } else {
         LOG_WARN("Hardware entropy unavailable, falling back to software RNG");
