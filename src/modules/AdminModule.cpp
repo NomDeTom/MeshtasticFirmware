@@ -921,15 +921,7 @@ bool AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
             bool loraOk = regionOk && RadioInterface::validateConfigLora(validatedLora);
             LOG_DEBUG("[lora-cfg] step:region-validation-done loraOk=%d", loraOk);
             if (loraOk) {
-                // If we're setting region for the first time, init the region and regenerate the keys
                 if (isRegionUnset && validatedLora.region > meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
-#if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN || MESHTASTIC_EXCLUDE_PKI)
-                    if (crypto) {
-                        LOG_DEBUG("[lora-cfg] step:ensurePkiKeys");
-                        crypto->ensurePkiKeys(config.security, owner);
-                        LOG_DEBUG("[lora-cfg] step:ensurePkiKeys-done");
-                    }
-#endif
                     // new region is valid and we're coming from an unset region, so enable tx
                     validatedLora.tx_enabled = true;
                 }
@@ -942,6 +934,18 @@ bool AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
                 LOG_DEBUG("[lora-cfg] step:initRegion");
                 initRegion();
                 LOG_DEBUG("[lora-cfg] step:initRegion-done");
+                // If we're setting region for the first time, generate PKI keys now that the radio
+                // is configured. ensurePkiKeys() may gather radio entropy (RSSI noise); calling it
+                // before initRegion() would invoke setRx() on an unconfigured modem and hard-fault.
+                if (isRegionUnset && validatedLora.region > meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
+#if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN || MESHTASTIC_EXCLUDE_PKI)
+                    if (crypto) {
+                        LOG_DEBUG("[lora-cfg] step:ensurePkiKeys");
+                        crypto->ensurePkiKeys(config.security, owner);
+                        LOG_DEBUG("[lora-cfg] step:ensurePkiKeys-done");
+                    }
+#endif
+                }
                 if (getEffectiveDutyCycle() < 100) {
                     validatedLora.ignore_mqtt = true; // Ignore MQTT by default if region has a duty cycle limit
                 }
