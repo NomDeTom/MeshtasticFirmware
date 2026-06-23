@@ -65,7 +65,7 @@ void INTERRUPT_ATTR RadioLibInterface::isrLevel0Common(PendingISR cause)
 {
     instance->disableInterrupt();
 
-    BaseType_t xHigherPriorityTaskWoken;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     instance->notifyFromISR(&xHigherPriorityTaskWoken, cause, true);
 
     /* Force a context switch if xHigherPriorityTaskWoken is now set to pdTRUE.
@@ -341,16 +341,38 @@ bool RadioLibInterface::randomBytes(uint8_t *buffer, size_t length)
         return false;
     }
 
-    // Older RadioLib versions only expose random(min, max), so fill the buffer byte-by-byte.
+    // SX126x::randomByte() writes ANA_LNA/ANA_MIXER registers then calls setRx(RX_TIMEOUT_INF)
+    // and delays 10ms for RSSI to stabilise. When setRx() is sent to a radio already in
+    // continuous RX the chip re-initialises the receiver (brief STANDBY_RC → RX transition),
+    // which consistently generates a DIO1 edge. isrLevel0Common() then fires: it calls
+    // xSemaphoreGiveFromISR() which — when the semaphore is already given from an earlier ISR —
+    // returns errQUEUE_FULL without writing *pxHigherPriorityTaskWoken, leaving it at its
+    // uninitialized stack value. portYIELD_FROM_ISR() with a non-zero garbage value pends
+    // PendSV mid-delay, corrupting FreeRTOS state → hard fault.
+    //
+    // Fix: detach DIO1 before collecting entropy so the ISR cannot fire during randomByte().
+    // Any packet that arrives during collection will be caught by checkRxDoneIrqFlag() inside
+    // the startReceive() we call to restore normal operation afterward.
+    LOG_DEBUG("randomBytes: detaching DIO1, collecting %u bytes of radio entropy", (unsigned)length);
+    disableInterrupt();
+
+    bool ok = true;
     for (size_t i = 0; i < length; ++i) {
         int32_t value = iface->random(0, 255);
         if (value < 0) {
-            return false;
+            LOG_WARN("randomBytes: iface->random() failed at byte %u", (unsigned)i);
+            ok = false;
+            break;
         }
         buffer[i] = static_cast<uint8_t>(value & 0xFF);
     }
 
-    return true;
+    LOG_DEBUG("randomBytes: collection %s, restoring receive mode", ok ? "ok" : "aborted");
+    // randomByte() leaves the radio in standby. Restore receive mode and re-attach DIO1.
+    startReceive();
+    LOG_DEBUG("randomBytes: done");
+
+    return ok;
 }
 
 /** radio helper thread callback.

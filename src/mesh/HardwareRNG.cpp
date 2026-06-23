@@ -103,9 +103,11 @@ bool fill(uint8_t *buffer, size_t length, bool useRadioEntropy)
 
 #if defined(ARCH_NRF52)
     // The Nordic SDK RNG provides cryptographic-quality randomness backed by hardware.
+    LOG_DEBUG("HardwareRNG: nRFCrypto begin");
     nRFCrypto.begin();
     auto result = nRFCrypto.Random.generate(buffer, length);
     nRFCrypto.end();
+    LOG_DEBUG("HardwareRNG: nRFCrypto generate %s", result ? "ok" : "failed");
     filled = result;
 #elif defined(ARCH_ESP32)
     // ESP32 exposes a true RNG via esp_fill_random().
@@ -153,7 +155,10 @@ bool fill(uint8_t *buffer, size_t length, bool useRadioEntropy)
         // buffer to improve overall quality. We consider the filling a success if either a
         // good platform RNG or the modem RNG provided data, so we return true as long as at
         // least one of those steps succeeded.
-        filled = mixWithLoRaEntropy(buffer, length) || filled;
+        LOG_DEBUG("HardwareRNG: mixing LoRa entropy into %u bytes", (unsigned)length);
+        bool radioOk = mixWithLoRaEntropy(buffer, length);
+        LOG_DEBUG("HardwareRNG: LoRa entropy mix %s", radioOk ? "ok" : "skipped/failed");
+        filled = radioOk || filled;
     }
 #endif
 

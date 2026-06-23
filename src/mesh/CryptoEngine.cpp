@@ -33,12 +33,17 @@
  */
 void CryptoEngine::generateKeyPair(uint8_t *pubKey, uint8_t *privKey)
 {
-    // Mix in any randomness we can, to make key generation stronger.
+    LOG_DEBUG("keygen: begin RNG init");
     CryptRNG.begin(optstr(APP_VERSION));
+    LOG_DEBUG("keygen: RNG init done");
 
     uint8_t hardwareEntropy[64] = {0};
-    if (HardwareRNG::fill(hardwareEntropy, sizeof(hardwareEntropy), true)) {
+    LOG_DEBUG("keygen: filling hardware entropy (64 bytes, radio=true)");
+    bool entropyOk = HardwareRNG::fill(hardwareEntropy, sizeof(hardwareEntropy), true);
+    LOG_DEBUG("keygen: hardware entropy fill %s", entropyOk ? "ok" : "failed");
+    if (entropyOk) {
         CryptRNG.stir(hardwareEntropy, sizeof(hardwareEntropy));
+        LOG_DEBUG("keygen: RNG stirred with hardware entropy");
     } else {
         LOG_WARN("Hardware entropy unavailable, falling back to software RNG");
     }
@@ -46,17 +51,23 @@ void CryptoEngine::generateKeyPair(uint8_t *pubKey, uint8_t *privKey)
 
     if (myNodeInfo.device_id.size == 16) {
         CryptRNG.stir(myNodeInfo.device_id.bytes, myNodeInfo.device_id.size);
+        LOG_DEBUG("keygen: RNG stirred with device_id");
     }
     auto noise = random();
     CryptRNG.stir((uint8_t *)&noise, sizeof(noise));
+    LOG_DEBUG("keygen: RNG stirred with millis noise");
 
-    LOG_DEBUG("Generate Curve25519 keypair");
+    LOG_DEBUG("keygen: Curve25519::dh1 start");
     Curve25519::dh1(public_key, private_key);
+    LOG_DEBUG("keygen: Curve25519::dh1 done");
     memcpy(pubKey, public_key, sizeof(public_key));
     memcpy(privKey, private_key, sizeof(private_key));
 #if !(MESHTASTIC_EXCLUDE_XEDDSA)
+    LOG_DEBUG("keygen: XEdDSA key derivation start");
     XEdDSA::priv_curve_to_ed_keys(private_key, xeddsa_private_key, xeddsa_public_key);
+    LOG_DEBUG("keygen: XEdDSA key derivation done");
 #endif
+    LOG_DEBUG("keygen: complete");
 }
 
 /**
