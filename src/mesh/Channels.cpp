@@ -303,6 +303,28 @@ void Channels::initDefaults()
 #endif
 }
 
+void Channels::dumpHashes()
+{
+    for (int i = 0; i < channelFile.channels_count; i++) {
+        const meshtastic_Channel &ch = getByIndex(i);
+        if (!ch.has_settings || ch.role == meshtastic_Channel_Role_DISABLED)
+            continue;
+        const auto &rawPsk = ch.settings.psk;
+        // 32 bytes max * "xx:" + NUL
+        char pskHex[32 * 3 + 1];
+        if (rawPsk.size == 0) {
+            strcpy(pskHex, "-");
+        } else {
+            char *p = pskHex;
+            for (pb_size_t j = 0; j < rawPsk.size; j++)
+                p += snprintf(p, 4, "%02x%s", rawPsk.bytes[j], j + 1 < rawPsk.size ? ":" : "");
+        }
+        LOG_INFO("[ChanDump] slot=%d role=%s stored_name='%s' resolved_name='%s' hash=0x%02x psk_len=%d psk=%s", i,
+                 ch.role == meshtastic_Channel_Role_PRIMARY ? "PRIMARY" : "SECONDARY", ch.settings.name, getName(i), hashes[i],
+                 rawPsk.size, pskHex);
+    }
+}
+
 void Channels::onConfigChanged()
 {
     // Make sure the phone hasn't mucked anything up
@@ -312,6 +334,7 @@ void Channels::onConfigChanged()
         if (ch.role == meshtastic_Channel_Role_PRIMARY)
             primaryIndex = i;
     }
+    dumpHashes();
 #if !MESHTASTIC_EXCLUDE_MQTT
     if (channels.anyMqttEnabled() && mqtt && !mqtt->isEnabled()) {
         LOG_DEBUG("MQTT is enabled on at least one channel, so set MQTT thread to run immediately");

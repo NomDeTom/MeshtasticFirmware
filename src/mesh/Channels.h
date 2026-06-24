@@ -67,6 +67,9 @@ class Channels
     /// called when the user has just changed our radio config and we might need to change channel keys
     void onConfigChanged();
 
+    /// log all channel slots with their stored name, resolved name, and hash
+    void dumpHashes();
+
     /** Given a channel hash setup crypto for decoding that channel (or the primary channel if that channel is unsecured)
      *
      * This method is called before decoding inbound packets

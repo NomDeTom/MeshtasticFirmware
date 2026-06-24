@@ -25,6 +25,7 @@
 #include "concurrency/Periodic.h"
 #include "detect/ScanI2C.h"
 #include "error.h"
+#include "mesh/Channels.h"
 #include "power.h"
 
 #if !MESHTASTIC_EXCLUDE_I2C
@@ -1125,6 +1126,11 @@ void setup()
     LOG_DEBUG("Free heap  : %7d bytes", ESP.getFreeHeap());
     LOG_DEBUG("Free PSRAM : %7d bytes", ESP.getFreePsram());
 #endif
+
+    new concurrency::Periodic("ChanDump", std::function<int32_t()>([]() -> int32_t {
+                                  channels.dumpHashes();
+                                  return 30 * 1000;
+                              }));
 
     // We manually run this to update the NodeStatus
     nodeDB->notifyObservers(true);
