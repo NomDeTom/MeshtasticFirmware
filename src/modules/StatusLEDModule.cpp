@@ -126,7 +126,10 @@ int32_t StatusLEDModule::runOnce()
             PAIRING_LED_state = LED_STATE_OFF;
             CHARGE_LED_state = !CHARGE_LED_state;
             my_interval = 250;
-            if (POWER_LED_starttime + 2000 < millis()) {
+            // Test branch for #10823: burst lengthened from 2000 ms (~4 flashes) to 3500 ms
+            // (7 flashes) so the critical-battery burst is distinguishable from the safe-power
+            // boot gate (5 blinks) by counting flashes.
+            if (POWER_LED_starttime + 3500 < millis()) {
                 doing_fast_blink = false;
                 CHARGE_LED_state = LED_STATE_OFF;
             }

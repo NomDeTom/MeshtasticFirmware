@@ -307,6 +307,35 @@ void earlyInitVariant() {}
 
 // we use powerHAL layer to get this info and delay booting until power level is safe
 
+#if defined(ARCH_NRF52) && defined(VDD_BOOT_DIAG)
+// Diagnostics for https://github.com/meshtastic/firmware/issues/10823: this runs before
+// serial is up (and USB power would mask the failure anyway), so blink the internal VDD
+// reading out on LED_POWER. Pattern, repeated 3 times with a fresh reading each round:
+// 2 s solid ON (sync mark), 1 s off, then N short 250 ms blinks:
+//   1: >=2900 mV   2: 2700-2899   3: 2500-2699   4: 2300-2499   5: 2100-2299   6: <2100
+uint16_t getVDDVoltage(); // provided by platform/nrf52/main-nrf52.cpp
+static void blinkVDDDiagnostic()
+{
+#ifdef LED_POWER
+    for (int round = 0; round < 3; round++) {
+        uint16_t mv = getVDDVoltage();
+        int n = mv >= 2900 ? 1 : mv >= 2700 ? 2 : mv >= 2500 ? 3 : mv >= 2300 ? 4 : mv >= 2100 ? 5 : 6;
+        digitalWrite(LED_POWER, LED_STATE_ON);
+        delay(2000);
+        digitalWrite(LED_POWER, LED_STATE_OFF);
+        delay(1000);
+        for (int i = 0; i < n; i++) {
+            digitalWrite(LED_POWER, LED_STATE_ON);
+            delay(250);
+            digitalWrite(LED_POWER, LED_STATE_OFF);
+            delay(400);
+        }
+        delay(1500);
+    }
+#endif
+}
+#endif
+
 // wait until power level is safe to continue booting (to avoid bootloops)
 // blink user led in 3 flashes sequence to indicate what is happening
 void waitUntilPowerLevelSafe()
@@ -315,9 +344,11 @@ void waitUntilPowerLevelSafe()
 
 #ifdef LED_POWER
 
-        // 3x: blink for 300 ms, pause for 300 ms
+        // 5x: blink for 300 ms, pause for 300 ms.
+        // Test branch for #10823: bumped from 3 to 5 blinks so the gate is distinguishable
+        // from StatusLEDModule's critical-battery burst (7 blinks) by counting flashes.
 
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 5; i++) {
             digitalWrite(LED_POWER, LED_STATE_ON);
             delay(300);
             digitalWrite(LED_POWER, LED_STATE_OFF);
@@ -347,6 +378,10 @@ void setup()
 #ifdef LED_POWER
     pinMode(LED_POWER, OUTPUT);
     digitalWrite(LED_POWER, LED_STATE_ON);
+#endif
+
+#if defined(ARCH_NRF52) && defined(VDD_BOOT_DIAG)
+    blinkVDDDiagnostic();
 #endif
 
     // prevent booting if device is in power failure mode
