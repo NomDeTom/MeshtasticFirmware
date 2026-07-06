@@ -92,8 +92,8 @@
   // "USERPREFS_RINGTONE_NAG_SECS": "60",
   // "USERPREFS_NODEINFO_REPLY_SUPPRESS_SECS": "43200",
   // "USERPREFS_UI_TEST_LOG": "true", // Test-only: emits `Screen: frame N/M name=... reason=...` log per UI transition (for the meshtastic-mcp ui test tier); off in release builds.
-  // "USERPREFS_OCV_FLOOR_MV": "2850", // nRF52: overrides the low-battery deep-sleep trip point (mV), independent of the OCV_ARRAY curve used for reported battery %. Default is the curve's last point (3100 for stock LiIon/LiPo). See issue #10823.
-  // "USERPREFS_BATTERY_LPCOMP_THRESHOLD_16THS": "9", // nRF52: LPCOMP wake threshold as sixteenths of VDD (1-15, e.g. 11 = 11/16 VDD, the RAK4631 default). Falls back to the variant's BATTERY_LPCOMP_THRESHOLD enum when unset. See issue #10823.
+  "USERPREFS_OCV_FLOOR_MV": "2850", // nRF52: overrides the low-battery deep-sleep trip point (mV), independent of the OCV_ARRAY curve used for reported battery %. Default is the curve's last point (3100 for stock LiIon/LiPo). See issue #10823.
+  "USERPREFS_BATTERY_LPCOMP_THRESHOLD_16THS": "9", // nRF52: LPCOMP wake threshold as sixteenths of VDD (1-15, e.g. 11 = 11/16 VDD, the RAK4631 default). Falls back to the variant's BATTERY_LPCOMP_THRESHOLD enum when unset. See issue #10823.
   "USERPREFS_RINGTONE_RTTTL": "24:d=32,o=5,b=565:f6,p,f6,4p,p,f6,p,f6,2p,p,b6,p,b6,p,b6,p,b6,p,b,p,b,p,b,p,b,p,b,p,b,p,b,p,b,1p.,2p.,p",
   // "USERPREFS_NETWORK_IPV6_ENABLED": "1",
   "USERPREFS_TZ_STRING": "tzplaceholder                                         "
