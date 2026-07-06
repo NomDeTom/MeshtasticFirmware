@@ -1048,7 +1048,17 @@ void Power::readPowerStatus()
     //
 
     if (batteryLevel && powerStatus2.getHasBattery() && !powerStatus2.getHasUSB()) {
-        if (batteryLevel->getBattVoltage() < OCV[NUM_OCV_POINTS - 1]) {
+#ifdef USERPREFS_OCV_FLOOR_MV
+        // Override just the low-battery-deep-sleep trip point, independent of the OCV_ARRAY
+        // discharge curve used for reported battery percentage elsewhere. For boards fed from
+        // regulated/LTO supplies that structurally never dip below (or recover above) the stock
+        // curve's floor, this lets the trip point move without touching the whole curve shape.
+        // See issue #10823.
+        const uint16_t lowBattFloorMv = USERPREFS_OCV_FLOOR_MV;
+#else
+        const uint16_t lowBattFloorMv = OCV[NUM_OCV_POINTS - 1];
+#endif
+        if (batteryLevel->getBattVoltage() < lowBattFloorMv) {
             low_voltage_counter++;
             LOG_DEBUG("Low voltage counter: %d/10", low_voltage_counter);
             if (low_voltage_counter > 10) {

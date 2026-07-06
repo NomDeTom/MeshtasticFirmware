@@ -49,6 +49,47 @@
 
 uint16_t getVDDVoltage();
 
+// Maps a sixteenths-of-VDD numerator (1-15) to the nRF52 LPCOMP supply-relative reference,
+// e.g. 11 -> NRF_LPCOMP_REF_SUPPLY_11_16 (the RAK4631 stock wake threshold). Lets a board's
+// wake threshold be expressed as a plain integer (userPrefs-friendly) instead of the raw SDK
+// enum name. 16 (i.e. VDD itself) has no valid comparator reference and clamps to 15, same as
+// anything else out of range.
+static nrf_lpcomp_ref_t lpcompRefFromSixteenths(uint8_t sixteenths)
+{
+    switch (sixteenths) {
+    case 1:
+        return NRF_LPCOMP_REF_SUPPLY_1_16;
+    case 2:
+        return NRF_LPCOMP_REF_SUPPLY_1_8;
+    case 3:
+        return NRF_LPCOMP_REF_SUPPLY_3_16;
+    case 4:
+        return NRF_LPCOMP_REF_SUPPLY_2_8;
+    case 5:
+        return NRF_LPCOMP_REF_SUPPLY_5_16;
+    case 6:
+        return NRF_LPCOMP_REF_SUPPLY_3_8;
+    case 7:
+        return NRF_LPCOMP_REF_SUPPLY_7_16;
+    case 8:
+        return NRF_LPCOMP_REF_SUPPLY_4_8;
+    case 9:
+        return NRF_LPCOMP_REF_SUPPLY_9_16;
+    case 10:
+        return NRF_LPCOMP_REF_SUPPLY_5_8;
+    case 11:
+        return NRF_LPCOMP_REF_SUPPLY_11_16;
+    case 12:
+        return NRF_LPCOMP_REF_SUPPLY_6_8;
+    case 13:
+        return NRF_LPCOMP_REF_SUPPLY_13_16;
+    case 14:
+        return NRF_LPCOMP_REF_SUPPLY_7_8;
+    default:
+        return NRF_LPCOMP_REF_SUPPLY_15_16; // 15, and anything else out of range, clamps here
+    }
+}
+
 // Weak empty variant shutdown prep function.
 // May be redefined by variant files.
 void variant_shutdown() __attribute__((weak));
@@ -483,7 +524,13 @@ void cpuDeepSleep(uint32_t msecToWake)
 #ifdef BATTERY_LPCOMP_INPUT
         // Wake up if power rises again
         nrf_lpcomp_config_t c;
+#ifdef USERPREFS_BATTERY_LPCOMP_THRESHOLD_16THS
+        // Override just the wake threshold, expressed as sixteenths of VDD (1-15), without
+        // needing to touch the variant's BATTERY_LPCOMP_THRESHOLD enum. See issue #10823.
+        c.reference = lpcompRefFromSixteenths(USERPREFS_BATTERY_LPCOMP_THRESHOLD_16THS);
+#else
         c.reference = BATTERY_LPCOMP_THRESHOLD;
+#endif
         c.detection = NRF_LPCOMP_DETECT_UP;
         c.hyst = NRF_LPCOMP_HYST_NOHYST;
         nrf_lpcomp_configure(NRF_LPCOMP, &c);
