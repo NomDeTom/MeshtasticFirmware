@@ -83,11 +83,12 @@ bool powerHAL_isPowerLevelSafe()
 {
     static bool powerLevelSafe = true;
 
-    // User opt-out: when the NRF52_POWER_DISABLE_ALL flag is set, report the supply as always safe so the
-    // low-VDD flash-write gates (NodeDB/WarmNodeStore) and the boot-time voltage hold are bypassed.
-    // See also cpuDeepSleep() (wake-on-VDD) and waitUntilPowerLevelSafe() (boot hold).
-    if (config.power.nrf52_power_flags & meshtastic_Config_PowerConfig_Nrf52PowerFlags_NRF52_POWER_DISABLE_ALL)
-        return true;
+#ifdef NRF52_DISABLE_POWER_MANAGEMENT
+    // Build-time opt-out: report the supply as always safe so the low-VDD flash-write gates
+    // (NodeDB/WarmNodeStore) are bypassed. See also cpuDeepSleep() (wake-on-VDD) and
+    // waitUntilPowerLevelSafe() (boot hold), gated under the same flag.
+    return true;
+#endif
 
 #ifdef SAFE_VDD_VOLTAGE_THRESHOLD_MV
     uint16_t threshold = SAFE_VDD_VOLTAGE_THRESHOLD_MV;
@@ -491,23 +492,23 @@ void cpuDeepSleep(uint32_t msecToWake)
         // https://devzone.nordicsemi.com/f/nordic-q-a/48919/ram-retention-settings-with-softdevice-enabled
 
 #ifdef BATTERY_LPCOMP_INPUT
-        // Wake up if power rises again (sleep-until-voltage-improves). Skipped when the user has
-        // disabled NRF power management, so System OFF is entered without arming the VDD-rise wake.
-        if (!(config.power.nrf52_power_flags & meshtastic_Config_PowerConfig_Nrf52PowerFlags_NRF52_POWER_DISABLE_ALL)) {
-            nrf_lpcomp_config_t c;
-            c.reference = BATTERY_LPCOMP_THRESHOLD;
-            c.detection = NRF_LPCOMP_DETECT_UP;
-            c.hyst = NRF_LPCOMP_HYST_NOHYST;
-            nrf_lpcomp_configure(NRF_LPCOMP, &c);
-            nrf_lpcomp_input_select(NRF_LPCOMP, BATTERY_LPCOMP_INPUT);
-            nrf_lpcomp_enable(NRF_LPCOMP);
+        // Wake up if power rises again (sleep-until-voltage-improves). Skipped at build time when NRF52
+        // power management is disabled, so System OFF is entered without arming the VDD-rise wake.
+#ifndef NRF52_DISABLE_POWER_MANAGEMENT
+        nrf_lpcomp_config_t c;
+        c.reference = BATTERY_LPCOMP_THRESHOLD;
+        c.detection = NRF_LPCOMP_DETECT_UP;
+        c.hyst = NRF_LPCOMP_HYST_NOHYST;
+        nrf_lpcomp_configure(NRF_LPCOMP, &c);
+        nrf_lpcomp_input_select(NRF_LPCOMP, BATTERY_LPCOMP_INPUT);
+        nrf_lpcomp_enable(NRF_LPCOMP);
 
-            battery_adcEnable();
+        battery_adcEnable();
 
-            nrf_lpcomp_task_trigger(NRF_LPCOMP, NRF_LPCOMP_TASK_START);
-            while (!nrf_lpcomp_event_check(NRF_LPCOMP, NRF_LPCOMP_EVENT_READY))
-                ;
-        }
+        nrf_lpcomp_task_trigger(NRF_LPCOMP, NRF_LPCOMP_TASK_START);
+        while (!nrf_lpcomp_event_check(NRF_LPCOMP, NRF_LPCOMP_EVENT_READY))
+            ;
+#endif
 #endif
 
         auto ok = sd_power_system_off();

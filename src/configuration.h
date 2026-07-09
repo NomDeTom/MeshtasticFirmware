@@ -669,5 +669,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #endif // MESHTASTIC_LOCKDOWN
 
+// NRF52 low-VDD power-management opt-out. May be set either directly as a build flag
+// (-DNRF52_DISABLE_POWER_MANAGEMENT) or via userPrefs.jsonc (USERPREFS_NRF52_DISABLE_POWER_MANAGEMENT).
+// When set, disables the boot-time voltage hold, the low-VDD flash-write gate, and the wake-on-VDD
+// System-OFF behavior -- for boards whose VDD reading is unreliable. Must be compile-time: the boot
+// hold runs before config is loaded, so a runtime flag cannot gate the first boot.
+#if defined(USERPREFS_NRF52_DISABLE_POWER_MANAGEMENT) && (USERPREFS_NRF52_DISABLE_POWER_MANAGEMENT)
+#ifndef NRF52_DISABLE_POWER_MANAGEMENT
+#define NRF52_DISABLE_POWER_MANAGEMENT
+#endif
+#endif
+
 #include "DebugConfiguration.h"
 #include "RF95Configuration.h"

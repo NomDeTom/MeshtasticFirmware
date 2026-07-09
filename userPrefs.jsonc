@@ -19,6 +19,7 @@
   // "USERPREFS_CONFIG_GPS_MODE": "meshtastic_Config_PositionConfig_GpsMode_ENABLED",
   // "USERPREFS_CONFIG_LORA_IGNORE_MQTT": "true",
   // "USERPREFS_LORA_TX_DISABLED": "1", // If set, forces config.lora.tx_enabled=false during lora bootstrap
+  "USERPREFS_NRF52_DISABLE_POWER_MANAGEMENT": "1", // NRF52 only: disable firmware low-VDD power control (boot hold, flash-write gate, wake-on-VDD) at build time, for boards with unreliable VDD readings
   // "USERPREFS_CONFIG_LORA_REGION": "meshtastic_Config_LoRaConfig_RegionCode_US",
   // "USERPREFS_CONFIG_OWNER_LONG_NAME": "My Long Name",
   // "USERPREFS_CONFIG_OWNER_SHORT_NAME": "MLN",
@@ -37,7 +38,6 @@
   // "USERPREFS_CONFIG_DEVICE_TELEM_UPDATE_INTERVAL": "900", // Device telemetry update interval in seconds
   // "USERPREFS_CONFIG_ENV_TELEM_UPDATE_INTERVAL": "900",     // Environment telemetry update interval in seconds
   // "USERPREFS_CONFIG_ENVIRONMENT_MEASUREMENT_ENABLED": "1", // Force BMP280/sensor reads + LoRa broadcast on first boot
-  "USERPREFS_CONFIG_NRF52_POWER_MANAGEMENT_DISABLED": "true", // NRF52 only: when true, disables firmware low-VDD power control (boot hold, write-gate, wake-on-VDD) by default, for boards with unreliable VDD readings
   // "USERPREFS_LORACONFIG_CHANNEL_NUM": "31",
   // "USERPREFS_LORACONFIG_TX_POWER": "0",
   // "USERPREFS_LORACONFIG_MODEM_PRESET": "meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST",

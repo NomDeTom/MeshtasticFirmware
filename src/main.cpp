@@ -29,7 +29,6 @@
 #include "concurrency/Periodic.h"
 #include "detect/ScanI2C.h"
 #include "error.h"
-#include <pb_decode.h>
 
 #if !MESHTASTIC_EXCLUDE_I2C
 #include "detect/ScanI2CConsumer.h"
@@ -316,48 +315,17 @@ void earlyInitVariant() {}
 
 // we use powerHAL layer to get this info and delay booting until power level is safe
 
-#if defined(ARCH_NRF52) && defined(FSCom)
-// Read only PowerConfig.nrf52_power_flags straight from flash, ahead of the full config load in
-// NodeDB, so the boot-time voltage hold below can honor the NRF52_POWER_DISABLE_ALL opt-out. Returns
-// false (protections stay enabled) on any mount/open/decode failure, or when the stored config is
-// encrypted and the store is not yet unlocked this early in boot.
-static bool nrfPowerManagementDisabledFromFlash()
-{
-#ifdef MESHTASTIC_ENCRYPTED_STORAGE
-    // The config is ciphertext until the store is unlocked (which happens later in setup()); keep the
-    // protections on rather than risk decoding ciphertext as a stray "disabled" flag.
-    if (EncryptedStorage::isEncrypted(configFileName))
-        return false;
-#endif
-    fsInit(); // idempotent: preFSBegin()/InternalFS.begin() are safe to re-run during normal setup()
-
-    bool disabled = false;
-    concurrency::LockGuard g(spiLock);
-    auto f = FSCom.open(configFileName, FILE_O_READ);
-    if (f) {
-        static uint8_t buf[meshtastic_LocalConfig_size];
-        size_t n = f.read(buf, sizeof(buf));
-        f.close();
-        meshtastic_LocalConfig cfg = meshtastic_LocalConfig_init_zero;
-        pb_istream_t stream = pb_istream_from_buffer(buf, n);
-        if (pb_decode(&stream, &meshtastic_LocalConfig_msg, &cfg))
-            disabled = cfg.has_power &&
-                       (cfg.power.nrf52_power_flags & meshtastic_Config_PowerConfig_Nrf52PowerFlags_NRF52_POWER_DISABLE_ALL);
-    }
-    return disabled;
-}
-#endif
-
 // wait until power level is safe to continue booting (to avoid bootloops)
 // blink user led in 3 flashes sequence to indicate what is happening
 void waitUntilPowerLevelSafe()
 {
-#if defined(ARCH_NRF52) && defined(FSCom)
-    // User opt-out: skip the low-VDD boot hold entirely on boards where the VDD reading is unreliable.
-    if (nrfPowerManagementDisabledFromFlash()) {
-        LOG_INFO("NRF52_POWER_DISABLE_ALL set; skipping low-VDD boot hold");
-        return;
-    }
+#if defined(ARCH_NRF52) && defined(NRF52_DISABLE_POWER_MANAGEMENT)
+    // Build-time opt-out for boards whose VDD reading is unreliable: skip the low-VDD boot hold.
+    // This MUST be compile-time -- the hold runs before config is loaded from flash, so a runtime flag
+    // cannot gate the very first boot (the device would spin here forever). See main-nrf52.cpp for the
+    // matching write-gate and wake-on-VDD guards under the same flag.
+    LOG_INFO("NRF52 low-VDD power management disabled at build time; skipping boot hold");
+    return;
 #endif
     while (powerHAL_isPowerLevelSafe() == false) {
 
