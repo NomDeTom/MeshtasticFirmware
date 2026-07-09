@@ -159,6 +159,17 @@ typedef enum _meshtastic_Config_PositionConfig_GpsMode {
     meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT = 2
 } meshtastic_Config_PositionConfig_GpsMode;
 
+/* NRF52 only. Bitmask flags controlling firmware-managed low-VDD power control, for boards
+ where the VDD reading is unreliable and the protections cause spurious boot stalls. */
+typedef enum _meshtastic_Config_PowerConfig_Nrf52PowerFlags {
+    /* All low-VDD protections enabled (default). */
+    meshtastic_Config_PowerConfig_Nrf52PowerFlags_NRF52_POWER_DEFAULT = 0,
+    /* Disable all firmware-managed low-VDD power control at once: the boot-time
+ "wait until supply voltage is safe" hold, the low-voltage flash-write gating,
+ and the wake-on-VDD System-OFF (sleep-until-voltage-improves) behavior. */
+    meshtastic_Config_PowerConfig_Nrf52PowerFlags_NRF52_POWER_DISABLE_ALL = 1
+} meshtastic_Config_PowerConfig_Nrf52PowerFlags;
+
 typedef enum _meshtastic_Config_NetworkConfig_AddressMode {
     /* obtain ip address via DHCP */
     meshtastic_Config_NetworkConfig_AddressMode_DHCP = 0,
@@ -497,6 +508,8 @@ typedef struct _meshtastic_Config_PowerConfig {
     uint32_t min_wake_secs;
     /* I2C address of INA_2XX to use for reading device battery voltage */
     uint8_t device_battery_ina_address;
+    /* NRF52 only. Bitmask of Nrf52PowerFlags. Default (0) keeps all low-VDD protections enabled. */
+    uint32_t nrf52_power_flags;
     /* If non-zero, we want powermon log outputs.  With the particular (bitfield) sources enabled.
  Note: we picked an ID of 32 so that lower more efficient IDs can be used for more frequently used options. */
     uint64_t powermon_enables;
@@ -734,6 +747,10 @@ extern "C" {
 #define _meshtastic_Config_PositionConfig_GpsMode_MAX meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT
 #define _meshtastic_Config_PositionConfig_GpsMode_ARRAYSIZE ((meshtastic_Config_PositionConfig_GpsMode)(meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT+1))
 
+#define _meshtastic_Config_PowerConfig_Nrf52PowerFlags_MIN meshtastic_Config_PowerConfig_Nrf52PowerFlags_NRF52_POWER_DEFAULT
+#define _meshtastic_Config_PowerConfig_Nrf52PowerFlags_MAX meshtastic_Config_PowerConfig_Nrf52PowerFlags_NRF52_POWER_DISABLE_ALL
+#define _meshtastic_Config_PowerConfig_Nrf52PowerFlags_ARRAYSIZE ((meshtastic_Config_PowerConfig_Nrf52PowerFlags)(meshtastic_Config_PowerConfig_Nrf52PowerFlags_NRF52_POWER_DISABLE_ALL+1))
+
 #define _meshtastic_Config_NetworkConfig_AddressMode_MIN meshtastic_Config_NetworkConfig_AddressMode_DHCP
 #define _meshtastic_Config_NetworkConfig_AddressMode_MAX meshtastic_Config_NetworkConfig_AddressMode_STATIC
 #define _meshtastic_Config_NetworkConfig_AddressMode_ARRAYSIZE ((meshtastic_Config_NetworkConfig_AddressMode)(meshtastic_Config_NetworkConfig_AddressMode_STATIC+1))
@@ -808,7 +825,7 @@ extern "C" {
 #define meshtastic_Config_init_default           {0, {meshtastic_Config_DeviceConfig_init_default}}
 #define meshtastic_Config_DeviceConfig_init_default {_meshtastic_Config_DeviceConfig_Role_MIN, 0, 0, 0, _meshtastic_Config_DeviceConfig_RebroadcastMode_MIN, 0, 0, 0, 0, "", 0, _meshtastic_Config_DeviceConfig_BuzzerMode_MIN}
 #define meshtastic_Config_PositionConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, _meshtastic_Config_PositionConfig_GpsMode_MIN}
-#define meshtastic_Config_PowerConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_Config_PowerConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_Config_NetworkConfig_init_default {0, "", "", "", 0, _meshtastic_Config_NetworkConfig_AddressMode_MIN, false, meshtastic_Config_NetworkConfig_IpV4Config_init_default, "", 0, 0}
 #define meshtastic_Config_NetworkConfig_IpV4Config_init_default {0, 0, 0, 0}
 #define meshtastic_Config_DisplayConfig_init_default {0, _meshtastic_Config_DisplayConfig_DeprecatedGpsCoordinateFormat_MIN, 0, 0, 0, _meshtastic_Config_DisplayConfig_DisplayUnits_MIN, _meshtastic_Config_DisplayConfig_OledType_MIN, _meshtastic_Config_DisplayConfig_DisplayMode_MIN, 0, 0, _meshtastic_Config_DisplayConfig_CompassOrientation_MIN, 0, 0, 0}
@@ -819,7 +836,7 @@ extern "C" {
 #define meshtastic_Config_init_zero              {0, {meshtastic_Config_DeviceConfig_init_zero}}
 #define meshtastic_Config_DeviceConfig_init_zero {_meshtastic_Config_DeviceConfig_Role_MIN, 0, 0, 0, _meshtastic_Config_DeviceConfig_RebroadcastMode_MIN, 0, 0, 0, 0, "", 0, _meshtastic_Config_DeviceConfig_BuzzerMode_MIN}
 #define meshtastic_Config_PositionConfig_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, _meshtastic_Config_PositionConfig_GpsMode_MIN}
-#define meshtastic_Config_PowerConfig_init_zero  {0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_Config_PowerConfig_init_zero  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_Config_NetworkConfig_init_zero {0, "", "", "", 0, _meshtastic_Config_NetworkConfig_AddressMode_MIN, false, meshtastic_Config_NetworkConfig_IpV4Config_init_zero, "", 0, 0}
 #define meshtastic_Config_NetworkConfig_IpV4Config_init_zero {0, 0, 0, 0}
 #define meshtastic_Config_DisplayConfig_init_zero {0, _meshtastic_Config_DisplayConfig_DeprecatedGpsCoordinateFormat_MIN, 0, 0, 0, _meshtastic_Config_DisplayConfig_DisplayUnits_MIN, _meshtastic_Config_DisplayConfig_OledType_MIN, _meshtastic_Config_DisplayConfig_DisplayMode_MIN, 0, 0, _meshtastic_Config_DisplayConfig_CompassOrientation_MIN, 0, 0, 0}
@@ -862,6 +879,7 @@ extern "C" {
 #define meshtastic_Config_PowerConfig_ls_secs_tag 7
 #define meshtastic_Config_PowerConfig_min_wake_secs_tag 8
 #define meshtastic_Config_PowerConfig_device_battery_ina_address_tag 9
+#define meshtastic_Config_PowerConfig_nrf52_power_flags_tag 10
 #define meshtastic_Config_PowerConfig_powermon_enables_tag 32
 #define meshtastic_Config_NetworkConfig_IpV4Config_ip_tag 1
 #define meshtastic_Config_NetworkConfig_IpV4Config_gateway_tag 2
@@ -999,6 +1017,7 @@ X(a, STATIC,   SINGULAR, UINT32,   sds_secs,          6) \
 X(a, STATIC,   SINGULAR, UINT32,   ls_secs,           7) \
 X(a, STATIC,   SINGULAR, UINT32,   min_wake_secs,     8) \
 X(a, STATIC,   SINGULAR, UINT32,   device_battery_ina_address,   9) \
+X(a, STATIC,   SINGULAR, UINT32,   nrf52_power_flags,  10) \
 X(a, STATIC,   SINGULAR, UINT64,   powermon_enables,  32)
 #define meshtastic_Config_PowerConfig_CALLBACK NULL
 #define meshtastic_Config_PowerConfig_DEFAULT NULL
@@ -1125,7 +1144,7 @@ extern const pb_msgdesc_t meshtastic_Config_SessionkeyConfig_msg;
 #define meshtastic_Config_NetworkConfig_IpV4Config_size 20
 #define meshtastic_Config_NetworkConfig_size     204
 #define meshtastic_Config_PositionConfig_size    62
-#define meshtastic_Config_PowerConfig_size       52
+#define meshtastic_Config_PowerConfig_size       58
 #define meshtastic_Config_SecurityConfig_size    178
 #define meshtastic_Config_SessionkeyConfig_size  0
 #define meshtastic_Config_size                   207
