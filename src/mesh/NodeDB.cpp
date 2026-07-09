@@ -1157,6 +1157,14 @@ void NodeDB::initConfigIntervals()
     config.power.sds_secs = default_sds_secs;
     config.power.wait_bluetooth_secs = default_wait_bluetooth_secs;
 
+#ifdef USERPREFS_CONFIG_NRF52_POWER_MANAGEMENT_DISABLED
+    // NRF52 only: for builds targeting boards whose VDD reading is unreliable, default-disable the
+    // firmware low-VDD power control by setting the NRF52_POWER_DISABLE_ALL flag. Runtime config can
+    // still override this.
+    if (USERPREFS_CONFIG_NRF52_POWER_MANAGEMENT_DISABLED)
+        config.power.nrf52_power_flags |= meshtastic_Config_PowerConfig_Nrf52PowerFlags_NRF52_POWER_DISABLE_ALL;
+#endif
+
     config.display.screen_on_secs = default_screen_on_secs;
 
 #if defined(USE_POWERSAVE)
