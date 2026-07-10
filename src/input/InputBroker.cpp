@@ -32,6 +32,9 @@
 #include "input/cardKbI2cImpl.h"
 #endif
 #include "input/kbMatrixImpl.h"
+#ifdef HAS_T9_KEYBOARD
+#include "input/T9Keyboard.h"
+#endif
 #endif
 
 #if HAS_BUTTON || defined(ARCH_PORTDUINO)
@@ -412,6 +415,10 @@ void InputBroker::Init()
         kbMatrixImpl = new KbMatrixImpl();
         kbMatrixImpl->init();
 #endif // INPUTBROKER_MATRIX_TYPE
+#ifdef HAS_T9_KEYBOARD
+        t9Keyboard = new T9Keyboard();
+        t9Keyboard->init();
+#endif // HAS_T9_KEYBOARD
 #ifdef INPUTBROKER_SERIAL_TYPE
         aSerialKeyboardImpl = new SerialKeyboardImpl();
         aSerialKeyboardImpl->init();
