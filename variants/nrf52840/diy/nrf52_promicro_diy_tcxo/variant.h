@@ -200,6 +200,18 @@ settings.
 #define PIN_EINK_RES (32 + 1)
 #define PIN_EINK_BUSY (32 + 6)
 
+// T9 Keyboard (see src/input/T9Keyboard_variant_template.h) - pin numbers are the
+// template defaults; adjust to match your actual GPIO matrix wiring.
+#define HAS_T9_KEYBOARD 1
+#define T9_ROW_PIN_0 8
+#define T9_ROW_PIN_1 9
+#define T9_ROW_PIN_2 10
+#define T9_COL_PIN_0 16
+#define T9_COL_PIN_1 17
+#define T9_COL_PIN_2 18
+#define T9_COL_PIN_3 19
+#define T9_COL_PIN_4 20
+
 #ifdef __cplusplus
 }
 #endif
