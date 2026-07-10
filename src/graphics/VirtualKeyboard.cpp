@@ -5,6 +5,9 @@
 #include "graphics/ScreenFonts.h"
 #include "graphics/SharedUIDisplay.h"
 #include "main.h"
+#ifdef HAS_T9_KEYBOARD
+#include "input/T9Keyboard.h"
+#endif
 #include <Arduino.h>
 #include <vector>
 
@@ -200,6 +203,16 @@ void VirtualKeyboard::drawInputArea(OLEDDisplay *display, int16_t offsetX, int16
     if (!headerText.empty()) {
         // Draw header and reserve exact font height (plus a tighter gap) to maximize input area
         display->drawString(offsetX + 2, offsetY, headerText.c_str());
+
+        // Draw caps lock indicator if T9 hardware keyboard has caps lock active
+#ifdef HAS_T9_KEYBOARD
+        if (t9Keyboard && t9Keyboard->isCapsLockActive()) {
+            const char *capsText = "CAP";
+            int capsWidth = display->getStringWidth(capsText);
+            display->drawString(screenWidth - offsetX - capsWidth - 2, offsetY, capsText);
+        }
+#endif
+
         if (screenHeight <= 64) {
             headerHeight = FONT_HEIGHT_SMALL - 2; // 11px
         } else {

@@ -16,6 +16,9 @@ class T9Keyboard : public Observable<const InputEvent *>, private concurrency::O
     ~T9Keyboard();
     void init();
 
+    bool isCapsLockActive() const { return capsLockActive; }
+    bool isShiftActive() const { return shiftActive; }
+
   protected:
     int32_t runOnce() override;
 
@@ -48,22 +51,26 @@ class T9Keyboard : public Observable<const InputEvent *>, private concurrency::O
     int lastKeyIndex = -1;
     uint8_t tapCount = 0;
     uint32_t lastTapTime = 0;
+    bool shiftActive = false;  // One-shot shift (clears after typing a letter)
+    bool capsLockActive = false;  // Persistent caps lock
+    uint32_t lastShiftPressTime = 0;  // For double-press detection
+    uint8_t shiftPressCount = 0;  // Count consecutive shift presses
 
     // T9 keymap: multi-tap mappings
     // Each key has multiple characters, press repeatedly to cycle
     // Standard phone layout:
     // 1        2(abc)   3(def)   4(ghi)
     // 5(jkl)   6(mno)   7(pqrs)  8(tuv)
-    // 9(wxyz)  *(+)     0(space) #(#)
+    // 9(wxyz)  *(SHIFT) 0(space) #(#)
     static constexpr const char *T9_CHARS[ROWS][COLS] = {
         {"1", "2abc", "3def", "4ghi"},
         {"5jkl", "6mno", "7pqrs", "8tuv"},
-        {"9wxyz", "*+", "0 ", "#"}};
+        {"9wxyz", "*", "0 ", "#"}};
 
     static constexpr uint8_t T9_CHAR_COUNTS[ROWS][COLS] = {
         {1, 4, 4, 4},
         {4, 4, 5, 4},
-        {5, 2, 2, 1}};
+        {5, 1, 2, 1}};
 
     void scanMatrix();
     void handleKeyPress(uint8_t row, uint8_t col);

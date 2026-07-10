@@ -147,21 +147,33 @@ T9Keyboard: Joystick pressed
 - `8` = `t` → `u` → `v` → `8`
 - `9` = `w` → `x` → `y` → `z` → `9`
 - `0` = space
-- `*` = `+`
+- `*` = **SHIFT toggle** (capitals)
 - `#` = `#`
 - `1` = `1` (only one option, plus numeric)
 
+**Shift/Caps (Capital Letters):**
+- Press `*` key = toggle SHIFT/CAPS mode (no character emitted)
+- When shift is active, all letter keys emit CAPITALS (A-Z)
+- Shift state persists until toggled off by pressing `*` again
+- Numbers and symbols unaffected by shift
+
 **Timing:**
-- Press same key multiple times within 1.5s to cycle
+- Press same key multiple times within 1.5s to cycle through its letters
 - Wait 1.5s or press different key to lock in selection and emit character
 - Character sent via `INPUT_BROKER_MATRIXKEY` event with `kbchar` set to selected letter
 
-Example: To type "hello"
-1. Press `4` once → emit `h`
-2. Press `3` twice → emit `e`
-3. Press `5` three times → emit `l`
-4. Press `5` three times → emit `l`
-5. Press `6` three times → emit `o`
+Example: To type "Hello"
+1. Press `*` → toggle shift ON (no char emitted)
+2. Press `4` once → emit `H` (capital, shift is on)
+3. Press `*` → toggle shift OFF
+4. Press `3` twice → emit `e`
+5. Press `5` three times → emit `l`
+6. Press `5` three times → emit `l`
+7. Press `6` three times → emit `o`
+
+**Joystick:**
+- `UP/DOWN/LEFT/RIGHT` = navigation (menu up/down/left/right)
+- `CLICK` = SELECT (confirm menu selection)
 
 ## Customization
 
