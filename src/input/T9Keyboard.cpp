@@ -138,6 +138,37 @@ void T9Keyboard::handleKeyPress(uint8_t row, uint8_t col)
         return;
     }
 
+    // Check if this is the asterisk key (row=2, col=1) - shift or caps lock
+    if (row == 2 && col == 1) {
+        uint32_t now = millis();
+        uint32_t timeSinceLastShift = now - lastShiftPressTime;
+
+        // Double-press within timeout toggles caps lock
+        if (timeSinceLastShift < MULTI_TAP_TIMEOUT) {
+            shiftPressCount++;
+            if (shiftPressCount >= 2) {
+                capsLockActive = !capsLockActive;
+                LOG_DEBUG("T9Keyboard: Caps lock toggled -> %s", capsLockActive ? "ON" : "OFF");
+                shiftPressCount = 0;
+                lastShiftPressTime = 0;
+                // Don't activate one-shot shift on double-press
+                shiftActive = false;
+            }
+        }
+        // Single press activates one-shot shift
+        else {
+            shiftActive = true;
+            shiftPressCount = 1;
+            LOG_DEBUG("T9Keyboard: Shift activated (one-shot)");
+        }
+
+        lastShiftPressTime = now;
+        // Don't enter multi-tap mode for shift key
+        lastKeyIndex = -1;
+        tapCount = 0;
+        return;
+    }
+
     int keyIndex = getKeyIndex(row, col);
     uint32_t now = millis();
     uint32_t timeSinceLastTap = now - lastTapTime;
@@ -185,9 +216,17 @@ void T9Keyboard::emitCurrentSelection()
 
     char selectedChar = getCharAtIndex(lastKeyIndex, tapCount);
     if (selectedChar != '\0') {
+        // Apply shift if active (one-shot or caps lock)
+        if ((shiftActive || capsLockActive) && selectedChar >= 'a' && selectedChar <= 'z') {
+            selectedChar = selectedChar - 'a' + 'A';  // Convert to uppercase
+        }
         InputEvent event = createCharEvent(selectedChar);
         notifyObservers(&event);
-        LOG_DEBUG("T9Keyboard: Emitting '%c' from key %d,%d (tap %d)", selectedChar, row, col, tapCount);
+        LOG_DEBUG("T9Keyboard: Emitting '%c' from key %d,%d (tap %d, shift=%d, capslock=%d)",
+                  selectedChar, row, col, tapCount, shiftActive, capsLockActive);
+
+        // Clear one-shot shift after emitting a character
+        shiftActive = false;
     }
 }
 
