@@ -1,0 +1,39 @@
+// T9 Keyboard GPIO configuration template
+// Add these #defines to your variant.h to enable the T9 keyboard driver
+
+#ifndef T9_KEYBOARD_TEMPLATE_H
+#define T9_KEYBOARD_TEMPLATE_H
+
+// ===== Enable T9 Keyboard =====
+#define HAS_T9_KEYBOARD 1
+
+// ===== GPIO Pin Configuration =====
+// Rows: controlled as outputs (pull low to activate)
+#define T9_ROW_PIN_0 8    // Row 0 (keys 1,2,3, and joy-up or other)
+#define T9_ROW_PIN_1 9    // Row 1 (keys 5,6,7,8, and joy-down or other)
+#define T9_ROW_PIN_2 10   // Row 2 (keys 9,*,0,#, and joy-left/right/click)
+
+// Letter key columns: sense inputs with pull-ups (LOW when key pressed)
+#define T9_COL_PIN_0 16   // Column 0 (1,5,9)
+#define T9_COL_PIN_1 17   // Column 1 (2,6,*)
+#define T9_COL_PIN_2 18   // Column 2 (3,7,0)
+#define T9_COL_PIN_3 19   // Column 3 (4,8,#)
+
+// Joystick column (optional) - directional pad
+#define T9_COL_PIN_4 20   // Column 4 (joystick directions on rows 0-2)
+
+// Joystick row mappings - which row has which direction?
+// Define which rows correspond to UP/DOWN/LEFT/RIGHT/CLICK
+// You'll fill these in once you know the physical layout
+// #define T9_JOYSTICK_ROW_UP 0
+// #define T9_JOYSTICK_ROW_DOWN 1
+// #define T9_JOYSTICK_ROW_LEFT 2
+// #define T9_JOYSTICK_ROW_RIGHT 2
+// #define T9_JOYSTICK_ROW_CLICK 0
+
+// Key layout (physical):
+// Row 0:  1  2  3  4
+// Row 1:  5  6  7  8
+// Row 2:  9  *  0  #
+
+#endif // T9_KEYBOARD_TEMPLATE_H
