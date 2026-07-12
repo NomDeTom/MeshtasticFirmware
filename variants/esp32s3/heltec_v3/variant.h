@@ -42,3 +42,16 @@
 #define SX126X_DIO3_TCXO_VOLTAGE 1.8
 
 #define HAS_32768HZ 1
+
+#define HAS_T9_KEYBOARD 1
+
+// Row pins (outputs, active LOW)
+#define T9_ROW_PIN_0 47
+#define T9_ROW_PIN_1 48
+#define T9_ROW_PIN_2 26
+
+// Column pins (inputs with pull-up, sense LOW when key pressed)
+#define T9_COL_PIN_0 33
+#define T9_COL_PIN_1 34
+#define T9_COL_PIN_2 35
+#define T9_COL_PIN_3 36

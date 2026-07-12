@@ -259,7 +259,7 @@ InputEvent T9Keyboard::createCharEvent(char c)
 {
     InputEvent event = {};
     event.source = "T9Keyboard";
-    event.inputEvent = INPUT_BROKER_MATRIXKEY;
+    event.inputEvent = INPUT_BROKER_NONE;
     event.kbchar = c;
     return event;
 }
