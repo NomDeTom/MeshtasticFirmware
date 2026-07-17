@@ -319,6 +319,21 @@ void TrafficManagementModule::markKeySignerProvenForTest(NodeNum node)
 #endif
 }
 
+int TrafficManagementModule::peekNodeInfoFlagsForTest(NodeNum node)
+{
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+    concurrency::LockGuard guard(&cacheLock);
+    const NodeInfoPayloadEntry *entry = findNodeInfoEntry(node);
+    if (!entry)
+        return -1;
+    return (entry->hasObserved ? 1 : 0) | (entry->hasResponded ? 2 : 0) | (entry->isMember ? 4 : 0) |
+           (entry->hasFullUser ? 8 : 0) | (entry->keySignerProven ? 16 : 0);
+#else
+    (void)node;
+    return -1;
+#endif
+}
+
 /**
  * Find or create an entry for the given node.
  *
@@ -1217,8 +1232,6 @@ int32_t TrafficManagementModule::runOnce()
         return INT32_MAX;
 
 #if TRAFFIC_MANAGEMENT_CACHE_SIZE > 0
-    const uint32_t nowMs = TrafficManagementModule::clockMs();
-
     // Warm-start the next-hop cache from persisted NodeInfoLite hints once nodeDB
     // is populated. Done here (not in the constructor) so nodeDB has finished
     // loading. Takes its own lock, so call before acquiring the sweep guard below.

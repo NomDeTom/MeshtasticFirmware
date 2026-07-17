@@ -169,6 +169,12 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     // node is not cached or the PSRAM NodeInfo cache is absent.
     void markKeySignerProvenForTest(NodeNum node);
 
+    // Test introspection: the NodeInfo entry's flag bits for `node`, or -1 if absent (or no
+    // PSRAM cache). bit0 hasObserved, bit1 hasResponded, bit2 isMember, bit3 hasFullUser,
+    // bit4 keySignerProven. Lets saturation/membership tests assert sweep effects directly
+    // instead of inferring them from response behavior.
+    int peekNodeInfoFlagsForTest(NodeNum node);
+
   private:
     // =========================================================================
     // Unified Cache Entry (10 bytes) - Same for ALL platforms

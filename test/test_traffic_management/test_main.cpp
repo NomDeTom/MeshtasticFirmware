@@ -178,10 +178,18 @@ class TrafficManagementModuleTestShim : public TrafficManagementModule
     using TrafficManagementModule::handleReceived;
     using TrafficManagementModule::markKeySignerProvenForTest;
     using TrafficManagementModule::peekCachedRole;
+    using TrafficManagementModule::peekNodeInfoFlagsForTest;
     using TrafficManagementModule::runOnce;
 
     bool ignoreRequestFlag() const { return ignoreRequest; }
 };
+
+// peekNodeInfoFlagsForTest() bit positions (only consumed by the PSRAM-path tests).
+[[maybe_unused]] constexpr int kFlagObserved = 1;
+[[maybe_unused]] constexpr int kFlagResponded = 2;
+[[maybe_unused]] constexpr int kFlagMember = 4;
+[[maybe_unused]] constexpr int kFlagFullUser = 8;
+[[maybe_unused]] constexpr int kFlagSignerProven = 16;
 
 MockNodeDB *mockNodeDB = nullptr;
 
@@ -1079,7 +1087,249 @@ static void test_tm_nodeinfo_directResponse_psramUnsignedNotServed(void)
     TEST_ASSERT_EQUAL_UINT32(0, static_cast<uint32_t>(mockRouter.sentPackets.size()));
 }
 #endif // TMM_NODEINFO_REPLAY_SIGNED_GATE
+
+#if WARM_NODE_COUNT > 0
+/**
+ * Finding-1 regression: the cache key pin must cover the warm tier. A node whose key lives
+ * only in the warm store (aged out of hot, TMM slot evicted) must reject a forged NodeInfo
+ * carrying a different key, and still accept the genuine one.
+ */
+static void test_tm_nodeinfo_cache_rejectsKeyMismatchVsWarmTier(void)
+{
+    moduleConfig.traffic_management.nodeinfo_direct_response_max_hops = 10;
+    config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+    mockNodeDB->clearCachedNode(); // hot store misses; only the warm tier knows the key
+
+    MockRouter mockRouter;
+    mockRouter.addInterface(std::unique_ptr<RadioInterface>(new MockRadioInterface()));
+    MeshService mockService;
+    router = &mockRouter;
+    service = &mockService;
+
+    TrafficManagementModuleTestShim module;
+
+    uint8_t realKey[32];
+    memset(realKey, 0x55, sizeof(realKey));
+    TEST_ASSERT_TRUE(mockNodeDB->warmStore.absorb(kTargetNode, 1000, realKey));
+
+    // Poisoning attempt with a mismatched key must not enter the cache.
+    module.handleReceived(makeNodeInfoPacketWithKey(kTargetNode, "attacker", 0x66));
+    uint8_t key[32] = {0};
+    TEST_ASSERT_FALSE(module.copyPublicKey(kTargetNode, key, nullptr));
+
+    // The genuine key (matching the warm pin) is accepted.
+    module.handleReceived(makeNodeInfoPacketWithKey(kTargetNode, "genuine", 0x55));
+    TEST_ASSERT_TRUE(module.copyPublicKey(kTargetNode, key, nullptr));
+    TEST_ASSERT_EQUAL_UINT8(0x55, key[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x55, key[31]);
+
+    mockNodeDB->warmStore.remove(kTargetNode);
+}
+#endif // WARM_NODE_COUNT > 0
+
+/**
+ * Serve-gate honesty: an identity pushed in by the NodeDB write-through hook is available for
+ * rehydration (copyUser) and marked member/full-user, but is NEVER served as a direct response
+ * until a genuine frame is heard - a hook write is knowledge, not an observation.
+ */
+static void test_tm_nodeinfo_hookedIdentity_notServedUntilObserved(void)
+{
+    moduleConfig.traffic_management.nodeinfo_direct_response_max_hops = 10;
+    config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+    mockNodeDB->clearCachedNode();
+
+    MockRouter mockRouter;
+    mockRouter.addInterface(std::unique_ptr<RadioInterface>(new MockRadioInterface()));
+    MeshService mockService;
+    router = &mockRouter;
+    service = &mockService;
+
+    TrafficManagementModuleTestShim module;
+
+    meshtastic_User hooked = meshtastic_User_init_zero;
+    snprintf(hooked.id, sizeof(hooked.id), "!%08x", kTargetNode);
+    strncpy(hooked.long_name, "hooked", sizeof(hooked.long_name) - 1);
+    hooked.public_key.size = 32;
+    memset(hooked.public_key.bytes, 0x77, 32);
+    module.onNodeIdentityCommitted(kTargetNode, hooked, true);
+
+    // Present for rehydration, with the expected flags - but no observation.
+    meshtastic_User out = meshtastic_User_init_zero;
+    TEST_ASSERT_TRUE(module.copyUser(kTargetNode, out, nullptr));
+    TEST_ASSERT_EQUAL_STRING("hooked", out.long_name);
+    const int flags = module.peekNodeInfoFlagsForTest(kTargetNode);
+    TEST_ASSERT_TRUE(flags >= 0);
+    TEST_ASSERT_TRUE(flags & kFlagFullUser);
+    TEST_ASSERT_TRUE(flags & kFlagMember);
+    TEST_ASSERT_TRUE(flags & kFlagSignerProven);
+    TEST_ASSERT_FALSE(flags & kFlagObserved);
+
+    meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
+    request.decoded.want_response = true;
+    request.hop_start = 3;
+    request.hop_limit = 3;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(module.handleReceived(request)));
+    TEST_ASSERT_EQUAL_UINT32(0, static_cast<uint32_t>(mockRouter.sentPackets.size()));
+
+    // Once the node is genuinely heard (same key - the pin holds), it becomes servable.
+    module.handleReceived(makeNodeInfoPacketWithKey(kTargetNode, "genuine", 0x77));
+    request.id = 0xBBBB0001;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::STOP), static_cast<int>(module.handleReceived(request)));
+    TEST_ASSERT_EQUAL_UINT32(1, static_cast<uint32_t>(mockRouter.sentPackets.size()));
+}
+
+/**
+ * Key-only hook upserts: a committed key is served by copyPublicKey with the caller's
+ * provenance, offers no User for rehydration, and a rotated key never inherits the old
+ * verdict.
+ */
+static void test_tm_nodeinfo_keyHook_upsertsAndGovernsProvenance(void)
+{
+    mockNodeDB->clearCachedNode();
+    TrafficManagementModuleTestShim module;
+
+    uint8_t k[32];
+    memset(k, 0x99, sizeof(k));
+    module.onNodeKeyCommitted(kTargetNode, k, false); // TOFU-grade learn
+    uint8_t key[32] = {0};
+    bool proven = true;
+    TEST_ASSERT_TRUE(module.copyPublicKey(kTargetNode, key, &proven));
+    TEST_ASSERT_EQUAL_UINT8(0x99, key[0]);
+    TEST_ASSERT_FALSE(proven);
+    meshtastic_User out = meshtastic_User_init_zero;
+    TEST_ASSERT_FALSE(module.copyUser(kTargetNode, out, nullptr)); // key-only: nothing to rehydrate
+
+    module.onNodeKeyCommitted(kTargetNode, k, true); // manual verification of the same key
+    TEST_ASSERT_TRUE(module.copyPublicKey(kTargetNode, key, &proven));
+    TEST_ASSERT_TRUE(proven);
+
+    uint8_t rotated[32];
+    memset(rotated, 0xAA, sizeof(rotated));
+    module.onNodeKeyCommitted(kTargetNode, rotated, false); // NodeDB-senior rotation
+    TEST_ASSERT_TRUE(module.copyPublicKey(kTargetNode, key, &proven));
+    TEST_ASSERT_EQUAL_UINT8(0xAA, key[0]);
+    TEST_ASSERT_FALSE(proven); // rotated key must not inherit the old key's verdict
+}
+
+/**
+ * User-initiated removal purges the NodeInfo identity: after purgeNode, neither the key pool
+ * nor rehydration can resurrect it.
+ */
+static void test_tm_purgeNode_clearsNodeInfoEntry(void)
+{
+    moduleConfig.traffic_management.nodeinfo_direct_response_max_hops = 10;
+    mockNodeDB->clearCachedNode();
+
+    MockRouter mockRouter;
+    mockRouter.addInterface(std::unique_ptr<RadioInterface>(new MockRadioInterface()));
+    MeshService mockService;
+    router = &mockRouter;
+    service = &mockService;
+
+    TrafficManagementModuleTestShim module;
+    module.handleReceived(makeNodeInfoPacketWithKey(kTargetNode, "genuine", 0xBB));
+    uint8_t key[32] = {0};
+    TEST_ASSERT_TRUE(module.copyPublicKey(kTargetNode, key, nullptr));
+
+    module.purgeNode(kTargetNode);
+
+    TEST_ASSERT_FALSE(module.copyPublicKey(kTargetNode, key, nullptr));
+    meshtastic_User out = meshtastic_User_init_zero;
+    TEST_ASSERT_FALSE(module.copyUser(kTargetNode, out, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, module.peekNodeInfoFlagsForTest(kTargetNode));
+}
 #endif // !MESHTASTIC_EXCLUDE_PKI
+
+/**
+ * Tick saturation: the sweep clears hasObserved once the serve window passes, the entry
+ * itself persists (no TTL eviction), and a full 256-tick wrap of the clock cannot alias a
+ * saturated stamp back to "fresh".
+ */
+static void test_tm_nodeinfo_tickSaturation_sweepClearsObserved(void)
+{
+    moduleConfig.traffic_management.nodeinfo_direct_response_max_hops = 10;
+    config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+    mockNodeDB->clearCachedNode();
+
+    MockRouter mockRouter;
+    mockRouter.addInterface(std::unique_ptr<RadioInterface>(new MockRadioInterface()));
+    MeshService mockService;
+    router = &mockRouter;
+    service = &mockService;
+
+    TrafficManagementModuleTestShim module;
+    module.handleReceived(makeNodeInfoPacket(kTargetNode, "target-long", "tg"));
+    module.markKeySignerProvenForTest(kTargetNode);
+    const uint32_t stampMs = TrafficManagementModule::s_testNowMs;
+    int flags = module.peekNodeInfoFlagsForTest(kTargetNode);
+    TEST_ASSERT_TRUE(flags >= 0 && (flags & kFlagObserved));
+
+    // Past the serve window (plus one tick for granularity): the sweep saturates the stamp
+    // but keeps the entry.
+    TrafficManagementModule::s_testNowMs += (6UL * 60UL * 60UL * 1000UL) + 180'000UL + 1000UL;
+    module.runOnce();
+    flags = module.peekNodeInfoFlagsForTest(kTargetNode);
+    TEST_ASSERT_TRUE(flags >= 0);
+    TEST_ASSERT_FALSE(flags & kFlagObserved);
+
+    // Advance to exactly one full uint8 tick period after the original stamp: the raw tick
+    // age would read ~0 (fresh) if the bit were still trusted. It isn't - the cleared bit,
+    // not the tick value, is authoritative.
+    TrafficManagementModule::s_testNowMs = stampMs + 256UL * 180'000UL;
+    meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
+    request.decoded.want_response = true;
+    request.hop_start = 3;
+    request.hop_limit = 3;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(module.handleReceived(request)));
+    TEST_ASSERT_EQUAL_UINT32(0, static_cast<uint32_t>(mockRouter.sentPackets.size()));
+}
+
+/**
+ * Membership: the sweep marks entries whose node exists in NodeDB and clears the mark when
+ * the node is gone; reconciliation seeds a hot-store identity into the cache (member, full
+ * user, never observed).
+ */
+static void test_tm_nodeinfo_sweepMembershipAndReconciliation(void)
+{
+    moduleConfig.traffic_management.nodeinfo_direct_response_max_hops = 10;
+    config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+    mockNodeDB->clearCachedNode();
+
+    MockRouter mockRouter;
+    mockRouter.addInterface(std::unique_ptr<RadioInterface>(new MockRadioInterface()));
+    MeshService mockService;
+    router = &mockRouter;
+    service = &mockService;
+
+    TrafficManagementModuleTestShim module;
+
+    // Reconciliation: a named hot-store node the cache has never heard is seeded as a
+    // member with a full user - but no observation, so it is not servable.
+    mockNodeDB->setSignerHotNode(kTargetNode, "seeded-name");
+    module.runOnce(); // boot reconciliation pass
+    int flags = module.peekNodeInfoFlagsForTest(kTargetNode);
+    TEST_ASSERT_TRUE(flags >= 0);
+    TEST_ASSERT_TRUE(flags & kFlagMember);
+    TEST_ASSERT_TRUE(flags & kFlagFullUser);
+    TEST_ASSERT_FALSE(flags & kFlagObserved);
+    meshtastic_User out = meshtastic_User_init_zero;
+    TEST_ASSERT_TRUE(module.copyUser(kTargetNode, out, nullptr));
+    TEST_ASSERT_EQUAL_STRING("seeded-name", out.long_name);
+
+    meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
+    request.decoded.want_response = true;
+    request.hop_start = 3;
+    request.hop_limit = 3;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ProcessMessage::CONTINUE), static_cast<int>(module.handleReceived(request)));
+    TEST_ASSERT_EQUAL_UINT32(0, static_cast<uint32_t>(mockRouter.sentPackets.size()));
+
+    // Node drops out of NodeDB entirely: the next sweep clears the membership mark.
+    mockNodeDB->rollHotStore();
+    module.runOnce();
+    flags = module.peekNodeInfoFlagsForTest(kTargetNode);
+    TEST_ASSERT_TRUE(flags >= 0); // entry persists (no TTL) ...
+    TEST_ASSERT_FALSE(flags & kFlagMember); // ... but is no longer pinned as a member
+}
 #endif
 
 /**
@@ -1663,6 +1913,27 @@ static void test_tm_runOnce_enabledReturnsMaintenanceInterval(void)
 /**
  * Round-trip set/get of a confirmed next hop, plus the input guards.
  */
+/**
+ * User-initiated removal purges the unified-cache slot: the next-hop hint (and everything
+ * else in the slot) is gone after purgeNode, and purgeAll clears every slot.
+ */
+static void test_tm_purgeNode_clearsUnifiedSlot(void)
+{
+    TrafficManagementModuleTestShim module;
+
+    module.setNextHop(kTargetNode, 0x42);
+    module.setNextHop(kRemoteNode, 0x43);
+    TEST_ASSERT_EQUAL_UINT8(0x42, module.getNextHopHint(kTargetNode));
+
+    module.purgeNode(kTargetNode);
+    TEST_ASSERT_EQUAL_UINT8(0, module.getNextHopHint(kTargetNode));
+    // Unrelated nodes are untouched.
+    TEST_ASSERT_EQUAL_UINT8(0x43, module.getNextHopHint(kRemoteNode));
+
+    module.purgeAll();
+    TEST_ASSERT_EQUAL_UINT8(0, module.getNextHopHint(kRemoteNode));
+}
+
 static void test_tm_nextHop_setAndGetRoundTrip(void)
 {
     TrafficManagementModuleTestShim module;
@@ -2248,12 +2519,20 @@ TM_TEST_ENTRY void setup()
     RUN_TEST(test_tm_nodeinfo_directResponse_psramMissDoesNotFallbackToNodeDb);
     RUN_TEST(test_tm_nodeinfo_directResponse_psramStaleEntryNotServed);
     RUN_TEST(test_tm_nodeinfo_directResponse_psramThrottlesWithinWindow);
+    RUN_TEST(test_tm_nodeinfo_tickSaturation_sweepClearsObserved);
+    RUN_TEST(test_tm_nodeinfo_sweepMembershipAndReconciliation);
 #if !(MESHTASTIC_EXCLUDE_PKI)
     RUN_TEST(test_tm_nodeinfo_cache_rejectsMismatchedKey);
     RUN_TEST(test_tm_nodeinfo_copyPublicKey_servesTofuKey);
     RUN_TEST(test_tm_nodeinfo_copyPublicKey_upgradesToSignerProven);
     RUN_TEST(test_tm_nodeinfo_copyPublicKey_missReturnsFalse);
     RUN_TEST(test_tm_nodeinfo_copyUser_returnsCachedIdentity);
+    RUN_TEST(test_tm_nodeinfo_hookedIdentity_notServedUntilObserved);
+    RUN_TEST(test_tm_nodeinfo_keyHook_upsertsAndGovernsProvenance);
+    RUN_TEST(test_tm_purgeNode_clearsNodeInfoEntry);
+#if WARM_NODE_COUNT > 0
+    RUN_TEST(test_tm_nodeinfo_cache_rejectsKeyMismatchVsWarmTier);
+#endif
 #if TMM_NODEINFO_REPLAY_SIGNED_GATE
     RUN_TEST(test_tm_nodeinfo_directResponse_psramUnsignedNotServed);
 #endif
@@ -2277,6 +2556,7 @@ TM_TEST_ENTRY void setup()
     RUN_TEST(test_tm_alterReceived_exhaustFlag_isPacketScoped);
     RUN_TEST(test_tm_runOnce_disabledReturnsMaxInterval);
     RUN_TEST(test_tm_runOnce_enabledReturnsMaintenanceInterval);
+    RUN_TEST(test_tm_purgeNode_clearsUnifiedSlot);
     RUN_TEST(test_tm_nextHop_setAndGetRoundTrip);
     RUN_TEST(test_tm_nextHop_servedAfterNodeDbRoll);
     RUN_TEST(test_tm_nextHop_preloadDoesNotClobberLearned);
