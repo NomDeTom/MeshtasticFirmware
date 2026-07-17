@@ -161,6 +161,7 @@ class TrafficManagementModuleTestShim : public TrafficManagementModule
     using TrafficManagementModule::alterReceived;
     using TrafficManagementModule::flushCache;
     using TrafficManagementModule::handleReceived;
+    using TrafficManagementModule::dropNodeInfoCacheForTest;
     using TrafficManagementModule::markKeySignerProvenForTest;
     using TrafficManagementModule::peekCachedRole;
     using TrafficManagementModule::runOnce;
@@ -531,6 +532,7 @@ static void test_tm_nodeinfo_directResponse_respondsFromCache(void)
     service = &mockService;
 
     TrafficManagementModuleTestShim module;
+    module.dropNodeInfoCacheForTest(); // exercise the NodeDB fallback path
     meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
     request.decoded.want_response = true;
     request.id = 0x13572468;
@@ -577,6 +579,7 @@ static void test_tm_nodeinfo_directResponse_learnsRequestorNodeInfo(void)
     service = &mockService;
 
     TrafficManagementModuleTestShim module;
+    module.dropNodeInfoCacheForTest(); // exercise the NodeDB fallback path
     meshtastic_MeshPacket request = makeNodeInfoPacket(kRemoteNode, "requester-long", "rq");
     request.to = kTargetNode;
     request.decoded.want_response = true;
@@ -619,11 +622,10 @@ static void test_tm_nodeinfo_clientClamp_skipsWhenNotDirect(void)
     TEST_ASSERT_FALSE(module.ignoreRequestFlag());
 }
 
-#if !(defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM))
 /**
- * Verify non-PSRAM builds require NodeDB for direct NodeInfo responses.
+ * Verify the NodeDB-fallback path requires NodeDB for direct NodeInfo responses.
  * Important because fallback should only happen through node-wide data when
- * the dedicated PSRAM cache does not exist.
+ * the dedicated NodeInfo cache does not exist.
  */
 static void test_tm_nodeinfo_directResponse_withoutNodeDbEntry_skips(void)
 {
@@ -638,6 +640,7 @@ static void test_tm_nodeinfo_directResponse_withoutNodeDbEntry_skips(void)
     service = &mockService;
 
     TrafficManagementModuleTestShim module;
+    module.dropNodeInfoCacheForTest(); // exercise the NodeDB fallback path
     meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
     request.decoded.want_response = true;
     request.hop_start = 3;
@@ -651,11 +654,10 @@ static void test_tm_nodeinfo_directResponse_withoutNodeDbEntry_skips(void)
     TEST_ASSERT_EQUAL_UINT32(0, stats.nodeinfo_cache_hits);
     TEST_ASSERT_EQUAL_UINT32(0, static_cast<uint32_t>(mockRouter.sentPackets.size()));
 }
-#endif
 
-#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+#if TMM_HAS_NODEINFO_CACHE
 /**
- * Verify PSRAM NodeInfo cache can answer requests without NodeDB and that
+ * Verify the NodeInfo cache can answer requests without NodeDB and that
  * shouldRespondToNodeInfo() uses cached bitfield metadata.
  */
 static void test_tm_nodeinfo_directResponse_psramCacheRespondsAndPreservesBitfield(void)
@@ -1027,10 +1029,9 @@ static void test_tm_nodeinfo_directResponse_psramUnsignedNotServed(void)
 #endif
 
 /**
- * Verify the NodeDB-fallback direct-response path (non-PSRAM) refuses to spoof a reply
- * for a node NodeDB last heard beyond the serve window, but still answers a fresh one.
+ * Verify the NodeDB-fallback direct-response path (no NodeInfo cache) refuses to spoof a
+ * reply for a node NodeDB last heard beyond the serve window, but still answers a fresh one.
  */
-#if !(defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM))
 static void test_tm_nodeinfo_directResponse_fallbackStaleEntryNotServed(void)
 {
     moduleConfig.traffic_management.nodeinfo_direct_response_max_hops = 10;
@@ -1052,6 +1053,7 @@ static void test_tm_nodeinfo_directResponse_fallbackStaleEntryNotServed(void)
     service = &mockService;
 
     TrafficManagementModuleTestShim module;
+    module.dropNodeInfoCacheForTest(); // exercise the NodeDB fallback path
     meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
     request.decoded.want_response = true;
     request.hop_start = 3;
@@ -1090,6 +1092,7 @@ static void test_tm_nodeinfo_directResponse_fallbackFreshEntryServed(void)
     service = &mockService;
 
     TrafficManagementModuleTestShim module;
+    module.dropNodeInfoCacheForTest(); // exercise the NodeDB fallback path
     meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
     request.decoded.want_response = true;
     request.hop_start = 3;
@@ -1131,6 +1134,7 @@ static void test_tm_nodeinfo_directResponse_fallbackThrottlesWithinWindow(void)
     service = &mockService;
 
     TrafficManagementModuleTestShim module;
+    module.dropNodeInfoCacheForTest(); // exercise the NodeDB fallback path
     meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
     request.decoded.want_response = true;
     request.hop_start = 3;
@@ -1180,6 +1184,7 @@ static void test_tm_nodeinfo_directResponse_fallbackUnsignedNotServed(void)
     service = &mockService;
 
     TrafficManagementModuleTestShim module;
+    module.dropNodeInfoCacheForTest(); // exercise the NodeDB fallback path
     meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
     request.decoded.want_response = true;
     request.hop_start = 3;
@@ -1192,7 +1197,6 @@ static void test_tm_nodeinfo_directResponse_fallbackUnsignedNotServed(void)
     resetRTCStateForTests();
 }
 #endif // TMM_NODEINFO_REPLAY_SIGNED_GATE
-#endif
 
 /**
  * Verify relayed telemetry broadcasts are NOT hop-exhausted.
@@ -2177,7 +2181,6 @@ TM_TEST_ENTRY void setup()
     RUN_TEST(test_tm_nodeinfo_directResponse_respondsFromCache);
     RUN_TEST(test_tm_nodeinfo_directResponse_learnsRequestorNodeInfo);
     RUN_TEST(test_tm_nodeinfo_clientClamp_skipsWhenNotDirect);
-#if !(defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM))
     RUN_TEST(test_tm_nodeinfo_directResponse_withoutNodeDbEntry_skips);
     RUN_TEST(test_tm_nodeinfo_directResponse_fallbackStaleEntryNotServed);
     RUN_TEST(test_tm_nodeinfo_directResponse_fallbackFreshEntryServed);
@@ -2185,8 +2188,7 @@ TM_TEST_ENTRY void setup()
 #if TMM_NODEINFO_REPLAY_SIGNED_GATE
     RUN_TEST(test_tm_nodeinfo_directResponse_fallbackUnsignedNotServed);
 #endif
-#endif
-#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+#if TMM_HAS_NODEINFO_CACHE
     RUN_TEST(test_tm_nodeinfo_directResponse_psramCacheRespondsAndPreservesBitfield);
     RUN_TEST(test_tm_nodeinfo_directResponse_psramMissDoesNotFallbackToNodeDb);
     RUN_TEST(test_tm_nodeinfo_directResponse_psramStaleEntryNotServed);
