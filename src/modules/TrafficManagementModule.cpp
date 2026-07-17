@@ -466,11 +466,13 @@ const TrafficManagementModule::NodeInfoPayloadEntry *TrafficManagementModule::fi
  * Find or create a NodeInfo payload entry (linear scan of the flat PSRAM
  * array). One pass tracks the match, the first empty slot, and the eviction
  * victim. Victim selection is trust-tiered so the cache doubles as a pubkey
- * pool (NodeDB::copyPublicKey): a keyless entry is sacrificed before any
- * keyed one, and a trust-on-first-use key before a signer-proven key; within
- * a tier the oldest observation loses (modular obsTick age; a never-observed
- * entry counts as oldest of all). Mirrors WarmNodeStore's keyed-first
- * admission. NodeInfo traffic is low-rate, so the O(n) scan is negligible.
+ * pool (NodeDB::copyPublicKey): membership outranks key trust (a node still
+ * present in NodeDB hot/warm loses last - evicting it just to readmit it via
+ * reconciliation would churn), then keyless < TOFU key < signer-proven key;
+ * within a tier the oldest observation loses (modular obsTick age; a
+ * never-observed entry counts as oldest of all). Mirrors WarmNodeStore's
+ * keyed-first admission. NodeInfo traffic is low-rate, so the O(n) scan is
+ * negligible.
  */
 TrafficManagementModule::NodeInfoPayloadEntry *TrafficManagementModule::findOrCreateNodeInfoEntry(NodeNum node,
                                                                                                   bool *usedEmptySlot)
@@ -499,8 +501,10 @@ TrafficManagementModule::NodeInfoPayloadEntry *TrafficManagementModule::findOrCr
         }
         if (empty)
             continue; // an empty slot beats any victim; stop scoring
-        // Eviction tier (lower loses first): 0 keyless, 1 TOFU key, 2 signer-proven key.
-        const uint8_t tier = (e.user.public_key.size != 32) ? 0 : (e.keySignerProven ? 2 : 1);
+        // Eviction tier (lower loses first): key trust (0 keyless, 1 TOFU, 2 signer-proven),
+        // with current NodeDB members (isMember, maintained by the sweep) above all non-members.
+        const uint8_t keyTier = (e.user.public_key.size != 32) ? 0 : (e.keySignerProven ? 2 : 1);
+        const uint8_t tier = static_cast<uint8_t>((e.isMember ? 3 : 0) + keyTier);
         // Modular tick age; saturation keeps real ages far below 0xFF, so a never-observed
         // entry scored at 0xFF is always the oldest in its tier.
         const uint8_t age = e.hasObserved ? static_cast<uint8_t>(nowObs - e.obsTick) : 0xFF;
@@ -712,6 +716,59 @@ void TrafficManagementModule::cacheNodeInfoPacket(const meshtastic_MeshPacket &m
     }
 #else
     (void)mp;
+#endif
+}
+
+void TrafficManagementModule::reconcileNodeInfoFromNodeDBLocked()
+{
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+    if (!nodeInfoPayload || !nodeDB)
+        return;
+
+    uint16_t seeded = 0;
+    const size_t numNodes = nodeDB->getNumMeshNodes();
+    for (size_t i = 0; i < numNodes; i++) {
+        const meshtastic_NodeInfoLite *lite = nodeDB->getMeshNodeByIndex(i);
+        if (!lite || lite->num == 0 || lite->num == nodeDB->getNodeNum())
+            continue;
+        const bool liteHasUser = nodeInfoLiteHasUser(lite);
+        const bool liteHasKey = lite->public_key.size == 32;
+        if (!liteHasUser && !liteHasKey)
+            continue; // nothing worth seeding
+
+        NodeInfoPayloadEntry *entry = findNodeInfoEntryMutable(lite->num);
+        if (!entry) {
+            bool usedEmptySlot = false;
+            entry = findOrCreateNodeInfoEntry(lite->num, &usedEmptySlot);
+            if (!entry)
+                continue;
+            seeded++;
+        }
+
+        // NodeDB is the authority on identity content: adopt its User payload and key.
+        // A key change relative to a stale TMM TOFU pin resets provenance; the signer
+        // verdict then transfers only via the key-matched rule below. hasObserved/obsTick
+        // are deliberately untouched - seeding is knowledge, not an observation, and the
+        // replay serve-gate must stay keyed to genuinely heard frames.
+        const bool keyChanged =
+            entry->user.public_key.size == 32 && liteHasKey &&
+            memcmp(entry->user.public_key.bytes, lite->public_key.bytes, sizeof(lite->public_key.bytes)) != 0;
+        if (liteHasUser) {
+            const meshtastic_User dbUser = TypeConversions::ConvertToUser(lite);
+            entry->user = dbUser;
+            entry->hasFullUser = true;
+        } else if (liteHasKey) {
+            entry->user.public_key = lite->public_key;
+        }
+        if (keyChanged)
+            entry->keySignerProven = false;
+        if (liteHasKey && !entry->keySignerProven && nodeDB->isVerifiedSignerForKey(lite->num, lite->public_key.bytes))
+            entry->keySignerProven = true;
+        entry->isMember = true;
+    }
+    if (seeded)
+        TM_LOG_INFO("NodeInfo cache reconciled: %u seeded from NodeDB, %u/%u total", static_cast<unsigned>(seeded),
+                    static_cast<unsigned>(countNodeInfoEntriesLocked()), static_cast<unsigned>(nodeInfoTargetEntries()));
 #endif
 }
 
@@ -1168,9 +1225,30 @@ int32_t TrafficManagementModule::runOnce()
             }
             if (e.hasResponded && static_cast<uint8_t>(nowResp - e.respTick) > kNodeInfoThrottleTicks)
                 e.hasResponded = false;
+            // Refresh membership: the bit is the keep-alive that makes a node still present in
+            // NodeDB (hot or warm) the stickiest under LRU eviction, and its clearing is what
+            // lets a node NodeDB has fully forgotten become evictable again. Read-only NodeDB
+            // lookups under cacheLock follow the resolveSenderRole precedent.
+            bool member = nodeDB && nodeDB->getMeshNode(e.node) != nullptr;
+#if WARM_NODE_COUNT > 0
+            if (!member && nodeDB)
+                member = nodeDB->warmStore.contains(e.node);
+#endif
+            e.isMember = member;
         }
         TM_LOG_DEBUG("NodeInfo PSRAM cache: %u/%u (%u went stale)", static_cast<unsigned>(countNodeInfoEntriesLocked()),
                      static_cast<unsigned>(nodeInfoTargetEntries()), static_cast<unsigned>(nodeInfoSaturated));
+
+        // Anti-entropy: seed identities NodeDB knows but this cache lacks - a full pass at
+        // boot (once nodeDB is ready), then hourly. The write-through hooks provide
+        // immediacy between passes.
+        if (!nodeInfoSeeded || ++sweepsSinceNodeInfoReconcile >= kNodeInfoReconcileSweeps) {
+            if (nodeDB) {
+                reconcileNodeInfoFromNodeDBLocked();
+                nodeInfoSeeded = true;
+                sweepsSinceNodeInfoReconcile = 0;
+            }
+        }
     }
 #endif
 

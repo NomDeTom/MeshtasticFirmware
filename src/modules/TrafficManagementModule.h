@@ -384,6 +384,14 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     // One-shot guard: warm-start next-hop cache from NodeDB on first maintenance pass.
     bool nextHopPreloaded = false;
 
+    // Anti-entropy cadence for reconcileNodeInfoFromNodeDB(): a full boot seed on the first
+    // maintenance pass (once nodeDB is ready), then one reconciliation per hour of sweeps.
+    // The write-through hooks give immediacy; this periodic repair self-heals anything they
+    // miss (boot ordering, a write path without a hook, future NodeDB changes).
+    static constexpr uint8_t kNodeInfoReconcileSweeps = 60; // sweeps between reconciliations (60 × 60 s = 1 h)
+    bool nodeInfoSeeded = false;
+    uint8_t sweepsSinceNodeInfoReconcile = 0;
+
     // =========================================================================
     // Cache Operations
     // =========================================================================
@@ -411,9 +419,19 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
 
     // NodeInfo cache operations (flat PSRAM payload array, linear scan)
     const NodeInfoPayloadEntry *findNodeInfoEntry(NodeNum node) const;
+    NodeInfoPayloadEntry *findNodeInfoEntryMutable(NodeNum node)
+    {
+        return const_cast<NodeInfoPayloadEntry *>(findNodeInfoEntry(node));
+    }
     NodeInfoPayloadEntry *findOrCreateNodeInfoEntry(NodeNum node, bool *usedEmptySlot);
     uint16_t countNodeInfoEntriesLocked() const;
     void cacheNodeInfoPacket(const meshtastic_MeshPacket &mp);
+
+    // Anti-entropy seeding: walk the NodeDB hot store and upsert identities (User payload,
+    // public key, signer provenance) this cache lacks, marking them members. Never sets
+    // hasObserved - a seeded entry is knowledge, not an observation, and stays unservable by
+    // the replay gate until the node is genuinely heard. Caller must hold cacheLock.
+    void reconcileNodeInfoFromNodeDBLocked();
 
     // =========================================================================
     // Traffic Management Logic
