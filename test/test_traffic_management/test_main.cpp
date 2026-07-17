@@ -819,8 +819,10 @@ static void test_tm_nodeinfo_directResponse_psramStaleEntryNotServed(void)
     // Signer-proven so staleness is the sole reason it is not served (isolates the gate under test).
     module.markKeySignerProvenForTest(kTargetNode);
 
-    // Advance the virtual clock just past the 6 h serve window.
-    TrafficManagementModule::s_testNowMs += (6UL * 60UL * 60UL * 1000UL) + 1000UL;
+    // Advance the virtual clock past the 6 h serve window plus one obs tick: the gate
+    // compares 3-min tick ages (granularity ±1 tick), so exactly 6 h + 1 s can still read
+    // as 120 ticks and serve. One extra tick guarantees age > kNodeInfoMaxServeAgeTicks.
+    TrafficManagementModule::s_testNowMs += (6UL * 60UL * 60UL * 1000UL) + 180'000UL + 1000UL;
 
     meshtastic_MeshPacket request = makeDecodedPacket(meshtastic_PortNum_NODEINFO_APP, kRemoteNode, kTargetNode);
     request.decoded.want_response = true;
