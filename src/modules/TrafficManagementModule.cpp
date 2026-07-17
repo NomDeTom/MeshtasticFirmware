@@ -945,6 +945,41 @@ void TrafficManagementModule::flushCache()
 #endif
 }
 
+void TrafficManagementModule::purgeNode(NodeNum node)
+{
+#if TRAFFIC_MANAGEMENT_CACHE_SIZE > 0
+    if (node == 0)
+        return;
+
+    concurrency::LockGuard guard(&cacheLock);
+    UnifiedCacheEntry *entry = findEntry(node);
+    if (entry)
+        memset(entry, 0, sizeof(UnifiedCacheEntry));
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+    NodeInfoPayloadEntry *info = findNodeInfoEntryMutable(node);
+    if (info)
+        memset(info, 0, sizeof(NodeInfoPayloadEntry));
+#endif
+    TM_LOG_INFO("Purged node 0x%08x from traffic caches", node);
+#else
+    (void)node;
+#endif
+}
+
+void TrafficManagementModule::purgeAll()
+{
+#if TRAFFIC_MANAGEMENT_CACHE_SIZE > 0
+    concurrency::LockGuard guard(&cacheLock);
+    if (cache)
+        memset(cache, 0, static_cast<size_t>(cacheSize()) * sizeof(UnifiedCacheEntry));
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+    if (nodeInfoPayload)
+        memset(nodeInfoPayload, 0, static_cast<size_t>(nodeInfoTargetEntries()) * sizeof(NodeInfoPayloadEntry));
+#endif
+    TM_LOG_INFO("Purged all traffic caches");
+#endif
+}
+
 // =============================================================================
 // Position Hash (Compact Mode)
 // =============================================================================

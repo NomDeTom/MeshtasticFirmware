@@ -112,6 +112,15 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     // completed manual key verification), not for a TOFU-grade learn.
     void onNodeKeyCommitted(NodeNum node, const uint8_t key32[32], bool proven);
 
+    // User-initiated removal is total: NodeDB's removal paths call these so no TMM tier can
+    // resurrect an identity the user deliberately deleted. purgeNode zeroes the node's
+    // NodeInfo cache slot (identity, key, provenance) AND its unified-cache slot (cached
+    // role, next-hop hint, dedup state); purgeAll clears both tables outright (resetNodes /
+    // factory reset). Passive eviction is unaffected - a node that merely ages out of NodeDB
+    // keeps its cache entries and can be re-recognized on next contact. Thread-safe.
+    void purgeNode(NodeNum node);
+    void purgeAll();
+
     /**
      * Check if this packet should have its hops exhausted.
      * Called from perhapsRebroadcast() to force hop_limit = 0 regardless of

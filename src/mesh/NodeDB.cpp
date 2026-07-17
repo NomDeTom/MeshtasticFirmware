@@ -770,6 +770,12 @@ bool NodeDB::factoryReset(bool eraseBleBonds)
     warmStore.clear();
     warmStore.saveIfDirty();
 #endif
+#if HAS_TRAFFIC_MANAGEMENT
+    // Factory reset forgets everything; TMM's RAM caches must not survive to resurrect
+    // identities (the device usually reboots after this, but don't rely on it).
+    if (trafficManagementModule)
+        trafficManagementModule->purgeAll();
+#endif
 
     // second, install default state (this will deal with the duplicate mac address issue)
     installDefaultNodeDatabase();
@@ -1592,6 +1598,11 @@ void NodeDB::resetNodes(bool keepFavorites)
 #if WARM_NODE_COUNT > 0
     warmStore.clear(); // warm entries are never favorites; a DB reset clears them too
 #endif
+#if HAS_TRAFFIC_MANAGEMENT
+    // A user-initiated DB reset forgets everything; TMM's caches must not resurrect it.
+    if (trafficManagementModule)
+        trafficManagementModule->purgeAll();
+#endif
 
     devicestate.has_rx_waypoint = false;
     saveNodeDatabaseToDisk();
@@ -1623,6 +1634,12 @@ void NodeDB::removeNodeByNum(NodeNum nodeNum)
 #if WARM_NODE_COUNT > 0
     // Explicit user removal: don't let the warm tier resurrect the node
     warmStore.remove(nodeNum);
+#endif
+#if HAS_TRAFFIC_MANAGEMENT
+    // Same rule for TMM's caches: purge the NodeInfo identity slot and the unified-cache
+    // slot (role, next-hop, dedup state) so no tier can resurrect a deliberate delete.
+    if (trafficManagementModule)
+        trafficManagementModule->purgeNode(nodeNum);
 #endif
 
     LOG_DEBUG("NodeDB::removeNodeByNum purged %d entries. Save changes", removed);
