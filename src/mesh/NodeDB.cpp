@@ -3370,6 +3370,19 @@ bool NodeDB::updateUser(uint32_t nodeId, meshtastic_User &p, uint8_t channelInde
     LOG_DEBUG("Update changed=%d user %s/%s, id=0x%08x, channel=%d", changed, info->long_name, info->short_name, nodeId,
               info->channel);
 
+#if HAS_TRAFFIC_MANAGEMENT
+    // Write-through: every accepted remote-identity commit (this function is the chokepoint
+    // for them - NodeInfoModule, MeshService, and TMM's requester learning all land here)
+    // also refreshes TMM's NodeInfo cache, so its membership/identity state doesn't have to
+    // wait for the hourly reconciliation sweep. Runs on acceptance, not on `changed`: an
+    // identical update still proves the identity is current. Never signals an observation -
+    // TMM's replay serve-gate stays keyed to frames it heard itself.
+    if (nodeId != getNodeNum() && trafficManagementModule) {
+        const bool signerKnown = p.public_key.size == 32 && isVerifiedSignerForKey(nodeId, p.public_key.bytes);
+        trafficManagementModule->onNodeIdentityCommitted(nodeId, p, signerKnown);
+    }
+#endif
+
     if (changed) {
         updateGUIforNode = info;
         notifyObservers(true); // Force an update whether or not our node counts have changed

@@ -94,6 +94,24 @@ class TrafficManagementModule : public MeshModule, private concurrency::OSThread
     // `signerProven` is non-null, reports the cached key's provenance. Thread-safe (takes cacheLock).
     bool copyUser(NodeNum node, meshtastic_User &out, bool *signerProven = nullptr) const;
 
+    // Write-through hooks: NodeDB (and the key-commit sites that bypass NodeDB::updateUser)
+    // push accepted identity commits into the NodeInfo cache, complementing the periodic
+    // reconciliation sweep. Both upsert under cacheLock with no callback into NodeDB (signer
+    // state is passed in), so they are safe to call from any context that doesn't hold
+    // cacheLock. NodeDB is the authority on key content: a differing key is adopted and its
+    // provenance reset unless the caller vouches for the new key. Neither hook ever touches
+    // hasObserved/obsTick - a hook write is knowledge, not an observation, so the replay
+    // serve-gate stays keyed to genuinely heard frames. No-ops without the PSRAM cache.
+
+    // Full identity commit (NodeDB::updateUser). `signerKnown` = NodeDB verified this exact
+    // key against an XEdDSA signature (isVerifiedSignerForKey semantics).
+    void onNodeIdentityCommitted(NodeNum node, const meshtastic_User &user, bool signerKnown);
+
+    // Key-only commit (key-verification success, admin-key learn). `proven` marks the key
+    // signer-proven: pass true only when the commit itself established possession (e.g. a
+    // completed manual key verification), not for a TOFU-grade learn.
+    void onNodeKeyCommitted(NodeNum node, const uint8_t key32[32], bool proven);
+
     /**
      * Check if this packet should have its hops exhausted.
      * Called from perhapsRebroadcast() to force hop_limit = 0 regardless of

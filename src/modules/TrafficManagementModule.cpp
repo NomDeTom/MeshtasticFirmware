@@ -577,7 +577,9 @@ bool TrafficManagementModule::copyUser(NodeNum node, meshtastic_User &out, bool 
 
     concurrency::LockGuard guard(&cacheLock);
     const NodeInfoPayloadEntry *entry = findNodeInfoEntry(node);
-    if (!entry)
+    // Key-only entries (onNodeKeyCommitted upserts) have no name to offer; identity
+    // rehydration wants a real User payload, which hasFullUser guarantees.
+    if (!entry || !entry->hasFullUser)
         return false;
 
     out = entry->user;
@@ -769,6 +771,77 @@ void TrafficManagementModule::reconcileNodeInfoFromNodeDBLocked()
     if (seeded)
         TM_LOG_INFO("NodeInfo cache reconciled: %u seeded from NodeDB, %u/%u total", static_cast<unsigned>(seeded),
                     static_cast<unsigned>(countNodeInfoEntriesLocked()), static_cast<unsigned>(nodeInfoTargetEntries()));
+#endif
+}
+
+void TrafficManagementModule::onNodeIdentityCommitted(NodeNum node, const meshtastic_User &user, bool signerKnown)
+{
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+    if (node == 0)
+        return;
+
+    concurrency::LockGuard guard(&cacheLock);
+    if (!nodeInfoPayload)
+        return;
+    bool usedEmptySlot = false;
+    NodeInfoPayloadEntry *entry = findOrCreateNodeInfoEntry(node, &usedEmptySlot);
+    if (!entry)
+        return;
+
+    // NodeDB is senior on key content, but only for key content it actually has: an accepted
+    // keyless update must not wipe a key this cache learned on the air (NodeDB itself keeps
+    // its pinned key on a keyless update for the same reason).
+    meshtastic_User merged = user;
+    if (merged.public_key.size != 32 && entry->user.public_key.size == 32)
+        merged.public_key = entry->user.public_key;
+
+    const bool keyChanged = entry->user.public_key.size == 32 && user.public_key.size == 32 &&
+                            memcmp(entry->user.public_key.bytes, user.public_key.bytes, 32) != 0;
+    entry->user = merged;
+    entry->hasFullUser = true;
+    entry->isMember = true;
+    if (user.public_key.size == 32) {
+        // A rotated key never inherits the old key's verdict; the caller's key-matched
+        // signer knowledge (isVerifiedSignerForKey semantics) re-proves it if warranted.
+        if (keyChanged)
+            entry->keySignerProven = false;
+        if (signerKnown)
+            entry->keySignerProven = true;
+    }
+#else
+    (void)node;
+    (void)user;
+    (void)signerKnown;
+#endif
+}
+
+void TrafficManagementModule::onNodeKeyCommitted(NodeNum node, const uint8_t key32[32], bool proven)
+{
+#if defined(ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
+    if (node == 0 || !key32)
+        return;
+
+    concurrency::LockGuard guard(&cacheLock);
+    if (!nodeInfoPayload)
+        return;
+    bool usedEmptySlot = false;
+    NodeInfoPayloadEntry *entry = findOrCreateNodeInfoEntry(node, &usedEmptySlot);
+    if (!entry)
+        return;
+
+    const bool keyChanged =
+        entry->user.public_key.size == 32 && memcmp(entry->user.public_key.bytes, key32, 32) != 0;
+    memcpy(entry->user.public_key.bytes, key32, 32);
+    entry->user.public_key.size = 32;
+    entry->isMember = true;
+    if (keyChanged)
+        entry->keySignerProven = false;
+    if (proven)
+        entry->keySignerProven = true;
+#else
+    (void)node;
+    (void)key32;
+    (void)proven;
 #endif
 }
 
@@ -993,6 +1066,9 @@ ProcessMessage TrafficManagementModule::handleReceived(const meshtastic_MeshPack
             meshtastic_User requester = meshtastic_User_init_zero;
             if (!unauthenticatedSigner &&
                 pb_decode_from_bytes(mp.decoded.payload.bytes, mp.decoded.payload.size, &meshtastic_User_msg, &requester)) {
+                // Re-enters this module: updateUser's write-through hook calls back into
+                // onNodeIdentityCommitted, which takes cacheLock - safe here because this
+                // call site never holds cacheLock.
                 nodeDB->updateUser(getFrom(&mp), requester, mp.channel);
             }
             logAction("respond", &mp, "nodeinfo-cache");
