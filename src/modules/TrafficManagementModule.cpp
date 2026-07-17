@@ -639,6 +639,20 @@ void TrafficManagementModule::cacheNodeInfoPacket(const meshtastic_MeshPacket &m
         TM_LOG_WARN("NodeInfo cache: public key mismatch vs NodeDB, dropping 0x%08x", from);
         return;
     }
+#if WARM_NODE_COUNT > 0
+    // A node that aged out of the hot store may still have its key pinned in the warm tier
+    // (NodeDB::updateUser gets this via getOrCreateMeshNode's warm rehydration). Without this
+    // check, an attacker could seed a bogus key for a warm-only node whose TMM slot was
+    // evicted, locking the genuine node out of this cache via the TOFU pin below.
+    if ((!dbNode || dbNode->public_key.size != 32) && nodeDB) {
+        uint8_t warmKey[32];
+        if (nodeDB->warmStore.copyKey(from, warmKey) &&
+            !pubKeysEqual(user.public_key.bytes, user.public_key.size, warmKey, sizeof(warmKey))) {
+            TM_LOG_WARN("NodeInfo cache: public key mismatch vs warm tier, dropping 0x%08x", from);
+            return;
+        }
+    }
+#endif
     // Re-found in NodeDB as a known signer: inherit that verdict so the cached key is proven
     // even when this particular frame was unsigned. isVerifiedSignerForKey consults both the
     // hot store's signed bitfield and the warm tier's cached signer bit, and requires the key
