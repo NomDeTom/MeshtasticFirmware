@@ -11,6 +11,12 @@
 #include <soc/adc_channel.h>
 #endif
 
+#if defined(ARCH_ESP32) && defined(BATTERY_PIN)
+// Read approximate millivolts from an ADC pin via the shared battery ADC oneshot handle, so
+// analog sensors don't create a second (failing) ADC unit owner. Returns -1 on failure.
+int32_t espSharedAdcReadMilliVolts(uint8_t gpio);
+#endif
+
 #ifndef NUM_OCV_POINTS
 #define NUM_OCV_POINTS 11
 #endif

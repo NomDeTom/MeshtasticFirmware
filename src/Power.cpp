@@ -166,6 +166,52 @@ static bool initAdcCalibration()
     return false;
 }
 
+// Read an approximate millivolt value from an arbitrary ADC pin on the battery ADC unit,
+// reusing the battery reader's shared oneshot handle. Analog telemetry sensors (e.g. the
+// GP2Y10 dust sensor) must go through here rather than the Arduino analog API: the Arduino
+// HAL would try to claim the ADC unit a second time, and adc_oneshot_new_unit() then fails
+// with ESP_ERR_NOT_FOUND ("peripheral already in use"), so analogRead()/analogReadMilliVolts()
+// would silently return 0. Configures the pin at 12dB for full-range input. Returns -1 on
+// failure. The value is uncalibrated (tune it out via the sensor's calibration defines).
+int32_t espSharedAdcReadMilliVolts(uint8_t gpio)
+{
+    adc_channel_t channel;
+    adc_unit_t chan_unit;
+    if (adc_oneshot_io_to_channel(gpio, &chan_unit, &channel) != ESP_OK) {
+        LOG_WARN("Shared ADC: GPIO %u is not an ADC pin", gpio);
+        return -1;
+    }
+    if (chan_unit != unit) {
+        LOG_WARN("Shared ADC: GPIO %u is not on the battery ADC unit", gpio);
+        return -1;
+    }
+    // Lazily create the unit if the battery reader hasn't yet; whoever runs first owns it and
+    // the other reuses it (analogInit() guards on the same handle).
+    if (!adc_handle) {
+        adc_oneshot_unit_init_cfg_t init_config = {
+            .unit_id = unit,
+        };
+        if (adc_oneshot_new_unit(&init_config, &adc_handle) != ESP_OK) {
+            LOG_ERROR("Shared ADC: oneshot init failed");
+            return -1;
+        }
+    }
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .atten = ADC_ATTEN_DB_12, // full ~0-3.1V range for the sensor output (per-channel; leaves battery channel untouched)
+        .bitwidth = adc_width,
+    };
+    if (adc_oneshot_config_channel(adc_handle, channel, &chan_cfg) != ESP_OK) {
+        LOG_WARN("Shared ADC: channel config failed for GPIO %u", gpio);
+        return -1;
+    }
+    int raw = 0;
+    if (adc_oneshot_read(adc_handle, channel, &raw) != ESP_OK)
+        return -1;
+    const int bits = adcBitWidthToBits(adc_width);
+    const float max_code = powf(2.0f, bits) - 1.0f;
+    return (int32_t)((raw / max_code) * 3100.0f); // 12dB nominal full-scale
+}
+
 #endif // BATTERY_PIN && ARCH_ESP32
 
 #ifdef EXT_PWR_DETECT

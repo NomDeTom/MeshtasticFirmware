@@ -5,6 +5,9 @@
 #include "../mesh/generated/meshtastic/telemetry.pb.h"
 #include "GP2Y10Sensor.h"
 #include "TelemetrySensor.h"
+#if defined(ARCH_ESP32) && defined(BATTERY_PIN)
+#include "Power.h" // espSharedAdcReadMilliVolts(): shares the battery ADC unit (see below)
+#endif
 
 // Datasheet timing for the GP2Y1014AU read cycle (~10ms total per sample)
 #ifndef GP2Y10_SAMPLES
@@ -29,10 +32,8 @@ bool GP2Y10Sensor::initDevice(TwoWire *bus, ScanI2C::FoundDevice *dev)
     LOG_INFO("Init sensor: %s", sensorName);
     pinMode(GP2Y10_LED_PIN, OUTPUT);
     digitalWrite(GP2Y10_LED_PIN, HIGH); // LED off at rest (LED drive is active-low)
-    // Prime the ADC channel first: analogSetPinAttenuation() errors ("Pin is not configured
-    // as analog channel") if the pin has never been read, since the channel is configured lazily.
-    analogRead(GP2Y10_OUT_PIN);
-    analogSetPinAttenuation(GP2Y10_OUT_PIN, ADC_11db); // cover the sensor's full ~0-3.3V swing
+    // The OUT pin is configured lazily on first read (via the shared ADC helper on ESP32),
+    // so no analog pinMode/attenuation setup is needed here.
     return true;
 }
 
@@ -43,10 +44,21 @@ float GP2Y10Sensor::readDustDensityMgM3()
     for (uint32_t i = 0; i < GP2Y10_SAMPLES; i++) {
         digitalWrite(GP2Y10_LED_PIN, LOW); // LED on
         delayMicroseconds(GP2Y10_SAMPLING_US);
-        mv_accum += analogReadMilliVolts(GP2Y10_OUT_PIN); // ESP32 calibrated millivolts
+#if defined(ARCH_ESP32) && defined(BATTERY_PIN)
+        // Must share the battery ADC unit; a second Arduino ADC owner would fail and read 0.
+        int32_t mv = espSharedAdcReadMilliVolts(GP2Y10_OUT_PIN);
+        if (mv < 0)
+            mv = 0;
+#elif defined(ARCH_ESP32)
+        uint32_t mv = analogReadMilliVolts(GP2Y10_OUT_PIN);
+#else
+        uint32_t raw = analogRead(GP2Y10_OUT_PIN);
+        uint32_t mv = ((1000UL * AREF_VOLTAGE) / (uint32_t)pow(2, BATTERY_SENSE_RESOLUTION_BITS)) * raw;
+#endif
         delayMicroseconds(GP2Y10_POST_SAMPLE_US);
         digitalWrite(GP2Y10_LED_PIN, HIGH); // LED off
         delayMicroseconds(GP2Y10_LED_OFF_US);
+        mv_accum += (float)mv;
     }
 
     float calcVoltage = (mv_accum / GP2Y10_SAMPLES) / 1000.0f; // volts
