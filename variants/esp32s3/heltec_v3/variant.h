@@ -20,6 +20,11 @@
 #define ADC_ATTENUATION ADC_ATTEN_DB_2_5 // lower dB for high resistance voltage divider
 #define ADC_MULTIPLIER 4.9 * 1.045
 
+// Keyestudio KS0196 / Sharp GP2Y1014AU analog dust sensor (reports PM2.5)
+#define GP2Y10_SENSOR_EN
+#define GP2Y10_OUT_PIN 2 // ADC1_CH1, analog dust output
+#define GP2Y10_LED_PIN 4 // digital IR-LED drive
+
 #define USE_SX1262
 
 #define LORA_DIO0 -1 // a No connect on the SX1262 module

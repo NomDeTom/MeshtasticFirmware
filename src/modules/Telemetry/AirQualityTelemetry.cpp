@@ -25,6 +25,9 @@ static constexpr uint16_t TX_HISTORY_KEY_AIR_QUALITY_TELEMETRY = 0x8004;
 
 // Sensors
 #include "Sensor/AddI2CSensorTemplate.h"
+#ifdef GP2Y10_SENSOR_EN
+#include "Sensor/GP2Y10Sensor.h"
+#endif
 #include "Sensor/PMSA003ISensor.h"
 #include "Sensor/SEN5XSensor.h"
 #if __has_include(<SensirionI2cScd4x.h>)
@@ -103,6 +106,10 @@ void AirQualityTelemetryModule::i2cScanFinished(ScanI2C *i2cScanner)
     }
 
     // order by priority of metrics/values (low top, high bottom)
+    // Analog GP2Y10 registered first so a real I2C PM sensor, if co-installed, overrides its reading
+#ifdef GP2Y10_SENSOR_EN
+    addSensor<GP2Y10Sensor>(i2cScanner, ScanI2C::DeviceType::NONE);
+#endif
     addSensor<PMSA003ISensor>(i2cScanner, ScanI2C::DeviceType::PMSA003I);
     addSensor<SEN5XSensor>(i2cScanner, ScanI2C::DeviceType::SEN5X);
 #if __has_include(<SensirionI2cScd4x.h>)
