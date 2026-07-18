@@ -28,7 +28,10 @@ bool GP2Y10Sensor::initDevice(TwoWire *bus, ScanI2C::FoundDevice *dev)
 {
     LOG_INFO("Init sensor: %s", sensorName);
     pinMode(GP2Y10_LED_PIN, OUTPUT);
-    digitalWrite(GP2Y10_LED_PIN, HIGH);                // LED off at rest (LED drive is active-low)
+    digitalWrite(GP2Y10_LED_PIN, HIGH); // LED off at rest (LED drive is active-low)
+    // Prime the ADC channel first: analogSetPinAttenuation() errors ("Pin is not configured
+    // as analog channel") if the pin has never been read, since the channel is configured lazily.
+    analogRead(GP2Y10_OUT_PIN);
     analogSetPinAttenuation(GP2Y10_OUT_PIN, ADC_11db); // cover the sensor's full ~0-3.3V swing
     return true;
 }
