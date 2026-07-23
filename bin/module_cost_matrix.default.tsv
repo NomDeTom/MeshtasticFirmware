@@ -1,0 +1,28 @@
+# label	extra build flags (appended via PLATFORMIO_BUILD_FLAGS; '-' = no change / baseline repeat)
+# One optional module excluded at a time, isolating each module's own flash/RAM cost
+# on top of the env's normal default build (see src/modules/Modules.cpp for the exact
+# guard each MESHTASTIC_EXCLUDE_* flag controls).
+no_cannedmessages	-DMESHTASTIC_EXCLUDE_CANNEDMESSAGES=1
+no_externalnotification	-DMESHTASTIC_EXCLUDE_EXTERNALNOTIFICATION=1
+no_serial	-DMESHTASTIC_EXCLUDE_SERIAL=1
+no_neighborinfo	-DMESHTASTIC_EXCLUDE_NEIGHBORINFO=1
+no_traceroute	-DMESHTASTIC_EXCLUDE_TRACEROUTE=1
+no_waypoint	-DMESHTASTIC_EXCLUDE_WAYPOINT=1
+no_atak	-DMESHTASTIC_EXCLUDE_ATAK=1
+no_environmental_sensor	-DMESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR=1
+no_air_quality_sensor	-DMESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR=1
+no_power_telemetry	-DMESHTASTIC_EXCLUDE_POWER_TELEMETRY=1
+no_detectionsensor	-DMESHTASTIC_EXCLUDE_DETECTIONSENSOR=1
+# DeviceTelemetryModule has no dedicated exclude flag of its own (see Modules.cpp:220-221) -
+# this is the combined cost of ALL telemetry (Device+Environment+AirQuality+Power), the only
+# way to isolate it without a code change.
+# NOTE: don't pair this with a -U of the same macro "to be safe" - PlatformIO/SCons buckets
+# all -D flags before all -U flags in the final compile command regardless of the order you
+# write them here, so a "-U... -D...=0" combo silently compiles as "define then undefine",
+# leaving the header's own #ifndef default (1) in effect. A bare -D with no matching -U is
+# unambiguous and doesn't hit this. (Verified via `pio run -v`.)
+no_telemetry_all	-DHAS_TELEMETRY=0
+# Additive experiment (not an exclude): candidate linker flags from the flash-reduction plan,
+# already used on STM32 (-ffunction-sections/-fdata-sections only, no matching
+# -Wl,--gc-sections partner there) - measuring the full three-flag combination here.
+gc_sections_experiment	-ffunction-sections -fdata-sections -Wl,--gc-sections
