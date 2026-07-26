@@ -2077,6 +2077,93 @@ static void test_reloadConfig_radioAffectedFalse_isEquivalentToSaveToDisk()
     TEST_ASSERT_EQUAL_UINT32(4321, config.position.position_broadcast_secs);
 }
 
+// -----------------------------------------------------------------------
+// applyConfigChange() flag semantics
+//
+// The single entry point menus use. The flags must map onto exactly the two side effects and
+// nothing else: CONFIG_APPLY_RADIO -> configChanged fires, CONFIG_APPLY_REBOOT -> rebootAtMsec
+// is set. The compose case matters most: it is what the old two-adjacent-bools signatures made
+// easy to get wrong (InkHUD's applyConfigReload took `reboot` where every other helper took
+// `radioAffected`, so passing `true` meant the opposite of what it read like).
+// -----------------------------------------------------------------------
+
+static void test_applyConfigChange_none_persists_andDoesNotReload()
+{
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+    rebootAtMsec = 0;
+    const int before = mockMeshService->reloadCalls;
+
+    service->applyConfigChange(SEGMENT_CONFIG, CONFIG_APPLY_NONE);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);                         // no radio reconfigure
+    TEST_ASSERT_EQUAL_INT(before + 1, mockMeshService->reloadCalls); // did persist, once
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);                       // no reboot
+}
+
+static void test_applyConfigChange_radioFlag_triggersReload()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+    rebootAtMsec = 0;
+
+    service->applyConfigChange(SEGMENT_CONFIG, CONFIG_APPLY_RADIO);
+
+    TEST_ASSERT_EQUAL_INT(1, counter.count);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec); // radio flag alone must not reboot
+}
+
+static void test_applyConfigChange_rebootFlag_setsRebootAtMsec()
+{
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+    rebootAtMsec = 0;
+
+    service->applyConfigChange(SEGMENT_CONFIG, CONFIG_APPLY_REBOOT);
+
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+    TEST_ASSERT_EQUAL_INT(0, counter.count); // reboot flag alone must not touch the radio
+}
+
+static void test_applyConfigChange_noRebootFlag_leavesRebootAtMsecClear()
+{
+    rebootAtMsec = 0;
+
+    service->applyConfigChange(SEGMENT_MODULECONFIG, CONFIG_APPLY_NONE);
+
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_applyConfigChange_radioAndRebootCompose()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+    rebootAtMsec = 0;
+
+    service->applyConfigChange(SEGMENT_CONFIG, CONFIG_APPLY_RADIO | CONFIG_APPLY_REBOOT);
+
+    TEST_ASSERT_EQUAL_INT(1, counter.count);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+// The explicit shorter delay exists for one caller (InkHUD's wifi-recovery path). Assert the
+// trailing parameter actually shortens the schedule rather than being silently ignored.
+static void test_applyConfigChange_customRebootSeconds_isHonoured()
+{
+    rebootAtMsec = 0;
+    service->applyConfigChange(SEGMENT_CONFIG, CONFIG_APPLY_REBOOT, 2);
+    const uint32_t shortDelay = rebootAtMsec;
+
+    rebootAtMsec = 0;
+    service->applyConfigChange(SEGMENT_CONFIG, CONFIG_APPLY_REBOOT);
+    const uint32_t defaultDelay = rebootAtMsec;
+
+    TEST_ASSERT_NOT_EQUAL(0, shortDelay);
+    TEST_ASSERT_TRUE(shortDelay < defaultDelay);
+}
+
 // A module-config-only save must never touch the radio. The frame-toggle menu persists
 // moduleConfig.telemetry.*_screen_enabled this way; passing the mask without the explicit
 // radioAffected=false would inherit the default of true and needlessly re-init the LoRa chip
@@ -2385,6 +2472,12 @@ void setup()
     RUN_TEST(test_reloadConfig_defaultRadioAffected_stillReloads);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_skipsReload);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_isEquivalentToSaveToDisk);
+    RUN_TEST(test_applyConfigChange_none_persists_andDoesNotReload);
+    RUN_TEST(test_applyConfigChange_radioFlag_triggersReload);
+    RUN_TEST(test_applyConfigChange_rebootFlag_setsRebootAtMsec);
+    RUN_TEST(test_applyConfigChange_noRebootFlag_leavesRebootAtMsecClear);
+    RUN_TEST(test_applyConfigChange_radioAndRebootCompose);
+    RUN_TEST(test_applyConfigChange_customRebootSeconds_isHonoured);
     RUN_TEST(test_reloadConfig_moduleConfigSegment_skipsReload);
     RUN_TEST(test_moduleConfigTelemetryScreenFlags_liveInModuleConfig);
     RUN_TEST(test_setConfigPosition_noopSet_doesNotReboot);
