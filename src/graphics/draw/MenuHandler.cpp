@@ -771,7 +771,7 @@ void menuHandler::messageResponseMenu()
             auto &chan = channels.getByIndex(chIndex);
             if (chan.settings.has_module_settings) {
                 chan.settings.module_settings.is_muted = !chan.settings.module_settings.is_muted;
-                nodeDB->saveToDisk();
+                nodeDB->saveToDisk(SEGMENT_CHANNELS); // channel setting: don't rewrite every other proto
             }
 
         } else if (selected == DeleteMenu) {
@@ -1609,7 +1609,7 @@ void menuHandler::manageNodeMenu()
             nodeInfoLiteSetBit(n, NODEINFO_BITFIELD_IS_MUTED_MASK, !wasMuted);
             LOG_INFO(wasMuted ? "Unmuted node %08X" : "Muted node %08X", menuHandler::pickedNodeNum);
             nodeDB->notifyObservers(true);
-            nodeDB->saveToDisk();
+            nodeDB->saveToDisk(SEGMENT_NODEDATABASE); // NodeInfoLite bit: only the node DB changed
             screen->setFrames(graphics::Screen::FOCUS_PRESERVE);
             return;
         }
@@ -1651,7 +1651,7 @@ void menuHandler::manageNodeMenu()
             // refusal changed nothing and shouldn't trigger a prefs save.
             if (changed) {
                 nodeDB->notifyObservers(true);
-                nodeDB->saveToDisk();
+                nodeDB->saveToDisk(SEGMENT_NODEDATABASE); // NodeInfoLite bit: only the node DB changed
             }
             screen->setFrames(graphics::Screen::FOCUS_PRESERVE);
             return;
@@ -1688,7 +1688,6 @@ void menuHandler::nodeNameLengthMenu()
                                                        }
 
                                                        config.display.use_long_node_name = option.value;
-                                                       saveUIConfig();
                                                        service->reloadConfig(SEGMENT_CONFIG,
                                                                              /*radioAffected=*/false); // display, not LoRa
                                                        LOG_INFO("Setting names to %s", option.value ? "long" : "short");
@@ -1867,9 +1866,10 @@ void menuHandler::GPSFormatMenu()
             return;
         }
 
+        // uiconfig field: saveUIConfig() writes /prefs/uiconfig.proto, which is the only file
+        // this touches. No config.proto write, so no reloadConfig().
         uiconfig.gps_format = option.value;
         saveUIConfig();
-        service->reloadConfig(SEGMENT_CONFIG, /*radioAffected=*/false); // UI display format, not LoRa
     };
 
     BannerOverlayOptions bannerOptions;
@@ -1914,11 +1914,9 @@ void menuHandler::GPSSmartPositionMenu()
         } else if (selected == 1) {
             // Read live by PositionModule's smart-broadcast path every send - no reboot needed.
             config.position.position_broadcast_smart_enabled = true;
-            saveUIConfig();
             service->reloadConfig(SEGMENT_CONFIG, /*radioAffected=*/false); // position field, not LoRa
         } else if (selected == 2) {
             config.position.position_broadcast_smart_enabled = false;
-            saveUIConfig();
             service->reloadConfig(SEGMENT_CONFIG, /*radioAffected=*/false); // position field, not LoRa
         }
     };
@@ -1972,7 +1970,6 @@ void menuHandler::GPSUpdateIntervalMenu()
         }
 
         if (selected != 0) {
-            saveUIConfig();
             service->reloadConfig(SEGMENT_CONFIG, /*radioAffected=*/false); // GPS timing, not LoRa
             rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         }
@@ -2062,7 +2059,6 @@ void menuHandler::GPSPositionBroadcastMenu()
         }
 
         if (selected != 0) {
-            saveUIConfig();
             // Read live by PositionModule's broadcast scheduler every cycle - no reboot needed.
             service->reloadConfig(SEGMENT_CONFIG, /*radioAffected=*/false); // position field, not LoRa
         }
