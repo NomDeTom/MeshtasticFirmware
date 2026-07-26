@@ -30,6 +30,9 @@
 
 #include "meshtastic/config.pb.h"
 #include "support/AdminModuleTestShim.h"
+#if HAS_SCREEN
+#include "graphics/draw/MenuHandler.h" // extracted menu config actions (commit 4)
+#endif
 
 // hash() is a file-scope function in RadioInterface.cpp; link it in for slot-formula tests
 extern uint32_t hash(const char *str);
@@ -2164,6 +2167,94 @@ static void test_applyConfigChange_customRebootSeconds_isHonoured()
     TEST_ASSERT_TRUE(shortDelay < defaultDelay);
 }
 
+#if HAS_SCREEN
+// -----------------------------------------------------------------------
+// Extracted menu config actions
+//
+// Before these were lifted out of their banner-callback lambdas, no menu save behaviour was
+// reachable from a test at all: the logic only ran via screen->showOverlayBanner(), so it needed
+// a live Screen. These assert the three things a menu action decides - which segment it persists,
+// whether it reconfigures the radio, and whether it reboots.
+// -----------------------------------------------------------------------
+
+// The bug fixed in commit 1: this used to change the flag and never persist it.
+static void test_toggleTelemetryScreen_persistsWithoutRadioReloadOrReboot()
+{
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+    rebootAtMsec = 0;
+    moduleConfig.telemetry.environment_screen_enabled = false;
+    const int before = mockMeshService->reloadCalls;
+
+    graphics::menuHandler::toggleTelemetryScreen(moduleConfig.telemetry.environment_screen_enabled);
+
+    TEST_ASSERT_TRUE(moduleConfig.telemetry.environment_screen_enabled); // flipped
+    TEST_ASSERT_EQUAL_INT(before + 1, mockMeshService->reloadCalls);     // and persisted
+    TEST_ASSERT_EQUAL_INT(0, counter.count);                             // a screen pref is not a radio change
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);                           // and needs no reboot
+}
+
+static void test_toggleTelemetryScreen_togglesBackOffAgain()
+{
+    moduleConfig.telemetry.power_screen_enabled = true;
+    graphics::menuHandler::toggleTelemetryScreen(moduleConfig.telemetry.power_screen_enabled);
+    TEST_ASSERT_FALSE(moduleConfig.telemetry.power_screen_enabled);
+}
+
+// Read live by PositionModule every send, so this must persist without rebooting - that reboot
+// is what PR #11181 removed, and this pins it down.
+static void test_setSmartPositionEnabled_persistsWithoutReboot()
+{
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+    rebootAtMsec = 0;
+    config.position.position_broadcast_smart_enabled = false;
+
+    graphics::menuHandler::setSmartPositionEnabled(true);
+
+    TEST_ASSERT_TRUE(config.position.position_broadcast_smart_enabled);
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+
+    graphics::menuHandler::setSmartPositionEnabled(false);
+    TEST_ASSERT_FALSE(config.position.position_broadcast_smart_enabled);
+}
+
+// Node metadata: must not go anywhere near the radio. This is the WisMesh Tag favorite-crash
+// family of bug - a node-DB edit triggering an SX126x reconfigure.
+static void test_toggleNodeMuted_flipsBitAndSkipsRadioReload()
+{
+    // nodeDB is a suite-wide global and earlier tests in this file mute the same node, so pin the
+    // starting state rather than assuming it.
+    meshtastic_NodeInfoLite *n = nodeDB->getOrCreateMeshNode(TEST_NODE_NUM);
+    nodeInfoLiteSetBit(n, NODEINFO_BITFIELD_IS_MUTED_MASK, false);
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+    rebootAtMsec = 0;
+
+    graphics::menuHandler::toggleNodeMuted(TEST_NODE_NUM);
+
+    TEST_ASSERT_TRUE(nodeInfoLiteIsMuted(nodeDB->getMeshNode(TEST_NODE_NUM)));
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+
+    graphics::menuHandler::toggleNodeMuted(TEST_NODE_NUM);
+    TEST_ASSERT_FALSE(nodeInfoLiteIsMuted(nodeDB->getMeshNode(TEST_NODE_NUM)));
+}
+
+// A stale pickedNodeNum must not cause a write. Cheap to get wrong when the guard lives in the
+// caller instead of the action.
+static void test_toggleNodeMuted_unknownNodeDoesNothing()
+{
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    graphics::menuHandler::toggleNodeMuted(0xDEADBEEF); // never added to the DB
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+#endif // HAS_SCREEN
+
 // A module-config-only save must never touch the radio. The frame-toggle menu persists
 // moduleConfig.telemetry.*_screen_enabled this way; passing the mask without the explicit
 // radioAffected=false would inherit the default of true and needlessly re-init the LoRa chip
@@ -2478,6 +2569,13 @@ void setup()
     RUN_TEST(test_applyConfigChange_noRebootFlag_leavesRebootAtMsecClear);
     RUN_TEST(test_applyConfigChange_radioAndRebootCompose);
     RUN_TEST(test_applyConfigChange_customRebootSeconds_isHonoured);
+#if HAS_SCREEN
+    RUN_TEST(test_toggleTelemetryScreen_persistsWithoutRadioReloadOrReboot);
+    RUN_TEST(test_toggleTelemetryScreen_togglesBackOffAgain);
+    RUN_TEST(test_setSmartPositionEnabled_persistsWithoutReboot);
+    RUN_TEST(test_toggleNodeMuted_flipsBitAndSkipsRadioReload);
+    RUN_TEST(test_toggleNodeMuted_unknownNodeDoesNothing);
+#endif
     RUN_TEST(test_reloadConfig_moduleConfigSegment_skipsReload);
     RUN_TEST(test_moduleConfigTelemetryScreenFlags_liveInModuleConfig);
     RUN_TEST(test_setConfigPosition_noopSet_doesNotReboot);
