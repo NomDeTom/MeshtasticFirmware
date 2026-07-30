@@ -3139,6 +3139,19 @@ static void test_abandonedTransaction_timerExpiresWithoutAdminTraffic()
     TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
 }
 
+static void test_editTransactionTimer_isDormantUntilTransactionBegins()
+{
+    TEST_ASSERT_EQUAL_UINT32(INT32_MAX, testAdmin->editTransactionTimerInterval());
+    TEST_ASSERT_EQUAL_INT32(INT32_MAX, testAdmin->runTransactionTimer());
+
+    sendBeginEdit();
+    TEST_ASSERT_EQUAL_UINT32(60 * 1000, testAdmin->editTransactionTimerInterval());
+
+    sendCommitEdit();
+    TEST_ASSERT_EQUAL_UINT32(INT32_MAX, testAdmin->editTransactionTimerInterval());
+    TEST_ASSERT_EQUAL_INT32(INT32_MAX, testAdmin->runTransactionTimer());
+}
+
 // Expiry must consume-and-clear the accumulated decisions, not just read them. A begin would reset
 // them anyway, so the leak only shows through the one path that consumes them without a begin: a
 // stray commit. Left uncleared, it inherits the abandoned LoRa transaction's answer and reloads.
@@ -3393,6 +3406,7 @@ void setup()
     RUN_TEST(test_abandonedTransaction_loraSet_stillReloadsRadioOnExpiry);
     RUN_TEST(test_abandonedTransaction_rebootingFieldRebootsOnExpiry);
     RUN_TEST(test_abandonedTransaction_timerExpiresWithoutAdminTraffic);
+    RUN_TEST(test_editTransactionTimer_isDormantUntilTransactionBegins);
     RUN_TEST(test_abandonedTransaction_flagsDoNotLeakIntoAStrayCommit);
 
     exit(UNITY_END());

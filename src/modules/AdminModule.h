@@ -53,6 +53,7 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>,
     void expireStaleEditTransaction();
 #ifdef PIO_UNIT_TESTING
     int lastSaveWhatForTest = 0;
+    unsigned long editTransactionTimerIntervalForTest() const { return interval; }
 #endif
 
     // While a transaction is open, saveChanges() defers the write - so the per-field reboot and
