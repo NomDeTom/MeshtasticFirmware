@@ -523,6 +523,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         }
         hasOpenEditTransaction = true;
         editTransactionActivityMs = millis();
+        setIntervalFromNow(EDIT_TRANSACTION_IDLE_MS);
         break;
     }
     case meshtastic_AdminMessage_commit_edit_settings_tag: {
@@ -534,6 +535,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         const bool commitReboot = deferredShouldReboot, commitRadio = deferredRadioAffected;
         deferredShouldReboot = false;
         deferredRadioAffected = false;
+        setIntervalFromNow(INT32_MAX);
         if (commitReboot)
             disableBluetooth();
         saveChanges(SEGMENT_CONFIG | SEGMENT_MODULECONFIG | SEGMENT_DEVICESTATE | SEGMENT_CHANNELS | SEGMENT_NODEDATABASE,
@@ -2000,6 +2002,7 @@ void AdminModule::expireStaleEditTransaction()
     const bool expiredReboot = deferredShouldReboot, expiredRadio = deferredRadioAffected;
     deferredShouldReboot = false;
     deferredRadioAffected = false;
+    setIntervalFromNow(INT32_MAX);
     if (expiredReboot)
         disableBluetooth();
     if (segments)
@@ -2011,7 +2014,7 @@ int32_t AdminModule::runOnce()
 {
     expireStaleEditTransaction();
     if (!hasOpenEditTransaction)
-        return EDIT_TRANSACTION_IDLE_MS;
+        return INT32_MAX;
 
     const uint32_t elapsed = millis() - editTransactionActivityMs;
     return elapsed < EDIT_TRANSACTION_IDLE_MS ? EDIT_TRANSACTION_IDLE_MS - elapsed : 1;
@@ -2116,7 +2119,7 @@ void AdminModule::handleSetHamMode(const meshtastic_HamParameters &p)
 
 AdminModule::AdminModule()
     : ProtobufModule("Admin", meshtastic_PortNum_ADMIN_APP, &meshtastic_AdminMessage_msg),
-      concurrency::OSThread("AdminTimeout", EDIT_TRANSACTION_IDLE_MS)
+      concurrency::OSThread("AdminTimeout", INT32_MAX)
 {
     // restrict to the admin channel for rx
     // boundChannel = Channels::adminChannel;

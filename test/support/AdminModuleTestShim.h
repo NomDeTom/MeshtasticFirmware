@@ -29,12 +29,14 @@ class AdminModuleTestShim : public AdminModule
     {
         hasOpenEditTransaction = true;
         editTransactionActivityMs = millis();
+        setIntervalFromNow(EDIT_TRANSACTION_IDLE_MS);
         deferredShouldReboot = false;
         deferredRadioAffected = false;
     }
     int savedSegments() const { return lastSaveWhatForTest; }
 
     bool editTransactionOpen() const { return hasOpenEditTransaction; }
+    unsigned long editTransactionTimerInterval() const { return editTransactionTimerIntervalForTest(); }
     // Backdate past the idle window so a test sees an abandoned transaction without waiting it out.
     void ageEditTransaction() { editTransactionActivityMs = millis() - EDIT_TRANSACTION_IDLE_MS - 1; }
     int32_t runTransactionTimer() { return runOnce(); }
