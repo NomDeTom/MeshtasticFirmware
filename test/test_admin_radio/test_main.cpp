@@ -1744,7 +1744,7 @@ static void test_warn_license_transaction_coalescedToSingleMessage()
 // (which drives the live SX126x/RadioInterface reconfigure) when saveWhat includes
 // SEGMENT_CONFIG or SEGMENT_CHANNELS. Pure node-DB metadata saves - favorite, ignore,
 // mute - must skip that reconfigure entirely: it's the crash in the WisMesh Tag
-// favorite-node bug (see plan-decouple-nodedb-admin-saves.md). These tests watch
+// favorite-node bug (see docs/admin-config-save-gating.md). These tests watch
 // service->configChanged directly so a regression (someone widening the saveWhat mask,
 // or reordering the check) is caught even though these run outside an edit transaction.
 // -----------------------------------------------------------------------
@@ -2294,7 +2294,7 @@ static void test_moduleConfigTelemetryScreenFlags_liveInModuleConfig()
 //
 // position/network/bluetooth used to reboot on *every* set, including a client re-pushing
 // byte-identical config. A no-op set must now leave rebootAtMsec unset; any real change still
-// schedules the reboot exactly as before. See plan-narrow-reboot-trigger.md. reboot() only
+// schedules the reboot exactly as before. See docs/admin-config-save-gating.md. reboot() only
 // arms rebootAtMsec (it does not exit), so that is the signal we assert on.
 // -----------------------------------------------------------------------
 
@@ -2373,7 +2373,7 @@ static void test_setConfigBluetooth_realChange_schedulesReboot()
 //
 // A position change that touches only live-appliable fields (broadcast cadence, smart-position,
 // flags - read directly from config each cycle) must apply without a reboot. Boot-only fields
-// (GPS driver mode/timing, GPIO pins) still reboot. See plan-narrow-reboot-trigger.md.
+// (GPS driver mode/timing, GPIO pins) still reboot. See docs/admin-config-save-gating.md.
 // -----------------------------------------------------------------------
 
 static void test_setConfigPosition_liveFieldChange_doesNotReboot()
