@@ -51,6 +51,15 @@ class MockMeshService : public MeshService
         capturedWarnings.push_back(n->message);
         releaseClientNotificationToPool(n);
     }
+
+    // Counts entries into reloadConfig(). Lets a test assert a code path writes *once*, which
+    // configChanged alone cannot show (a suppressed reload still persists).
+    int reloadCalls = 0;
+    void reloadConfig(int saveWhat, bool radioAffected) override
+    {
+        reloadCalls++;
+        MeshService::reloadConfig(saveWhat, radioAffected);
+    }
 };
 
 static MockMeshService *mockMeshService;
@@ -2043,6 +2052,31 @@ static void test_reloadConfig_radioAffectedFalse_skipsReload()
     TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
 
+// reloadConfig() ends with an unconditional nodeDB->saveToDisk(saveWhat), *outside* the
+// radioAffected guard. So with the flag false it is exactly equivalent to calling
+// saveToDisk(saveWhat) directly - which is what licenses deleting the nine
+// `saveToDisk(X); reloadConfig(X, ...)` double-writes from the InkHUD menu. If that
+// equivalence ever stops holding, those deletions become silent data loss, so assert it here
+// rather than trusting the reading of the code.
+static void test_reloadConfig_radioAffectedFalse_isEquivalentToSaveToDisk()
+{
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    // Distinguishable value so we can tell a write happened at all.
+    config.position.position_broadcast_secs = 4321;
+
+    const int savesBefore = mockMeshService->reloadCalls;
+    service->reloadConfig(SEGMENT_CONFIG, /*radioAffected=*/false);
+
+    // No radio reconfigure...
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+    // ...and exactly one pass through reloadConfig, i.e. one save, not two.
+    TEST_ASSERT_EQUAL_INT(savesBefore + 1, mockMeshService->reloadCalls);
+    // The in-memory value survives the call (nothing clobbers config on the save path).
+    TEST_ASSERT_EQUAL_UINT32(4321, config.position.position_broadcast_secs);
+}
+
 // A module-config-only save must never touch the radio. The frame-toggle menu persists
 // moduleConfig.telemetry.*_screen_enabled this way; passing the mask without the explicit
 // radioAffected=false would inherit the default of true and needlessly re-init the LoRa chip
@@ -2350,6 +2384,7 @@ void setup()
     RUN_TEST(test_setConfigLora_stillTriggersRadioReload);
     RUN_TEST(test_reloadConfig_defaultRadioAffected_stillReloads);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_skipsReload);
+    RUN_TEST(test_reloadConfig_radioAffectedFalse_isEquivalentToSaveToDisk);
     RUN_TEST(test_reloadConfig_moduleConfigSegment_skipsReload);
     RUN_TEST(test_moduleConfigTelemetryScreenFlags_liveInModuleConfig);
     RUN_TEST(test_setConfigPosition_noopSet_doesNotReboot);
