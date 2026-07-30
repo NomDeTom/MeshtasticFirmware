@@ -1705,12 +1705,12 @@ void menuHandler::resetNodeDBMenu()
             LOG_INFO("Initiate node-db reset");
             nodeDB->resetNodes();
             disableBluetooth();
-            rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
+            requestReboot();
         } else if (selected == 2) {
             LOG_INFO("Initiate node-db reset but keeping favorites");
             nodeDB->resetNodes(1);
             disableBluetooth();
-            rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
+            requestReboot();
         } else if (selected == 0) {
             menuQueue = NodeBaseMenu;
             screen->runNow();
@@ -2208,7 +2208,7 @@ void menuHandler::rebootMenu()
             IF_SCREEN(screen->showSimpleBanner("Rebooting...", 0));
             nodeDB->saveToDisk();
             messageStore.saveToFlash();
-            rebootAtMsec = millis() + DEFAULT_REBOOT_SECONDS * 1000;
+            requestReboot();
         } else {
             menuQueue = PowerMenu;
             screen->runNow();
@@ -2940,7 +2940,7 @@ void menuHandler::toggleNodeMuted(uint32_t nodeNum)
 
     const bool wasMuted = nodeInfoLiteIsMuted(n);
     nodeInfoLiteSetBit(n, NODEINFO_BITFIELD_IS_MUTED_MASK, !wasMuted);
-    LOG_INFO(wasMuted ? "Unmuted node %08X" : "Muted node %08X", nodeNum);
+    LOG_INFO(wasMuted ? "Unmuted node 0x%08x" : "Muted node 0x%08x", nodeNum);
     nodeDB->notifyObservers(true);
     nodeDB->saveToDisk(SEGMENT_NODEDATABASE); // NodeInfoLite bit: only the node DB changed
 }
