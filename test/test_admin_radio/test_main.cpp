@@ -2500,6 +2500,66 @@ static void test_setConfigBluetooth_realChange_schedulesReboot()
     TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
 }
 
+static void test_setConfigSecurity_noopSet_doesNotReboot()
+{
+    config.has_security = true;
+    config.security = meshtastic_Config_SecurityConfig_init_zero;
+    config.security.private_key.size = 32;
+    config.security.public_key.size = 32;
+    memset(config.security.private_key.bytes, 0x11, 32);
+    memset(config.security.public_key.bytes, 0x22, 32);
+    rebootAtMsec = 0;
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_security_tag;
+    c.payload_variant.security = config.security;
+    sendSetConfig(c);
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_setConfigSecurity_realChange_schedulesReboot()
+{
+    config.has_security = true;
+    config.security = meshtastic_Config_SecurityConfig_init_zero;
+    config.security.private_key.size = 32;
+    config.security.public_key.size = 32;
+    memset(config.security.private_key.bytes, 0x11, 32);
+    memset(config.security.public_key.bytes, 0x22, 32);
+    rebootAtMsec = 0;
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_security_tag;
+    c.payload_variant.security = config.security;
+    c.payload_variant.security.debug_log_api_enabled = true;
+    sendSetConfig(c);
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_setConfigSecurity_rejectedManagedNoop_doesNotReboot()
+{
+    config.has_security = true;
+    config.security = meshtastic_Config_SecurityConfig_init_zero;
+    config.security.private_key.size = 32;
+    config.security.public_key.size = 32;
+    memset(config.security.private_key.bytes, 0x11, 32);
+    memset(config.security.public_key.bytes, 0x22, 32);
+    rebootAtMsec = 0;
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_security_tag;
+    c.payload_variant.security = config.security;
+    c.payload_variant.security.is_managed = true;
+    sendSetConfig(c);
+
+    TEST_ASSERT_FALSE(config.security.is_managed);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
 // -----------------------------------------------------------------------
 // handleSetConfig() reboot gating (Tier 2: position live-apply)
 //
@@ -2679,6 +2739,39 @@ static void test_setModuleConfigSerial_noop_doesNotRebootOrDisableBluetooth()
 
     TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
     TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigTelemetry_noop_doesNotRebootOrDisableBluetooth()
+{
+    moduleConfig.has_telemetry = true;
+    moduleConfig.telemetry = meshtastic_ModuleConfig_TelemetryConfig_init_zero;
+    moduleConfig.telemetry.device_update_interval = 300;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_telemetry_tag;
+    mc.payload_variant.telemetry = moduleConfig.telemetry;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigTelemetry_realChangeRebootsAndDisablesBluetooth()
+{
+    moduleConfig.has_telemetry = true;
+    moduleConfig.telemetry = meshtastic_ModuleConfig_TelemetryConfig_init_zero;
+    moduleConfig.telemetry.device_update_interval = 300;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_telemetry_tag;
+    mc.payload_variant.telemetry = moduleConfig.telemetry;
+    mc.payload_variant.telemetry.device_update_interval = 600;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
 }
 
 static void test_setModuleConfigMqtt_realChangeRebootsAndDisablesBluetooth()
@@ -3372,6 +3465,9 @@ void setup()
     RUN_TEST(test_setConfigNetwork_redactedSecretNoop_doesNotReboot);
     RUN_TEST(test_setConfigBluetooth_noopSet_doesNotReboot);
     RUN_TEST(test_setConfigBluetooth_realChange_schedulesReboot);
+    RUN_TEST(test_setConfigSecurity_noopSet_doesNotReboot);
+    RUN_TEST(test_setConfigSecurity_realChange_schedulesReboot);
+    RUN_TEST(test_setConfigSecurity_rejectedManagedNoop_doesNotReboot);
     RUN_TEST(test_setConfigPosition_liveFieldChange_doesNotReboot);
     RUN_TEST(test_setConfigPosition_gpioChangeStillReboots);
     RUN_TEST(test_setConfigPosition_gpsEnableIsLive_doesNotReboot);
@@ -3385,6 +3481,8 @@ void setup()
     RUN_TEST(test_transaction_toggleMutedNode_doesNotReloadRadioAtCommit);
     RUN_TEST(test_setModuleConfigMqtt_redactedSecretNoop_doesNotRebootOrDisableBluetooth);
     RUN_TEST(test_setModuleConfigSerial_noop_doesNotRebootOrDisableBluetooth);
+    RUN_TEST(test_setModuleConfigTelemetry_noop_doesNotRebootOrDisableBluetooth);
+    RUN_TEST(test_setModuleConfigTelemetry_realChangeRebootsAndDisablesBluetooth);
     RUN_TEST(test_setModuleConfigMqtt_realChangeRebootsAndDisablesBluetooth);
     RUN_TEST(test_setModuleConfigSerial_realChangeRebootsAndDisablesBluetooth);
     RUN_TEST(test_transaction_mqttNoop_keepsBluetoothUntilCommit);

@@ -1271,6 +1271,7 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
         break;
     case meshtastic_Config_security_tag: {
         LOG_INFO("Set config: Security");
+        const auto oldSecurity = config.security;
         meshtastic_Config_SecurityConfig incoming = c.payload_variant.security;
         // Preserve our keypair when a SET omits the private key but we already hold one: regenerating would
         // change our NodeNum (== crc32(public_key)) and orphan us on the mesh. A SET without the key is a
@@ -1317,10 +1318,10 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
             LOG_WARN(warning);
             sendWarning(warning);
         }
+        requiresReboot = !protobufsEqual<meshtastic_Config_SecurityConfig_size>(&meshtastic_Config_SecurityConfig_msg,
+                                                                                &oldSecurity, &config.security);
 
         changes = SEGMENT_CONFIG | SEGMENT_DEVICESTATE | SEGMENT_NODEDATABASE;
-
-        requiresReboot = true;
 
         break;
     }
@@ -1395,6 +1396,9 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         break;
     case meshtastic_ModuleConfig_telemetry_tag:
         LOG_INFO("Set module config: Telemetry");
+        shouldReboot = !moduleConfig.has_telemetry ||
+                       !protobufsEqual<meshtastic_ModuleConfig_TelemetryConfig_size>(
+                           &meshtastic_ModuleConfig_TelemetryConfig_msg, &moduleConfig.telemetry, &c.payload_variant.telemetry);
         moduleConfig.has_telemetry = true;
         moduleConfig.telemetry = c.payload_variant.telemetry;
         break;
