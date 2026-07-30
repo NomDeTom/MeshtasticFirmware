@@ -1930,6 +1930,84 @@ static void test_setChannel_pskChange_doesNotReloadRadio()
     TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
 
+static meshtastic_Channel makePlainPrimaryChannel(const char *name)
+{
+    meshtastic_Channel channel = makeChannel(0, meshtastic_Channel_Role_PRIMARY, name, DEFAULT_KEY, 1);
+    channel.settings.psk.size = 0;
+    return channel;
+}
+
+static void sendSetConfig(const meshtastic_Config &c);
+
+static void useLicensedHamNarrowSlow()
+{
+    config.lora = meshtastic_Config_LoRaConfig_init_zero;
+    config.lora.region = meshtastic_Config_LoRaConfig_RegionCode_ITU2_125CM;
+    config.lora.use_preset = true;
+    config.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_NARROW_SLOW;
+    owner.is_licensed = true;
+    initRegion();
+    RadioInterface::uses_default_frequency_slot = true;
+}
+
+static void test_setChannel_hamDefaultNameImplicitToExplicit_doesNotReloadRadio()
+{
+    useLicensedHamNarrowSlow();
+    sendSetChannel(makePlainPrimaryChannel(""));
+    TEST_ASSERT_EQUAL_STRING("NarrowSlow", channels.getName(channels.getPrimaryIndex()));
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(makePlainPrimaryChannel("NarrowSlow"));
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setChannel_hamDefaultNameExplicitToImplicit_doesNotReloadRadio()
+{
+    useLicensedHamNarrowSlow();
+    sendSetChannel(makePlainPrimaryChannel("NarrowSlow"));
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(makePlainPrimaryChannel(""));
+
+    TEST_ASSERT_EQUAL_STRING("NarrowSlow", channels.getName(channels.getPrimaryIndex()));
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void assertUsToHamTransactionReloadsOnce(const char *channelName)
+{
+    usePresetLongFast();
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "", DEFAULT_KEY, 1));
+    owner.is_licensed = true;
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.region = meshtastic_Config_LoRaConfig_RegionCode_ITU2_125CM;
+    c.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_NARROW_SLOW;
+    sendSetConfig(c);
+    sendSetChannel(makePlainPrimaryChannel(channelName));
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL(meshtastic_Config_LoRaConfig_RegionCode_ITU2_125CM, config.lora.region);
+    TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
+static void test_transaction_usToHamWithExplicitDefaultName_reloadsRadioOnce()
+{
+    assertUsToHamTransactionReloadsOnce("NarrowSlow");
+}
+
+static void test_transaction_usToHamWithImplicitDefaultName_reloadsRadioOnce()
+{
+    assertUsToHamTransactionReloadsOnce("");
+}
+
 // -----------------------------------------------------------------------
 // handleSetConfig() radio-reload gating (non-LoRa Config sub-messages)
 //
@@ -3431,6 +3509,10 @@ void setup()
     RUN_TEST(test_setChannel_noop_doesNotReloadRadio);
     RUN_TEST(test_setChannel_mqttFlagChange_doesNotReloadRadio);
     RUN_TEST(test_setChannel_pskChange_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_hamDefaultNameImplicitToExplicit_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_hamDefaultNameExplicitToImplicit_doesNotReloadRadio);
+    RUN_TEST(test_transaction_usToHamWithExplicitDefaultName_reloadsRadioOnce);
+    RUN_TEST(test_transaction_usToHamWithImplicitDefaultName_reloadsRadioOnce);
     RUN_TEST(test_setConfigDevice_skipsRadioReload);
     RUN_TEST(test_setConfigPosition_skipsRadioReload);
     RUN_TEST(test_setConfigPosition_gpsOffNestedSave_skipsRadioReload);
