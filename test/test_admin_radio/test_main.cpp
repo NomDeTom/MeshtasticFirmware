@@ -1799,6 +1799,9 @@ static void test_removeFavoriteNode_skipsRadioReload()
 
 static void test_setIgnoredNode_skipsRadioReload_butPersists()
 {
+    // Create the node here rather than relying on an earlier RUN_TEST having done it: nodeDB is a
+    // suite-wide global, so otherwise this breaks if registration order changes or -f filters it.
+    nodeDB->getOrCreateMeshNode(TEST_NODE_NUM);
     ConfigChangedCounter counter;
     counter.observe(&service->configChanged);
 
@@ -2253,6 +2256,19 @@ static void test_toggleNodeMuted_unknownNodeDoesNothing()
 
     TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
+// saveToDisk(SEGMENT_MODULECONFIG) only serialises a sub-message whose has_* flag is set, so a
+// field can be assigned, "saved", and still never reach disk - exactly the TAK bug fixed upstream
+// in #11216. Drive the real toggle and assert the save path sets has_telemetry, rather than
+// asserting values the test itself just wrote.
+static void test_toggleTelemetryScreen_savePathSetsHasTelemetry()
+{
+    moduleConfig.has_telemetry = false;
+
+    graphics::menuHandler::toggleTelemetryScreen(moduleConfig.telemetry.air_quality_screen_enabled);
+
+    TEST_ASSERT_TRUE(moduleConfig.has_telemetry);
+}
+
 #endif // HAS_SCREEN
 
 // A module-config-only save must never touch the radio. The frame-toggle menu persists
@@ -2267,26 +2283,6 @@ static void test_reloadConfig_moduleConfigSegment_skipsReload()
     service->reloadConfig(SEGMENT_MODULECONFIG, /*radioAffected=*/false);
 
     TEST_ASSERT_EQUAL_INT(0, counter.count);
-}
-
-// The three telemetry screen toggles are moduleConfig fields, not part of the hiddenFrames
-// blob that Screen::toggleFrameVisibility() persists, so SEGMENT_MODULECONFIG is the segment
-// that has to carry them. Guards the segment choice: if these ever move to another proto,
-// the frame-toggle menu's save would silently stop persisting them again.
-static void test_moduleConfigTelemetryScreenFlags_liveInModuleConfig()
-{
-    moduleConfig.telemetry.environment_screen_enabled = true;
-    moduleConfig.telemetry.air_quality_screen_enabled = true;
-    moduleConfig.telemetry.power_screen_enabled = true;
-
-    // has_telemetry is what saveToDisk(SEGMENT_MODULECONFIG) sets before serialising
-    // LocalModuleConfig; without it the sub-message is skipped and the flags never reach disk.
-    moduleConfig.has_telemetry = true;
-
-    TEST_ASSERT_TRUE(moduleConfig.has_telemetry);
-    TEST_ASSERT_TRUE(moduleConfig.telemetry.environment_screen_enabled);
-    TEST_ASSERT_TRUE(moduleConfig.telemetry.air_quality_screen_enabled);
-    TEST_ASSERT_TRUE(moduleConfig.telemetry.power_screen_enabled);
 }
 
 // -----------------------------------------------------------------------
@@ -2575,9 +2571,9 @@ void setup()
     RUN_TEST(test_setSmartPositionEnabled_persistsWithoutReboot);
     RUN_TEST(test_toggleNodeMuted_flipsBitAndSkipsRadioReload);
     RUN_TEST(test_toggleNodeMuted_unknownNodeDoesNothing);
+    RUN_TEST(test_toggleTelemetryScreen_savePathSetsHasTelemetry);
 #endif
     RUN_TEST(test_reloadConfig_moduleConfigSegment_skipsReload);
-    RUN_TEST(test_moduleConfigTelemetryScreenFlags_liveInModuleConfig);
     RUN_TEST(test_setConfigPosition_noopSet_doesNotReboot);
     RUN_TEST(test_setConfigPosition_gpioChange_schedulesReboot);
     RUN_TEST(test_setConfigNetwork_noopSet_doesNotReboot);

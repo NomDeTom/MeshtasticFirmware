@@ -484,6 +484,8 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         LOG_INFO("Begin transaction for editing settings");
         hasOpenEditTransaction = true;
         editTransactionActivityMs = millis();
+        deferredShouldReboot = false;
+        deferredRadioAffected = false;
         break;
     }
     case meshtastic_AdminMessage_commit_edit_settings_tag: {
@@ -491,7 +493,8 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         LOG_INFO("Commit transaction for edited settings");
         hasOpenEditTransaction = false;
         deferredEditSegments = 0;
-        saveChanges(SEGMENT_CONFIG | SEGMENT_MODULECONFIG | SEGMENT_DEVICESTATE | SEGMENT_CHANNELS | SEGMENT_NODEDATABASE);
+        saveChanges(SEGMENT_CONFIG | SEGMENT_MODULECONFIG | SEGMENT_DEVICESTATE | SEGMENT_CHANNELS | SEGMENT_NODEDATABASE,
+                    deferredShouldReboot, deferredRadioAffected);
         flushChannelWarnings(); // one coalesced message for everything edited in this transaction
         break;
     }
@@ -1930,7 +1933,11 @@ void AdminModule::saveChanges(int saveWhat, bool shouldReboot, bool radioAffecte
 #endif
     // The one thing menus have no concept of: while a remote-admin edit transaction is open the
     // write is deferred to the commit, so a multi-field set doesn't hit flash once per field.
+    // Remember what the deferred sets asked for, so the commit can honour it rather than falling
+    // back to the parameter defaults and rebooting for e.g. a display-only batch.
     if (hasOpenEditTransaction) {
+        deferredShouldReboot |= shouldReboot;
+        deferredRadioAffected |= radioAffected;
         LOG_INFO("Delay save of changes to disk until the open transaction is committed");
         editTransactionActivityMs = millis(); // still in use, so not the abandoned kind we time out
         deferredEditSegments |= saveWhat;
