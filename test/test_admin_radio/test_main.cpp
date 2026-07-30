@@ -39,6 +39,7 @@ extern uint32_t hash(const char *str);
 
 // Set by AdminModule::reboot(); the reboot-gating tests assert on it (0 == no reboot scheduled).
 extern uint32_t rebootAtMsec;
+extern uint32_t disableBluetoothCallCountForTest;
 
 // Every client notification the AdminModule emits flows through sendClientNotification();
 // capture each formatted message so the warning/coalescing tests can assert on the exact
@@ -58,9 +59,11 @@ class MockMeshService : public MeshService
     // Counts entries into reloadConfig(). Lets a test assert a code path writes *once*, which
     // configChanged alone cannot show (a suppressed reload still persists).
     int reloadCalls = 0;
+    bool lastRadioAffected = false;
     void reloadConfig(int saveWhat, bool radioAffected) override
     {
         reloadCalls++;
+        lastRadioAffected = radioAffected;
         MeshService::reloadConfig(saveWhat, radioAffected);
     }
 };
@@ -1845,17 +1848,164 @@ static void test_toggleMutedNode_skipsRadioReload_butPersists()
     TEST_ASSERT_TRUE(nodeInfoLiteIsMuted(nodeDB->getMeshNode(TEST_NODE_NUM)));
 }
 
-// Regression guard: a real LoRa config/channel change must still reconfigure the radio -
-// the gate in reloadConfig() must not have swallowed the legitimate case.
-static void test_setChannel_stillTriggersRadioReload()
+static void test_setChannel_primaryNameChange_triggersRadioReload()
 {
     usePresetLongFast();
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1));
     ConfigChangedCounter counter;
     counter.observe(&service->configChanged);
 
-    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1));
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "FieldTest", DEFAULT_KEY, 1));
 
     TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
+static void test_setChannel_primaryNameChangeWithExplicitFrequency_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    config.lora.override_frequency = 915.0f;
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1));
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "FieldTest", DEFAULT_KEY, 1));
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setChannel_primaryNameChangeWithPersistedHashSlot_reloadsRadio()
+{
+    usePresetLongFast();
+    config.lora.channel_num = 1;
+    // Native tests do not initialize the radio-derived default-slot flag.
+    RadioInterface::uses_default_frequency_slot = true;
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1));
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "FieldTest", DEFAULT_KEY, 1));
+
+    TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
+static void test_setChannel_noop_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    const meshtastic_Channel channel = makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1);
+    sendSetChannel(channel);
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(channel);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setChannel_mqttFlagChange_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    meshtastic_Channel channel = makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1);
+    sendSetChannel(channel);
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    channel.settings.uplink_enabled = !channel.settings.uplink_enabled;
+    sendSetChannel(channel);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setChannel_pskChange_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    meshtastic_Channel channel = makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1);
+    sendSetChannel(channel);
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    channel.settings.psk.size = sizeof(CUSTOM_KEY);
+    memcpy(channel.settings.psk.bytes, CUSTOM_KEY, sizeof(CUSTOM_KEY));
+    sendSetChannel(channel);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static meshtastic_Channel makePlainPrimaryChannel(const char *name)
+{
+    meshtastic_Channel channel = makeChannel(0, meshtastic_Channel_Role_PRIMARY, name, DEFAULT_KEY, 1);
+    channel.settings.psk.size = 0;
+    return channel;
+}
+
+static void sendSetConfig(const meshtastic_Config &c);
+
+static void useLicensedHamNarrowSlow()
+{
+    config.lora = meshtastic_Config_LoRaConfig_init_zero;
+    config.lora.region = meshtastic_Config_LoRaConfig_RegionCode_ITU2_125CM;
+    config.lora.use_preset = true;
+    config.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_NARROW_SLOW;
+    owner.is_licensed = true;
+    initRegion();
+    RadioInterface::uses_default_frequency_slot = true;
+}
+
+static void test_setChannel_hamDefaultNameImplicitToExplicit_doesNotReloadRadio()
+{
+    useLicensedHamNarrowSlow();
+    sendSetChannel(makePlainPrimaryChannel(""));
+    TEST_ASSERT_EQUAL_STRING("NarrowSlow", channels.getName(channels.getPrimaryIndex()));
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(makePlainPrimaryChannel("NarrowSlow"));
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setChannel_hamDefaultNameExplicitToImplicit_doesNotReloadRadio()
+{
+    useLicensedHamNarrowSlow();
+    sendSetChannel(makePlainPrimaryChannel("NarrowSlow"));
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(makePlainPrimaryChannel(""));
+
+    TEST_ASSERT_EQUAL_STRING("NarrowSlow", channels.getName(channels.getPrimaryIndex()));
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void assertUsToHamTransactionReloadsOnce(const char *channelName)
+{
+    usePresetLongFast();
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "", DEFAULT_KEY, 1));
+    owner.is_licensed = true;
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.region = meshtastic_Config_LoRaConfig_RegionCode_ITU2_125CM;
+    c.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_NARROW_SLOW;
+    sendSetConfig(c);
+    sendSetChannel(makePlainPrimaryChannel(channelName));
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL(meshtastic_Config_LoRaConfig_RegionCode_ITU2_125CM, config.lora.region);
+    TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
+static void test_transaction_usToHamWithExplicitDefaultName_reloadsRadioOnce()
+{
+    assertUsToHamTransactionReloadsOnce("NarrowSlow");
+}
+
+static void test_transaction_usToHamWithImplicitDefaultName_reloadsRadioOnce()
+{
+    assertUsToHamTransactionReloadsOnce("");
 }
 
 // -----------------------------------------------------------------------
@@ -2015,10 +2165,7 @@ static void test_removeFixedPosition_skipsRadioReload()
     TEST_ASSERT_FALSE(config.position.fixed_position);
 }
 
-// Regression guard: a set_config carrying the lora sub-message is the one case that must
-// still fire configChanged. Sending back the current valid preset leaves the region
-// unchanged, so exactly one reload occurs.
-static void test_setConfigLora_stillTriggersRadioReload()
+static void test_setConfigLora_realChange_triggersRadioReload()
 {
     usePresetLongFast();
     ConfigChangedCounter counter;
@@ -2027,9 +2174,62 @@ static void test_setConfigLora_stillTriggersRadioReload()
     meshtastic_Config c = meshtastic_Config_init_zero;
     c.which_payload_variant = meshtastic_Config_lora_tag;
     c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST;
     sendSetConfig(c);
 
     TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
+static void test_setConfigLora_noop_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+    sendSetConfig(c);
+
+    TEST_ASSERT_FALSE(mockMeshService->lastRadioAffected);
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setConfigLora_policyOnlyChange_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.hop_limit = config.lora.hop_limit + 1;
+    c.payload_variant.lora.ignore_mqtt = !config.lora.ignore_mqtt;
+    c.payload_variant.lora.config_ok_to_mqtt = !config.lora.config_ok_to_mqtt;
+    c.payload_variant.lora.override_duty_cycle = !config.lora.override_duty_cycle;
+    c.payload_variant.lora.ignore_incoming_count = 1;
+    c.payload_variant.lora.ignore_incoming[0] = 0x12345678;
+    sendSetConfig(c);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setConfigLora_liveHardwareFields_dontReloadRadio()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.tx_enabled = !config.lora.tx_enabled;
+    c.payload_variant.lora.pa_fan_disabled = !config.lora.pa_fan_disabled;
+    sendSetConfig(c);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
 
 // Default-preservation guard: reloadConfig() callers that pass only saveWhat (MenuHandler,
@@ -2342,6 +2542,20 @@ static void test_setConfigNetwork_realChange_schedulesReboot()
     TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
 }
 
+static void test_setConfigNetwork_redactedSecretNoop_doesNotReboot()
+{
+    strncpy(config.network.wifi_psk, "existing-test-secret", sizeof(config.network.wifi_psk) - 1);
+    rebootAtMsec = 0;
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_network_tag;
+    c.payload_variant.network = config.network;
+    strncpy(c.payload_variant.network.wifi_psk, "sekrit", sizeof(c.payload_variant.network.wifi_psk) - 1);
+    sendSetConfig(c);
+
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+    TEST_ASSERT_EQUAL_STRING("existing-test-secret", config.network.wifi_psk);
+}
+
 static void test_setConfigBluetooth_noopSet_doesNotReboot()
 {
     rebootAtMsec = 0;
@@ -2363,6 +2577,66 @@ static void test_setConfigBluetooth_realChange_schedulesReboot()
     sendSetConfig(c);
 
     TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_setConfigSecurity_noopSet_doesNotReboot()
+{
+    config.has_security = true;
+    config.security = meshtastic_Config_SecurityConfig_init_zero;
+    config.security.private_key.size = 32;
+    config.security.public_key.size = 32;
+    memset(config.security.private_key.bytes, 0x11, 32);
+    memset(config.security.public_key.bytes, 0x22, 32);
+    rebootAtMsec = 0;
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_security_tag;
+    c.payload_variant.security = config.security;
+    sendSetConfig(c);
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_setConfigSecurity_realChange_schedulesReboot()
+{
+    config.has_security = true;
+    config.security = meshtastic_Config_SecurityConfig_init_zero;
+    config.security.private_key.size = 32;
+    config.security.public_key.size = 32;
+    memset(config.security.private_key.bytes, 0x11, 32);
+    memset(config.security.public_key.bytes, 0x22, 32);
+    rebootAtMsec = 0;
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_security_tag;
+    c.payload_variant.security = config.security;
+    c.payload_variant.security.debug_log_api_enabled = true;
+    sendSetConfig(c);
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_setConfigSecurity_rejectedManagedNoop_doesNotReboot()
+{
+    config.has_security = true;
+    config.security = meshtastic_Config_SecurityConfig_init_zero;
+    config.security.private_key.size = 32;
+    config.security.public_key.size = 32;
+    memset(config.security.private_key.bytes, 0x11, 32);
+    memset(config.security.public_key.bytes, 0x22, 32);
+    rebootAtMsec = 0;
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_security_tag;
+    c.payload_variant.security = config.security;
+    c.payload_variant.security.is_managed = true;
+    sendSetConfig(c);
+
+    TEST_ASSERT_FALSE(config.security.is_managed);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
 }
 
 // -----------------------------------------------------------------------
@@ -2511,6 +2785,178 @@ static void sendSetModuleConfig(const meshtastic_ModuleConfig &mc)
     m.which_payload_variant = meshtastic_AdminMessage_set_module_config_tag;
     m.set_module_config = mc;
     sendAdmin(m);
+}
+
+static void test_setModuleConfigMqtt_redactedSecretNoop_doesNotRebootOrDisableBluetooth()
+{
+    moduleConfig.has_mqtt = true;
+    moduleConfig.mqtt = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+    strncpy(moduleConfig.mqtt.password, "actual-password", sizeof(moduleConfig.mqtt.password) - 1);
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+    mc.payload_variant.mqtt = moduleConfig.mqtt;
+    strncpy(mc.payload_variant.mqtt.password, "sekrit", sizeof(mc.payload_variant.mqtt.password) - 1);
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_STRING("actual-password", moduleConfig.mqtt.password);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigSerial_noop_doesNotRebootOrDisableBluetooth()
+{
+    moduleConfig.has_serial = true;
+    moduleConfig.serial = meshtastic_ModuleConfig_SerialConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_serial_tag;
+    mc.payload_variant.serial = moduleConfig.serial;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigTelemetry_noop_doesNotRebootOrDisableBluetooth()
+{
+    moduleConfig.has_telemetry = true;
+    moduleConfig.telemetry = meshtastic_ModuleConfig_TelemetryConfig_init_zero;
+    moduleConfig.telemetry.device_update_interval = 300;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_telemetry_tag;
+    mc.payload_variant.telemetry = moduleConfig.telemetry;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigTelemetry_realChangeRebootsAndDisablesBluetooth()
+{
+    moduleConfig.has_telemetry = true;
+    moduleConfig.telemetry = meshtastic_ModuleConfig_TelemetryConfig_init_zero;
+    moduleConfig.telemetry.device_update_interval = 300;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_telemetry_tag;
+    mc.payload_variant.telemetry = moduleConfig.telemetry;
+    mc.payload_variant.telemetry.device_update_interval = 600;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigMqtt_realChangeRebootsAndDisablesBluetooth()
+{
+    moduleConfig.has_mqtt = true;
+    moduleConfig.mqtt = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+    mc.payload_variant.mqtt = moduleConfig.mqtt;
+    mc.payload_variant.mqtt.encryption_enabled = true;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigSerial_realChangeRebootsAndDisablesBluetooth()
+{
+    moduleConfig.has_serial = true;
+    moduleConfig.serial = meshtastic_ModuleConfig_SerialConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_serial_tag;
+    mc.payload_variant.serial = moduleConfig.serial;
+    mc.payload_variant.serial.echo = true;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_transaction_mqttNoop_keepsBluetoothUntilCommit()
+{
+    moduleConfig.has_mqtt = true;
+    moduleConfig.mqtt = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+    strncpy(moduleConfig.mqtt.password, "actual-password", sizeof(moduleConfig.mqtt.password) - 1);
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+    mc.payload_variant.mqtt = moduleConfig.mqtt;
+    strncpy(mc.payload_variant.mqtt.password, "sekrit", sizeof(mc.payload_variant.mqtt.password) - 1);
+
+    sendBeginEdit();
+    sendSetModuleConfig(mc);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+}
+
+static void test_transaction_mqttRealChange_disablesBluetoothAtCommit()
+{
+    moduleConfig.has_mqtt = true;
+    moduleConfig.mqtt = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+    mc.payload_variant.mqtt = moduleConfig.mqtt;
+    mc.payload_variant.mqtt.encryption_enabled = true;
+    rebootAtMsec = 0;
+
+    sendBeginEdit();
+    sendSetModuleConfig(mc);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_transaction_serialNoop_keepsBluetoothUntilCommit()
+{
+    moduleConfig.has_serial = true;
+    moduleConfig.serial = meshtastic_ModuleConfig_SerialConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_serial_tag;
+    mc.payload_variant.serial = moduleConfig.serial;
+
+    sendBeginEdit();
+    sendSetModuleConfig(mc);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+}
+
+static void test_transaction_serialRealChange_disablesBluetoothAtCommit()
+{
+    moduleConfig.has_serial = true;
+    moduleConfig.serial = meshtastic_ModuleConfig_SerialConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_serial_tag;
+    mc.payload_variant.serial = moduleConfig.serial;
+    mc.payload_variant.serial.echo = true;
+    rebootAtMsec = 0;
+
+    sendBeginEdit();
+    sendSetModuleConfig(mc);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
 }
 
 // The headline guard: favoriting a node inside a transaction must not reconfigure the radio when
@@ -2667,6 +3113,68 @@ static void test_transaction_liveOnlyBatch_neitherRebootsNorReloads()
     TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
 
+static void test_transaction_liveOnlyCommit_doesNotDisableBluetooth()
+{
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_position_tag;
+    c.payload_variant.position = config.position;
+    c.payload_variant.position.position_broadcast_secs = config.position.position_broadcast_secs + 60;
+    sendSetConfig(c);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+}
+
+static void test_transaction_rebootingCommit_disablesBluetooth()
+{
+    config.position.rx_gpio = 0;
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_position_tag;
+    c.payload_variant.position = config.position;
+    c.payload_variant.position.rx_gpio = 17;
+    sendSetConfig(c);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+}
+
+static void test_transaction_duplicateBegin_preservesRadioReload()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST;
+    sendSetConfig(c);
+    sendBeginEdit();
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
+static void test_transaction_duplicateBegin_preservesReboot()
+{
+    config.position.rx_gpio = 0;
+    rebootAtMsec = 0;
+
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_position_tag;
+    c.payload_variant.position = config.position;
+    c.payload_variant.position.rx_gpio = 17;
+    sendSetConfig(c);
+    sendBeginEdit();
+    sendCommitEdit();
+
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
 // The accumulated decisions are per-transaction: a LoRa transaction must not leave the next,
 // node-DB-only transaction reconfiguring the radio.
 static void test_transaction_flagsDoNotLeakIntoTheNextTransaction()
@@ -2761,9 +3269,9 @@ static void test_abandonedTransaction_loraSet_stillReloadsRadioOnExpiry()
     TEST_ASSERT_EQUAL_INT(1, counter.count);
 }
 
-// Reboot is the one axis abandonment deliberately drops: the settings are already live in RAM and
-// the client that asked for the restart is, by definition, gone.
-static void test_abandonedTransaction_rebootingFieldDoesNotRebootOnExpiry()
+// Boot-only settings are not actually live in RAM. Expiry must finish the same reboot the commit
+// would have requested, or it persists a value that cannot take effect until some unrelated reboot.
+static void test_abandonedTransaction_rebootingFieldRebootsOnExpiry()
 {
     config.position.rx_gpio = 0; // a genuinely boot-only field, so the drop is a real drop
     rebootAtMsec = 0;
@@ -2779,7 +3287,44 @@ static void test_abandonedTransaction_rebootingFieldDoesNotRebootOnExpiry()
     sendGetDeviceMetadata();
 
     TEST_ASSERT_FALSE(testAdmin->editTransactionOpen());
-    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+}
+
+static void test_abandonedTransaction_timerExpiresWithoutAdminTraffic()
+{
+    config.position.rx_gpio = 0;
+    rebootAtMsec = 0;
+
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_position_tag;
+    c.payload_variant.position = config.position;
+    c.payload_variant.position.rx_gpio = 17;
+    sendSetConfig(c);
+
+    testAdmin->ageEditTransaction();
+    testAdmin->runTransactionTimer();
+
+    TEST_ASSERT_FALSE(testAdmin->editTransactionOpen());
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+}
+
+static void test_editTransactionTimer_isDormantUntilTransactionBegins()
+{
+    TEST_ASSERT_FALSE(testAdmin->editTransactionTimerEnabled());
+    TEST_ASSERT_EQUAL_UINT32(INT32_MAX, testAdmin->editTransactionTimerInterval());
+    TEST_ASSERT_EQUAL_INT32(INT32_MAX, testAdmin->runTransactionTimer());
+
+    sendBeginEdit();
+    TEST_ASSERT_TRUE(testAdmin->editTransactionTimerEnabled());
+    TEST_ASSERT_EQUAL_UINT32(60 * 1000, testAdmin->editTransactionTimerInterval());
+
+    sendCommitEdit();
+    TEST_ASSERT_FALSE(testAdmin->editTransactionTimerEnabled());
+    TEST_ASSERT_EQUAL_UINT32(INT32_MAX, testAdmin->editTransactionTimerInterval());
+    TEST_ASSERT_EQUAL_INT32(INT32_MAX, testAdmin->runTransactionTimer());
 }
 
 // Expiry must consume-and-clear the accumulated decisions, not just read them. A begin would reset
@@ -2818,6 +3363,7 @@ void setUp(void)
     mockMeshService = new MockMeshService();
     service = mockMeshService;
     testAdmin = new AdminModuleTestShim();
+    disableBluetoothCallCountForTest = 0;
     capturedWarnings.clear();
     // Committing an edit transaction triggers a full saveToDisk(), which dereferences nodeDB.
     // Create it once (kept reachable via the global, so no leak) for the warning tests; the
@@ -2957,7 +3503,16 @@ void setup()
     RUN_TEST(test_setIgnoredNode_skipsRadioReload_butPersists);
     RUN_TEST(test_removeIgnoredNode_skipsRadioReload);
     RUN_TEST(test_toggleMutedNode_skipsRadioReload_butPersists);
-    RUN_TEST(test_setChannel_stillTriggersRadioReload);
+    RUN_TEST(test_setChannel_primaryNameChange_triggersRadioReload);
+    RUN_TEST(test_setChannel_primaryNameChangeWithExplicitFrequency_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_primaryNameChangeWithPersistedHashSlot_reloadsRadio);
+    RUN_TEST(test_setChannel_noop_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_mqttFlagChange_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_pskChange_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_hamDefaultNameImplicitToExplicit_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_hamDefaultNameExplicitToImplicit_doesNotReloadRadio);
+    RUN_TEST(test_transaction_usToHamWithExplicitDefaultName_reloadsRadioOnce);
+    RUN_TEST(test_transaction_usToHamWithImplicitDefaultName_reloadsRadioOnce);
     RUN_TEST(test_setConfigDevice_skipsRadioReload);
     RUN_TEST(test_setConfigPosition_skipsRadioReload);
     RUN_TEST(test_setConfigPosition_gpsOffNestedSave_skipsRadioReload);
@@ -2967,7 +3522,10 @@ void setup()
     RUN_TEST(test_setConfigBluetooth_skipsRadioReload);
     RUN_TEST(test_setConfigSecurity_skipsRadioReload);
     RUN_TEST(test_removeFixedPosition_skipsRadioReload);
-    RUN_TEST(test_setConfigLora_stillTriggersRadioReload);
+    RUN_TEST(test_setConfigLora_realChange_triggersRadioReload);
+    RUN_TEST(test_setConfigLora_noop_doesNotReloadRadio);
+    RUN_TEST(test_setConfigLora_policyOnlyChange_doesNotReloadRadio);
+    RUN_TEST(test_setConfigLora_liveHardwareFields_dontReloadRadio);
     RUN_TEST(test_reloadConfig_defaultRadioAffected_stillReloads);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_skipsReload);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_isEquivalentToSaveToDisk);
@@ -2990,8 +3548,12 @@ void setup()
     RUN_TEST(test_setConfigPosition_gpioChange_schedulesReboot);
     RUN_TEST(test_setConfigNetwork_noopSet_doesNotReboot);
     RUN_TEST(test_setConfigNetwork_realChange_schedulesReboot);
+    RUN_TEST(test_setConfigNetwork_redactedSecretNoop_doesNotReboot);
     RUN_TEST(test_setConfigBluetooth_noopSet_doesNotReboot);
     RUN_TEST(test_setConfigBluetooth_realChange_schedulesReboot);
+    RUN_TEST(test_setConfigSecurity_noopSet_doesNotReboot);
+    RUN_TEST(test_setConfigSecurity_realChange_schedulesReboot);
+    RUN_TEST(test_setConfigSecurity_rejectedManagedNoop_doesNotReboot);
     RUN_TEST(test_setConfigPosition_liveFieldChange_doesNotReboot);
     RUN_TEST(test_setConfigPosition_gpioChangeStillReboots);
     RUN_TEST(test_setConfigPosition_gpsEnableIsLive_doesNotReboot);
@@ -3003,16 +3565,32 @@ void setup()
     // Edit-transaction deferral (the path phone apps use)
     RUN_TEST(test_transaction_favoriteNode_doesNotReloadRadioAtCommit);
     RUN_TEST(test_transaction_toggleMutedNode_doesNotReloadRadioAtCommit);
+    RUN_TEST(test_setModuleConfigMqtt_redactedSecretNoop_doesNotRebootOrDisableBluetooth);
+    RUN_TEST(test_setModuleConfigSerial_noop_doesNotRebootOrDisableBluetooth);
+    RUN_TEST(test_setModuleConfigTelemetry_noop_doesNotRebootOrDisableBluetooth);
+    RUN_TEST(test_setModuleConfigTelemetry_realChangeRebootsAndDisablesBluetooth);
+    RUN_TEST(test_setModuleConfigMqtt_realChangeRebootsAndDisablesBluetooth);
+    RUN_TEST(test_setModuleConfigSerial_realChangeRebootsAndDisablesBluetooth);
+    RUN_TEST(test_transaction_mqttNoop_keepsBluetoothUntilCommit);
+    RUN_TEST(test_transaction_mqttRealChange_disablesBluetoothAtCommit);
+    RUN_TEST(test_transaction_serialNoop_keepsBluetoothUntilCommit);
+    RUN_TEST(test_transaction_serialRealChange_disablesBluetoothAtCommit);
     RUN_TEST(test_transaction_moduleConfigSet_doesNotReloadRadioAtCommit);
     RUN_TEST(test_transaction_positionGpsOffNestedSave_doesNotReloadRadioAtCommit);
     RUN_TEST(test_transaction_loraSet_stillReloadsRadioAtCommit);
     RUN_TEST(test_transaction_gpioSet_reboots_butDoesNotReloadRadio);
     RUN_TEST(test_transaction_liveOnlyBatch_neitherRebootsNorReloads);
+    RUN_TEST(test_transaction_liveOnlyCommit_doesNotDisableBluetooth);
+    RUN_TEST(test_transaction_rebootingCommit_disablesBluetooth);
+    RUN_TEST(test_transaction_duplicateBegin_preservesRadioReload);
+    RUN_TEST(test_transaction_duplicateBegin_preservesReboot);
     RUN_TEST(test_transaction_flagsDoNotLeakIntoTheNextTransaction);
     RUN_TEST(test_commitWithoutBegin_persistsButDoesNotReloadOrReboot);
     RUN_TEST(test_abandonedTransaction_liveOnlyBatch_expiresWithoutReloadOrReboot);
     RUN_TEST(test_abandonedTransaction_loraSet_stillReloadsRadioOnExpiry);
-    RUN_TEST(test_abandonedTransaction_rebootingFieldDoesNotRebootOnExpiry);
+    RUN_TEST(test_abandonedTransaction_rebootingFieldRebootsOnExpiry);
+    RUN_TEST(test_abandonedTransaction_timerExpiresWithoutAdminTraffic);
+    RUN_TEST(test_editTransactionTimer_isDormantUntilTransactionBegins);
     RUN_TEST(test_abandonedTransaction_flagsDoNotLeakIntoAStrayCommit);
 
     exit(UNITY_END());
