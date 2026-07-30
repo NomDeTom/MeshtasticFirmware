@@ -39,6 +39,7 @@ extern uint32_t hash(const char *str);
 
 // Set by AdminModule::reboot(); the reboot-gating tests assert on it (0 == no reboot scheduled).
 extern uint32_t rebootAtMsec;
+extern uint32_t disableBluetoothCallCountForTest;
 
 // Every client notification the AdminModule emits flows through sendClientNotification();
 // capture each formatted message so the warning/coalescing tests can assert on the exact
@@ -58,9 +59,11 @@ class MockMeshService : public MeshService
     // Counts entries into reloadConfig(). Lets a test assert a code path writes *once*, which
     // configChanged alone cannot show (a suppressed reload still persists).
     int reloadCalls = 0;
+    bool lastRadioAffected = false;
     void reloadConfig(int saveWhat, bool radioAffected) override
     {
         reloadCalls++;
+        lastRadioAffected = radioAffected;
         MeshService::reloadConfig(saveWhat, radioAffected);
     }
 };
@@ -1845,17 +1848,58 @@ static void test_toggleMutedNode_skipsRadioReload_butPersists()
     TEST_ASSERT_TRUE(nodeInfoLiteIsMuted(nodeDB->getMeshNode(TEST_NODE_NUM)));
 }
 
-// Regression guard: a real LoRa config/channel change must still reconfigure the radio -
-// the gate in reloadConfig() must not have swallowed the legitimate case.
-static void test_setChannel_stillTriggersRadioReload()
+static void test_setChannel_primaryNameChange_triggersRadioReload()
 {
     usePresetLongFast();
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1));
     ConfigChangedCounter counter;
     counter.observe(&service->configChanged);
 
-    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1));
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "FieldTest", DEFAULT_KEY, 1));
 
     TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
+static void test_setChannel_noop_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    const meshtastic_Channel channel = makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1);
+    sendSetChannel(channel);
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(channel);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setChannel_mqttFlagChange_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    meshtastic_Channel channel = makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1);
+    sendSetChannel(channel);
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    channel.settings.uplink_enabled = !channel.settings.uplink_enabled;
+    sendSetChannel(channel);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setChannel_pskChange_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    meshtastic_Channel channel = makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1);
+    sendSetChannel(channel);
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    channel.settings.psk.size = sizeof(CUSTOM_KEY);
+    memcpy(channel.settings.psk.bytes, CUSTOM_KEY, sizeof(CUSTOM_KEY));
+    sendSetChannel(channel);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
 
 // -----------------------------------------------------------------------
@@ -2015,10 +2059,7 @@ static void test_removeFixedPosition_skipsRadioReload()
     TEST_ASSERT_FALSE(config.position.fixed_position);
 }
 
-// Regression guard: a set_config carrying the lora sub-message is the one case that must
-// still fire configChanged. Sending back the current valid preset leaves the region
-// unchanged, so exactly one reload occurs.
-static void test_setConfigLora_stillTriggersRadioReload()
+static void test_setConfigLora_realChange_triggersRadioReload()
 {
     usePresetLongFast();
     ConfigChangedCounter counter;
@@ -2027,9 +2068,26 @@ static void test_setConfigLora_stillTriggersRadioReload()
     meshtastic_Config c = meshtastic_Config_init_zero;
     c.which_payload_variant = meshtastic_Config_lora_tag;
     c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST;
     sendSetConfig(c);
 
     TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
+static void test_setConfigLora_noop_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+    sendSetConfig(c);
+
+    TEST_ASSERT_FALSE(mockMeshService->lastRadioAffected);
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
 
 // Default-preservation guard: reloadConfig() callers that pass only saveWhat (MenuHandler,
@@ -2340,6 +2398,20 @@ static void test_setConfigNetwork_realChange_schedulesReboot()
     sendSetConfig(c);
 
     TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_setConfigNetwork_redactedSecretNoop_doesNotReboot()
+{
+    strncpy(config.network.wifi_psk, "existing-test-secret", sizeof(config.network.wifi_psk) - 1);
+    rebootAtMsec = 0;
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_network_tag;
+    c.payload_variant.network = config.network;
+    strncpy(c.payload_variant.network.wifi_psk, "sekrit", sizeof(c.payload_variant.network.wifi_psk) - 1);
+    sendSetConfig(c);
+
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+    TEST_ASSERT_EQUAL_STRING("existing-test-secret", config.network.wifi_psk);
 }
 
 static void test_setConfigBluetooth_noopSet_doesNotReboot()
@@ -2667,6 +2739,68 @@ static void test_transaction_liveOnlyBatch_neitherRebootsNorReloads()
     TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
 
+static void test_transaction_liveOnlyCommit_doesNotDisableBluetooth()
+{
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_position_tag;
+    c.payload_variant.position = config.position;
+    c.payload_variant.position.position_broadcast_secs = config.position.position_broadcast_secs + 60;
+    sendSetConfig(c);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+}
+
+static void test_transaction_rebootingCommit_disablesBluetooth()
+{
+    config.position.rx_gpio = 0;
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_position_tag;
+    c.payload_variant.position = config.position;
+    c.payload_variant.position.rx_gpio = 17;
+    sendSetConfig(c);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+}
+
+static void test_transaction_duplicateBegin_preservesRadioReload()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.modem_preset = meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST;
+    sendSetConfig(c);
+    sendBeginEdit();
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
+static void test_transaction_duplicateBegin_preservesReboot()
+{
+    config.position.rx_gpio = 0;
+    rebootAtMsec = 0;
+
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_position_tag;
+    c.payload_variant.position = config.position;
+    c.payload_variant.position.rx_gpio = 17;
+    sendSetConfig(c);
+    sendBeginEdit();
+    sendCommitEdit();
+
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
 // The accumulated decisions are per-transaction: a LoRa transaction must not leave the next,
 // node-DB-only transaction reconfiguring the radio.
 static void test_transaction_flagsDoNotLeakIntoTheNextTransaction()
@@ -2818,6 +2952,7 @@ void setUp(void)
     mockMeshService = new MockMeshService();
     service = mockMeshService;
     testAdmin = new AdminModuleTestShim();
+    disableBluetoothCallCountForTest = 0;
     capturedWarnings.clear();
     // Committing an edit transaction triggers a full saveToDisk(), which dereferences nodeDB.
     // Create it once (kept reachable via the global, so no leak) for the warning tests; the
@@ -2957,7 +3092,10 @@ void setup()
     RUN_TEST(test_setIgnoredNode_skipsRadioReload_butPersists);
     RUN_TEST(test_removeIgnoredNode_skipsRadioReload);
     RUN_TEST(test_toggleMutedNode_skipsRadioReload_butPersists);
-    RUN_TEST(test_setChannel_stillTriggersRadioReload);
+    RUN_TEST(test_setChannel_primaryNameChange_triggersRadioReload);
+    RUN_TEST(test_setChannel_noop_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_mqttFlagChange_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_pskChange_doesNotReloadRadio);
     RUN_TEST(test_setConfigDevice_skipsRadioReload);
     RUN_TEST(test_setConfigPosition_skipsRadioReload);
     RUN_TEST(test_setConfigPosition_gpsOffNestedSave_skipsRadioReload);
@@ -2967,7 +3105,8 @@ void setup()
     RUN_TEST(test_setConfigBluetooth_skipsRadioReload);
     RUN_TEST(test_setConfigSecurity_skipsRadioReload);
     RUN_TEST(test_removeFixedPosition_skipsRadioReload);
-    RUN_TEST(test_setConfigLora_stillTriggersRadioReload);
+    RUN_TEST(test_setConfigLora_realChange_triggersRadioReload);
+    RUN_TEST(test_setConfigLora_noop_doesNotReloadRadio);
     RUN_TEST(test_reloadConfig_defaultRadioAffected_stillReloads);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_skipsReload);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_isEquivalentToSaveToDisk);
@@ -2990,6 +3129,7 @@ void setup()
     RUN_TEST(test_setConfigPosition_gpioChange_schedulesReboot);
     RUN_TEST(test_setConfigNetwork_noopSet_doesNotReboot);
     RUN_TEST(test_setConfigNetwork_realChange_schedulesReboot);
+    RUN_TEST(test_setConfigNetwork_redactedSecretNoop_doesNotReboot);
     RUN_TEST(test_setConfigBluetooth_noopSet_doesNotReboot);
     RUN_TEST(test_setConfigBluetooth_realChange_schedulesReboot);
     RUN_TEST(test_setConfigPosition_liveFieldChange_doesNotReboot);
@@ -3008,6 +3148,10 @@ void setup()
     RUN_TEST(test_transaction_loraSet_stillReloadsRadioAtCommit);
     RUN_TEST(test_transaction_gpioSet_reboots_butDoesNotReloadRadio);
     RUN_TEST(test_transaction_liveOnlyBatch_neitherRebootsNorReloads);
+    RUN_TEST(test_transaction_liveOnlyCommit_doesNotDisableBluetooth);
+    RUN_TEST(test_transaction_rebootingCommit_disablesBluetooth);
+    RUN_TEST(test_transaction_duplicateBegin_preservesRadioReload);
+    RUN_TEST(test_transaction_duplicateBegin_preservesReboot);
     RUN_TEST(test_transaction_flagsDoNotLeakIntoTheNextTransaction);
     RUN_TEST(test_commitWithoutBegin_persistsButDoesNotReloadOrReboot);
     RUN_TEST(test_abandonedTransaction_liveOnlyBatch_expiresWithoutReloadOrReboot);
