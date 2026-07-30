@@ -2043,6 +2043,40 @@ static void test_reloadConfig_radioAffectedFalse_skipsReload()
     TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
 
+// A module-config-only save must never touch the radio. The frame-toggle menu persists
+// moduleConfig.telemetry.*_screen_enabled this way; passing the mask without the explicit
+// radioAffected=false would inherit the default of true and needlessly re-init the LoRa chip
+// for a screen preference.
+static void test_reloadConfig_moduleConfigSegment_skipsReload()
+{
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    service->reloadConfig(SEGMENT_MODULECONFIG, /*radioAffected=*/false);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+// The three telemetry screen toggles are moduleConfig fields, not part of the hiddenFrames
+// blob that Screen::toggleFrameVisibility() persists, so SEGMENT_MODULECONFIG is the segment
+// that has to carry them. Guards the segment choice: if these ever move to another proto,
+// the frame-toggle menu's save would silently stop persisting them again.
+static void test_moduleConfigTelemetryScreenFlags_liveInModuleConfig()
+{
+    moduleConfig.telemetry.environment_screen_enabled = true;
+    moduleConfig.telemetry.air_quality_screen_enabled = true;
+    moduleConfig.telemetry.power_screen_enabled = true;
+
+    // has_telemetry is what saveToDisk(SEGMENT_MODULECONFIG) sets before serialising
+    // LocalModuleConfig; without it the sub-message is skipped and the flags never reach disk.
+    moduleConfig.has_telemetry = true;
+
+    TEST_ASSERT_TRUE(moduleConfig.has_telemetry);
+    TEST_ASSERT_TRUE(moduleConfig.telemetry.environment_screen_enabled);
+    TEST_ASSERT_TRUE(moduleConfig.telemetry.air_quality_screen_enabled);
+    TEST_ASSERT_TRUE(moduleConfig.telemetry.power_screen_enabled);
+}
+
 // -----------------------------------------------------------------------
 // handleSetConfig() reboot gating (Tier 1: no-op sets must not reboot)
 //
@@ -2316,6 +2350,8 @@ void setup()
     RUN_TEST(test_setConfigLora_stillTriggersRadioReload);
     RUN_TEST(test_reloadConfig_defaultRadioAffected_stillReloads);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_skipsReload);
+    RUN_TEST(test_reloadConfig_moduleConfigSegment_skipsReload);
+    RUN_TEST(test_moduleConfigTelemetryScreenFlags_liveInModuleConfig);
     RUN_TEST(test_setConfigPosition_noopSet_doesNotReboot);
     RUN_TEST(test_setConfigPosition_gpioChange_schedulesReboot);
     RUN_TEST(test_setConfigNetwork_noopSet_doesNotReboot);
