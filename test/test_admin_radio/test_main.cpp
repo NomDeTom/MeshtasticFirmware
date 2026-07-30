@@ -1877,6 +1877,7 @@ static void test_setChannel_primaryNameChangeWithPersistedHashSlot_reloadsRadio(
 {
     usePresetLongFast();
     config.lora.channel_num = 1;
+    // Native tests do not initialize the radio-derived default-slot flag.
     RadioInterface::uses_default_frequency_slot = true;
     sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1));
     ConfigChangedCounter counter;
@@ -3234,13 +3235,16 @@ static void test_abandonedTransaction_timerExpiresWithoutAdminTraffic()
 
 static void test_editTransactionTimer_isDormantUntilTransactionBegins()
 {
+    TEST_ASSERT_FALSE(testAdmin->editTransactionTimerEnabled());
     TEST_ASSERT_EQUAL_UINT32(INT32_MAX, testAdmin->editTransactionTimerInterval());
     TEST_ASSERT_EQUAL_INT32(INT32_MAX, testAdmin->runTransactionTimer());
 
     sendBeginEdit();
+    TEST_ASSERT_TRUE(testAdmin->editTransactionTimerEnabled());
     TEST_ASSERT_EQUAL_UINT32(60 * 1000, testAdmin->editTransactionTimerInterval());
 
     sendCommitEdit();
+    TEST_ASSERT_FALSE(testAdmin->editTransactionTimerEnabled());
     TEST_ASSERT_EQUAL_UINT32(INT32_MAX, testAdmin->editTransactionTimerInterval());
     TEST_ASSERT_EQUAL_INT32(INT32_MAX, testAdmin->runTransactionTimer());
 }

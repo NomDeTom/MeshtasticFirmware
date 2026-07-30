@@ -101,6 +101,7 @@ static void writeSecret(char *buf, size_t bufsz, const char *currentVal)
 
 template <size_t MaxSize> static NOINLINE bool protobufsEqual(const pb_msgdesc_t *fields, const void *left, const void *right)
 {
+    // NOINLINE limits peak stack use to this frame: two MaxSize encode buffers.
     uint8_t leftBytes[MaxSize], rightBytes[MaxSize];
     const size_t leftSize = pb_encode_to_bytes(leftBytes, sizeof(leftBytes), fields, left);
     const size_t rightSize = pb_encode_to_bytes(rightBytes, sizeof(rightBytes), fields, right);
@@ -120,6 +121,7 @@ static NOINLINE bool loraRadioConfigChanged(const meshtastic_Config_LoRaConfig &
     newEffective.hop_limit = oldEffective.hop_limit;
     newEffective.tx_enabled = oldEffective.tx_enabled;
     newEffective.override_duty_cycle = oldEffective.override_duty_cycle;
+    // The admin setter applies this immediately through RF95_FAN_EN where supported.
     newEffective.pa_fan_disabled = oldEffective.pa_fan_disabled;
     newEffective.ignore_incoming_count = oldEffective.ignore_incoming_count;
     memcpy(newEffective.ignore_incoming, oldEffective.ignore_incoming, sizeof(newEffective.ignore_incoming));
@@ -523,6 +525,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         }
         hasOpenEditTransaction = true;
         editTransactionActivityMs = millis();
+        enabled = true;
         setIntervalFromNow(EDIT_TRANSACTION_IDLE_MS);
         break;
     }
@@ -535,7 +538,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         const bool commitReboot = deferredShouldReboot, commitRadio = deferredRadioAffected;
         deferredShouldReboot = false;
         deferredRadioAffected = false;
-        setIntervalFromNow(INT32_MAX);
+        disable();
         if (commitReboot)
             disableBluetooth();
         saveChanges(SEGMENT_CONFIG | SEGMENT_MODULECONFIG | SEGMENT_DEVICESTATE | SEGMENT_CHANNELS | SEGMENT_NODEDATABASE,
@@ -2006,7 +2009,9 @@ void AdminModule::expireStaleEditTransaction()
     const bool expiredReboot = deferredShouldReboot, expiredRadio = deferredRadioAffected;
     deferredShouldReboot = false;
     deferredRadioAffected = false;
-    setIntervalFromNow(INT32_MAX);
+    disable();
+    // Boot-only changes must still take effect if the client disappears. Persisting without this
+    // reboot would leave runtime behavior out of sync with the stored configuration.
     if (expiredReboot)
         disableBluetooth();
     if (segments)
@@ -2018,7 +2023,7 @@ int32_t AdminModule::runOnce()
 {
     expireStaleEditTransaction();
     if (!hasOpenEditTransaction)
-        return INT32_MAX;
+        return disable();
 
     const uint32_t elapsed = millis() - editTransactionActivityMs;
     return elapsed < EDIT_TRANSACTION_IDLE_MS ? EDIT_TRANSACTION_IDLE_MS - elapsed : 1;
@@ -2040,6 +2045,7 @@ void AdminModule::saveChanges(int saveWhat, bool shouldReboot, bool radioAffecte
         deferredRadioAffected |= radioAffected;
         LOG_INFO("Delay save of changes to disk until the open transaction is committed");
         editTransactionActivityMs = millis(); // still in use, so not the abandoned kind we time out
+        enabled = true;
         setIntervalFromNow(EDIT_TRANSACTION_IDLE_MS);
         deferredEditSegments |= saveWhat;
         return;
@@ -2122,9 +2128,9 @@ void AdminModule::handleSetHamMode(const meshtastic_HamParameters &p)
 }
 
 AdminModule::AdminModule()
-    : ProtobufModule("Admin", meshtastic_PortNum_ADMIN_APP, &meshtastic_AdminMessage_msg),
-      concurrency::OSThread("AdminTimeout", INT32_MAX)
+    : ProtobufModule("Admin", meshtastic_PortNum_ADMIN_APP, &meshtastic_AdminMessage_msg), concurrency::OSThread("AdminTimeout")
 {
+    disable();
     // restrict to the admin channel for rx
     // boundChannel = Channels::adminChannel;
 }
