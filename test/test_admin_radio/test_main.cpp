@@ -1860,6 +1860,33 @@ static void test_setChannel_primaryNameChange_triggersRadioReload()
     TEST_ASSERT_EQUAL_INT(1, counter.count);
 }
 
+static void test_setChannel_primaryNameChangeWithExplicitFrequency_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    config.lora.override_frequency = 915.0f;
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1));
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "FieldTest", DEFAULT_KEY, 1));
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setChannel_primaryNameChangeWithPersistedHashSlot_reloadsRadio()
+{
+    usePresetLongFast();
+    config.lora.channel_num = 1;
+    RadioInterface::uses_default_frequency_slot = true;
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "LongFast", DEFAULT_KEY, 1));
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    sendSetChannel(makeChannel(0, meshtastic_Channel_Role_PRIMARY, "FieldTest", DEFAULT_KEY, 1));
+
+    TEST_ASSERT_EQUAL_INT(1, counter.count);
+}
+
 static void test_setChannel_noop_doesNotReloadRadio()
 {
     usePresetLongFast();
@@ -2087,6 +2114,42 @@ static void test_setConfigLora_noop_doesNotReloadRadio()
     sendSetConfig(c);
 
     TEST_ASSERT_FALSE(mockMeshService->lastRadioAffected);
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setConfigLora_policyOnlyChange_doesNotReloadRadio()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.hop_limit = config.lora.hop_limit + 1;
+    c.payload_variant.lora.ignore_mqtt = !config.lora.ignore_mqtt;
+    c.payload_variant.lora.config_ok_to_mqtt = !config.lora.config_ok_to_mqtt;
+    c.payload_variant.lora.override_duty_cycle = !config.lora.override_duty_cycle;
+    c.payload_variant.lora.ignore_incoming_count = 1;
+    c.payload_variant.lora.ignore_incoming[0] = 0x12345678;
+    sendSetConfig(c);
+
+    TEST_ASSERT_EQUAL_INT(0, counter.count);
+}
+
+static void test_setConfigLora_liveHardwareFields_dontReloadRadio()
+{
+    usePresetLongFast();
+    ConfigChangedCounter counter;
+    counter.observe(&service->configChanged);
+
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_lora_tag;
+    c.payload_variant.lora = config.lora;
+    c.payload_variant.lora.tx_enabled = !config.lora.tx_enabled;
+    c.payload_variant.lora.pa_fan_disabled = !config.lora.pa_fan_disabled;
+    sendSetConfig(c);
+
     TEST_ASSERT_EQUAL_INT(0, counter.count);
 }
 
@@ -2585,6 +2648,145 @@ static void sendSetModuleConfig(const meshtastic_ModuleConfig &mc)
     sendAdmin(m);
 }
 
+static void test_setModuleConfigMqtt_redactedSecretNoop_doesNotRebootOrDisableBluetooth()
+{
+    moduleConfig.has_mqtt = true;
+    moduleConfig.mqtt = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+    strncpy(moduleConfig.mqtt.password, "actual-password", sizeof(moduleConfig.mqtt.password) - 1);
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+    mc.payload_variant.mqtt = moduleConfig.mqtt;
+    strncpy(mc.payload_variant.mqtt.password, "sekrit", sizeof(mc.payload_variant.mqtt.password) - 1);
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_STRING("actual-password", moduleConfig.mqtt.password);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigSerial_noop_doesNotRebootOrDisableBluetooth()
+{
+    moduleConfig.has_serial = true;
+    moduleConfig.serial = meshtastic_ModuleConfig_SerialConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_serial_tag;
+    mc.payload_variant.serial = moduleConfig.serial;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigMqtt_realChangeRebootsAndDisablesBluetooth()
+{
+    moduleConfig.has_mqtt = true;
+    moduleConfig.mqtt = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+    mc.payload_variant.mqtt = moduleConfig.mqtt;
+    mc.payload_variant.mqtt.encryption_enabled = true;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_setModuleConfigSerial_realChangeRebootsAndDisablesBluetooth()
+{
+    moduleConfig.has_serial = true;
+    moduleConfig.serial = meshtastic_ModuleConfig_SerialConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_serial_tag;
+    mc.payload_variant.serial = moduleConfig.serial;
+    mc.payload_variant.serial.echo = true;
+    rebootAtMsec = 0;
+
+    sendSetModuleConfig(mc);
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_transaction_mqttNoop_keepsBluetoothUntilCommit()
+{
+    moduleConfig.has_mqtt = true;
+    moduleConfig.mqtt = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+    strncpy(moduleConfig.mqtt.password, "actual-password", sizeof(moduleConfig.mqtt.password) - 1);
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+    mc.payload_variant.mqtt = moduleConfig.mqtt;
+    strncpy(mc.payload_variant.mqtt.password, "sekrit", sizeof(mc.payload_variant.mqtt.password) - 1);
+
+    sendBeginEdit();
+    sendSetModuleConfig(mc);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+}
+
+static void test_transaction_mqttRealChange_disablesBluetoothAtCommit()
+{
+    moduleConfig.has_mqtt = true;
+    moduleConfig.mqtt = meshtastic_ModuleConfig_MQTTConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_mqtt_tag;
+    mc.payload_variant.mqtt = moduleConfig.mqtt;
+    mc.payload_variant.mqtt.encryption_enabled = true;
+    rebootAtMsec = 0;
+
+    sendBeginEdit();
+    sendSetModuleConfig(mc);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
+static void test_transaction_serialNoop_keepsBluetoothUntilCommit()
+{
+    moduleConfig.has_serial = true;
+    moduleConfig.serial = meshtastic_ModuleConfig_SerialConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_serial_tag;
+    mc.payload_variant.serial = moduleConfig.serial;
+
+    sendBeginEdit();
+    sendSetModuleConfig(mc);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+}
+
+static void test_transaction_serialRealChange_disablesBluetoothAtCommit()
+{
+    moduleConfig.has_serial = true;
+    moduleConfig.serial = meshtastic_ModuleConfig_SerialConfig_init_zero;
+    meshtastic_ModuleConfig mc = meshtastic_ModuleConfig_init_zero;
+    mc.which_payload_variant = meshtastic_ModuleConfig_serial_tag;
+    mc.payload_variant.serial = moduleConfig.serial;
+    mc.payload_variant.serial.echo = true;
+    rebootAtMsec = 0;
+
+    sendBeginEdit();
+    sendSetModuleConfig(mc);
+    TEST_ASSERT_EQUAL_UINT32(0, disableBluetoothCallCountForTest);
+    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+    sendCommitEdit();
+
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+}
+
 // The headline guard: favoriting a node inside a transaction must not reconfigure the radio when
 // the transaction commits. Outside a transaction the segment bitmask makes this unreachable; here
 // it is reachable, and only radioAffected=false keeps it shut.
@@ -2895,9 +3097,9 @@ static void test_abandonedTransaction_loraSet_stillReloadsRadioOnExpiry()
     TEST_ASSERT_EQUAL_INT(1, counter.count);
 }
 
-// Reboot is the one axis abandonment deliberately drops: the settings are already live in RAM and
-// the client that asked for the restart is, by definition, gone.
-static void test_abandonedTransaction_rebootingFieldDoesNotRebootOnExpiry()
+// Boot-only settings are not actually live in RAM. Expiry must finish the same reboot the commit
+// would have requested, or it persists a value that cannot take effect until some unrelated reboot.
+static void test_abandonedTransaction_rebootingFieldRebootsOnExpiry()
 {
     config.position.rx_gpio = 0; // a genuinely boot-only field, so the drop is a real drop
     rebootAtMsec = 0;
@@ -2913,7 +3115,28 @@ static void test_abandonedTransaction_rebootingFieldDoesNotRebootOnExpiry()
     sendGetDeviceMetadata();
 
     TEST_ASSERT_FALSE(testAdmin->editTransactionOpen());
-    TEST_ASSERT_EQUAL_UINT32(0, rebootAtMsec);
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
+}
+
+static void test_abandonedTransaction_timerExpiresWithoutAdminTraffic()
+{
+    config.position.rx_gpio = 0;
+    rebootAtMsec = 0;
+
+    sendBeginEdit();
+    meshtastic_Config c = meshtastic_Config_init_zero;
+    c.which_payload_variant = meshtastic_Config_position_tag;
+    c.payload_variant.position = config.position;
+    c.payload_variant.position.rx_gpio = 17;
+    sendSetConfig(c);
+
+    testAdmin->ageEditTransaction();
+    testAdmin->runTransactionTimer();
+
+    TEST_ASSERT_FALSE(testAdmin->editTransactionOpen());
+    TEST_ASSERT_NOT_EQUAL(0, rebootAtMsec);
+    TEST_ASSERT_EQUAL_UINT32(1, disableBluetoothCallCountForTest);
 }
 
 // Expiry must consume-and-clear the accumulated decisions, not just read them. A begin would reset
@@ -3093,6 +3316,8 @@ void setup()
     RUN_TEST(test_removeIgnoredNode_skipsRadioReload);
     RUN_TEST(test_toggleMutedNode_skipsRadioReload_butPersists);
     RUN_TEST(test_setChannel_primaryNameChange_triggersRadioReload);
+    RUN_TEST(test_setChannel_primaryNameChangeWithExplicitFrequency_doesNotReloadRadio);
+    RUN_TEST(test_setChannel_primaryNameChangeWithPersistedHashSlot_reloadsRadio);
     RUN_TEST(test_setChannel_noop_doesNotReloadRadio);
     RUN_TEST(test_setChannel_mqttFlagChange_doesNotReloadRadio);
     RUN_TEST(test_setChannel_pskChange_doesNotReloadRadio);
@@ -3107,6 +3332,8 @@ void setup()
     RUN_TEST(test_removeFixedPosition_skipsRadioReload);
     RUN_TEST(test_setConfigLora_realChange_triggersRadioReload);
     RUN_TEST(test_setConfigLora_noop_doesNotReloadRadio);
+    RUN_TEST(test_setConfigLora_policyOnlyChange_doesNotReloadRadio);
+    RUN_TEST(test_setConfigLora_liveHardwareFields_dontReloadRadio);
     RUN_TEST(test_reloadConfig_defaultRadioAffected_stillReloads);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_skipsReload);
     RUN_TEST(test_reloadConfig_radioAffectedFalse_isEquivalentToSaveToDisk);
@@ -3143,6 +3370,14 @@ void setup()
     // Edit-transaction deferral (the path phone apps use)
     RUN_TEST(test_transaction_favoriteNode_doesNotReloadRadioAtCommit);
     RUN_TEST(test_transaction_toggleMutedNode_doesNotReloadRadioAtCommit);
+    RUN_TEST(test_setModuleConfigMqtt_redactedSecretNoop_doesNotRebootOrDisableBluetooth);
+    RUN_TEST(test_setModuleConfigSerial_noop_doesNotRebootOrDisableBluetooth);
+    RUN_TEST(test_setModuleConfigMqtt_realChangeRebootsAndDisablesBluetooth);
+    RUN_TEST(test_setModuleConfigSerial_realChangeRebootsAndDisablesBluetooth);
+    RUN_TEST(test_transaction_mqttNoop_keepsBluetoothUntilCommit);
+    RUN_TEST(test_transaction_mqttRealChange_disablesBluetoothAtCommit);
+    RUN_TEST(test_transaction_serialNoop_keepsBluetoothUntilCommit);
+    RUN_TEST(test_transaction_serialRealChange_disablesBluetoothAtCommit);
     RUN_TEST(test_transaction_moduleConfigSet_doesNotReloadRadioAtCommit);
     RUN_TEST(test_transaction_positionGpsOffNestedSave_doesNotReloadRadioAtCommit);
     RUN_TEST(test_transaction_loraSet_stillReloadsRadioAtCommit);
@@ -3156,7 +3391,8 @@ void setup()
     RUN_TEST(test_commitWithoutBegin_persistsButDoesNotReloadOrReboot);
     RUN_TEST(test_abandonedTransaction_liveOnlyBatch_expiresWithoutReloadOrReboot);
     RUN_TEST(test_abandonedTransaction_loraSet_stillReloadsRadioOnExpiry);
-    RUN_TEST(test_abandonedTransaction_rebootingFieldDoesNotRebootOnExpiry);
+    RUN_TEST(test_abandonedTransaction_rebootingFieldRebootsOnExpiry);
+    RUN_TEST(test_abandonedTransaction_timerExpiresWithoutAdminTraffic);
     RUN_TEST(test_abandonedTransaction_flagsDoNotLeakIntoAStrayCommit);
 
     exit(UNITY_END());

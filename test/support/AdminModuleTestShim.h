@@ -37,6 +37,7 @@ class AdminModuleTestShim : public AdminModule
     bool editTransactionOpen() const { return hasOpenEditTransaction; }
     // Backdate past the idle window so a test sees an abandoned transaction without waiting it out.
     void ageEditTransaction() { editTransactionActivityMs = millis() - EDIT_TRANSACTION_IDLE_MS - 1; }
+    int32_t runTransactionTimer() { return runOnce(); }
 
     // Setters may allocate an error reply from packetPool; drain it each iteration or the pool leaks.
     void drainReply()
