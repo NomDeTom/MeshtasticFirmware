@@ -1599,11 +1599,8 @@ void menuHandler::manageNodeMenu()
         }
 
         if (selected == Mute) {
-            auto n = nodeDB->getMeshNode(menuHandler::pickedNodeNum);
-            if (!n) {
-                return;
-            }
-
+            // No lookup or null check here: toggleNodeMuted() resolves the node itself and returns
+            // without writing if it is unknown.
             toggleNodeMuted(menuHandler::pickedNodeNum);
             screen->setFrames(graphics::Screen::FOCUS_PRESERVE);
             return;
