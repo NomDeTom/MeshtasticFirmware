@@ -222,6 +222,7 @@ static void applyLoraRegion(meshtastic_Config_LoRaConfig_RegionCode region, bool
     if (gps != nullptr && !gps->isEnabled() && config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED)
         gps->enable();
 #endif
+    // TODO(radioAffected): audit
     service->reloadConfig(changes);
 }
 
@@ -398,6 +399,7 @@ void menuHandler::deviceRolePicker()
         } else if (selected == devicerole_tracker) {
             config.device.role = meshtastic_Config_DeviceConfig_Role_TRACKER;
         }
+        // TODO(radioAffected): audit
         service->reloadConfig(SEGMENT_CONFIG);
         rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
     };
@@ -471,6 +473,7 @@ void menuHandler::FrequencySlotPicker()
         }
 
         config.lora.channel_num = selected;
+        // TODO(radioAffected): audit
         service->reloadConfig(SEGMENT_CONFIG);
     };
 
@@ -527,6 +530,7 @@ static BannerOverlayOptions buildRegionPresetBanner()
         config.lora.modem_preset = static_cast<meshtastic_Config_LoRaConfig_ModemPreset>(selected);
         config.lora.channel_num = 0;        // Reset to default channel for the preset
         config.lora.override_frequency = 0; // Clear any custom frequency
+        // TODO(radioAffected): audit
         service->reloadConfig(SEGMENT_CONFIG);
     };
     return bannerOptions;
@@ -554,6 +558,7 @@ void menuHandler::twelveHourPicker()
         } else {
             config.display.use_12h_clock = false;
         }
+        // TODO(radioAffected): audit
         service->reloadConfig(SEGMENT_CONFIG);
     };
     screen->showOverlayBanner(bannerOptions);
@@ -658,6 +663,7 @@ void menuHandler::TZPicker()
             config.device.tzdef[sizeof(config.device.tzdef) - 1] = '\0';
 
             setenv("TZ", config.device.tzdef, 1);
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
         });
 
@@ -1688,6 +1694,7 @@ void menuHandler::nodeNameLengthMenu()
 
                                                        config.display.use_long_node_name = option.value;
                                                        saveUIConfig();
+                                                       // TODO(radioAffected): audit
                                                        service->reloadConfig(SEGMENT_CONFIG);
                                                        LOG_INFO("Setting names to %s", option.value ? "long" : "short");
                                                    });
@@ -1808,6 +1815,7 @@ void menuHandler::GPSToggleMenu()
                 playGPSDisableBeep();
                 gps->disable();
             }
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
         });
 
@@ -1867,6 +1875,7 @@ void menuHandler::GPSFormatMenu()
 
         uiconfig.gps_format = option.value;
         saveUIConfig();
+        // TODO(radioAffected): audit
         service->reloadConfig(SEGMENT_CONFIG);
     };
 
@@ -1912,11 +1921,13 @@ void menuHandler::GPSSmartPositionMenu()
         } else if (selected == 1) {
             config.position.position_broadcast_smart_enabled = true;
             saveUIConfig();
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
             rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         } else if (selected == 2) {
             config.position.position_broadcast_smart_enabled = false;
             saveUIConfig();
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
             rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         }
@@ -1972,6 +1983,7 @@ void menuHandler::GPSUpdateIntervalMenu()
 
         if (selected != 0) {
             saveUIConfig();
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
             rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         }
@@ -2062,6 +2074,7 @@ void menuHandler::GPSPositionBroadcastMenu()
 
         if (selected != 0) {
             saveUIConfig();
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
             rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         }
@@ -2138,6 +2151,7 @@ void menuHandler::BuzzerModeMenu()
     bannerOptions.optionsCount = 5;
     bannerOptions.bannerCallback = [](int selected) -> void {
         config.device.buzzer_mode = (meshtastic_Config_DeviceConfig_BuzzerMode)selected;
+        // TODO(radioAffected): audit
         service->reloadConfig(SEGMENT_CONFIG);
     };
     bannerOptions.InitialSelected = config.device.buzzer_mode;
@@ -2203,6 +2217,7 @@ void menuHandler::switchToMUIMenu()
         if (selected == 1) {
             config.display.displaymode = meshtastic_Config_DisplayConfig_DisplayMode_COLOR;
             config.bluetooth.enabled = false;
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
             rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         }
@@ -2375,11 +2390,13 @@ void menuHandler::wifiToggleMenu()
         if (selected == Wifi_disable) {
             config.network.wifi_enabled = false;
             config.bluetooth.enabled = true;
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
             rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         } else if (selected == Wifi_enable) {
             config.network.wifi_enabled = true;
             config.bluetooth.enabled = false;
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
             rebootAtMsec = (millis() + DEFAULT_REBOOT_SECONDS * 1000);
         }
@@ -2688,9 +2705,11 @@ void menuHandler::displayUnitsMenu()
     bannerOptions.bannerCallback = [](int selected) -> void {
         if (selected == MetricUnits) {
             config.display.units = meshtastic_Config_DisplayConfig_DisplayUnits_METRIC;
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
         } else if (selected == ImperialUnits) {
             config.display.units = meshtastic_Config_DisplayConfig_DisplayUnits_IMPERIAL;
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
         } else {
             menuHandler::menuQueue = menuHandler::ScreenOptionsMenu;
@@ -2713,10 +2732,12 @@ void menuHandler::messageBubblesMenu()
     bannerOptions.bannerCallback = [](int selected) -> void {
         if (selected == ShowBubbles) {
             config.display.enable_message_bubbles = true;
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
             LOG_INFO("Message bubbles enabled");
         } else if (selected == HideBubbles) {
             config.display.enable_message_bubbles = false;
+            // TODO(radioAffected): audit
             service->reloadConfig(SEGMENT_CONFIG);
             LOG_INFO("Message bubbles disabled");
         } else {
