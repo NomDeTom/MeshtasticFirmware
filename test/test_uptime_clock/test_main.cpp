@@ -220,13 +220,19 @@ void test_monotonic_reader_completes_while_publish_is_paused()
     while (!publishPaused.load(std::memory_order_acquire))
         std::this_thread::yield();
 
+    std::atomic<bool> readerStarted{false};
     std::atomic<bool> readerDone{false};
     uint64_t readerValue = 0;
-    std::thread reader([&readerDone, &readerValue]() {
+    std::thread reader([&readerStarted, &readerDone, &readerValue]() {
+        readerStarted.store(true, std::memory_order_release);
         readerValue = Time::getMillisMonotonic();
         readerDone.store(true, std::memory_order_release);
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    while (!readerStarted.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    while (!readerDone.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
     const bool completedWhilePaused = readerDone.load(std::memory_order_acquire);
 
     releasePublish.store(true, std::memory_order_release);
