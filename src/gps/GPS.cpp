@@ -9,6 +9,7 @@
 #include "NodeDB.h"
 #include "PowerMon.h"
 #include "Throttle.h"
+#include "UptimeClock.h"
 #include "buzz.h"
 #include "concurrency/Periodic.h"
 #include "gps/RTC.h"
@@ -347,11 +348,13 @@ GPS_RESPONSE GPS::getACK(const char *message, uint32_t waitMillis)
     uint8_t buffer[768] = {0};
     uint8_t b;
     int bytesRead = 0;
-    uint32_t startTimeout = millis() + waitMillis;
+    // Start stamp + interval rather than a stored deadline: same wrap-safety, but the full 49.7-day
+    // range instead of 24.8 days ahead, and Time::getMillis() makes the wait injectable.
+    const uint32_t waitStartMs = Time::getMillis();
 #ifdef GPS_DEBUG
     std::string debugmsg = "";
 #endif
-    while (millis() < startTimeout) {
+    while (Throttle::isWithinTimespanMs(waitStartMs, waitMillis)) {
         if (_serial_gps->available()) {
             b = _serial_gps->read();
 
@@ -1426,6 +1429,44 @@ void GPS::publishUpdate()
     }
 }
 
+/// Is a post-lock ephemeris hold currently in force?
+///
+/// Asked in this direction the sentinel answers itself: `fixHoldEnds == 0` is the *absence* of a
+/// deadline, so "no hold is in force" is its only honest reading. Asked as "has the hold expired?"
+/// 0 has no honest answer, and whichever guard you reach for silently picks one - that is how the
+/// re-arm site below broke: `fixHoldEnds != 0 &&` looks like the sentinel rule from AGENTS.md, but
+/// there it meant "a hold that was never armed can never expire", so nothing re-armed and the
+/// receiver stayed powered until the search timeout.
+///
+/// The `!= 0` test is not redundant with the arithmetic, though it looks it: deadlinePassed() is an
+/// unsigned half-range test, so past 2^31 ms of uptime the sentinel reads as a deadline ~24.9 days
+/// in the *future*.
+///
+/// Not static, and deliberately without a header: these live beside their only caller, and the
+/// native test build compiles this file, so test/test_gps_fix_hold/ declares the prototypes itself.
+bool fixHoldInForce(uint32_t fixHoldEnds, uint32_t threadIntervalMs)
+{
+    return fixHoldEnds != 0 && !Throttle::deadlinePassed(fixHoldEnds + threadIntervalMs);
+}
+
+/// Did an armed hold just expire, so the receiver should publish and sleep? The `!= 0` is the
+/// sentinel falling the other way: fixHoldInForce() reports an unarmed hold as "not in force", and
+/// negating that alone would call it expired on every cycle. No grace interval here - unlike the
+/// arm decision, the deadline itself is the moment to go down.
+bool holdJustExpired(uint32_t fixHoldEnds)
+{
+    return fixHoldEnds != 0 && !fixHoldInForce(fixHoldEnds, 0);
+}
+
+/// Should a post-lock ephemeris hold be (re-)armed this cycle? "No hold in force" is a reason to
+/// arm, and it is reached often: the hold is cleared by every publish, including the ones that do
+/// not put the receiver back to sleep.
+bool shouldArmFixHold(bool hasValidLocation, uint8_t prevFixQual, uint32_t fixHoldEnds, uint32_t threadIntervalMs)
+{
+    // First lock of a cycle, first lock after the receiver was off, or nothing holding right now.
+    return !hasValidLocation || prevFixQual == 0 || !fixHoldInForce(fixHoldEnds, threadIntervalMs);
+}
+
 int32_t GPS::runOnce()
 {
     if (!GPSInitFinished) {
@@ -1505,13 +1546,17 @@ int32_t GPS::runOnce()
             if (updateInterval <= GPS_UPDATE_ALWAYS_ON_THRESHOLD_MS) {
                 hasValidLocation = true;
                 shouldPublish = true;
-            } else if (!hasValidLocation || prev_fixQual == 0 || (fixHoldEnds + GPS_THREAD_INTERVAL) < millis()) {
+            } else if (shouldArmFixHold(hasValidLocation, prev_fixQual, fixHoldEnds, GPS_THREAD_INTERVAL)) {
                 hasValidLocation = true;
                 // Hold for up to 20secs after getting a lock to download ephemeris etc
                 uint32_t holdTime = updateInterval - GPS_UPDATE_ALWAYS_ON_THRESHOLD_MS;
                 if (holdTime > GPS_FIX_HOLD_MAX_MS)
                     holdTime = GPS_FIX_HOLD_MAX_MS;
-                fixHoldEnds = millis() + holdTime;
+                // Same clock the Throttle evaluation reads, and never the "no hold" sentinel.
+                // TODO(deadline-type): this remap is what Deadline::in() would own; fixHoldInForce()
+                // and holdJustExpired() are the two readings armed() would keep separate.
+                const uint32_t holdEnds = Time::getMillis() + holdTime;
+                fixHoldEnds = holdEnds == 0 ? 1 : holdEnds;
 #ifdef GPS_DEBUG
                 LOG_DEBUG("Holding for %ums after lock", holdTime);
 #endif
@@ -1533,7 +1578,7 @@ int32_t GPS::runOnce()
         }
 
         // Hold has expired , Search time has expired, we got a time only, or we never needed to hold.
-        bool holdExpired = (fixHoldEnds != 0 && millis() > fixHoldEnds);
+        bool holdExpired = holdJustExpired(fixHoldEnds);
         if (shouldPublish || tooLong || holdExpired) {
             if (gotTime && hasValidLocation) {
                 shouldPublish = true;
@@ -1550,7 +1595,7 @@ int32_t GPS::runOnce()
 
 #ifdef GPS_DEBUG
         } else if (fixHoldEnds != 0) {
-            LOG_DEBUG("Holding for GPS data download: %d ms (numSats=%d)", fixHoldEnds - millis(), p.sats_in_view);
+            LOG_DEBUG("Holding for GPS data download: %d ms (numSats=%d)", fixHoldEnds - Time::getMillis(), p.sats_in_view);
 #endif
         }
     }

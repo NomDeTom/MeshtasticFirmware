@@ -66,6 +66,8 @@ class AirTime : private concurrency::OSThread
     bool firstTime = true;
     uint8_t lastUtilPeriod = 0;
     uint8_t lastUtilPeriodTX = 0;
+    // Time::getUptimeSecs() checkpoint at the last window rotation, so windows stay correct
+    // even if the scheduler was paused by light sleep.
     uint32_t secSinceBoot = 0;
     uint8_t max_channel_util_percent = 40;
     uint8_t polite_channel_util_percent = 25;
@@ -81,6 +83,8 @@ class AirTime : private concurrency::OSThread
     uint8_t getPeriodUtilMinute();
     uint8_t getPeriodUtilHour();
     uint8_t currentPeriodIndex();
+    // Advance rolling airtime windows from monotonic uptime, not from runOnce() calls.
+    void syncNow();
 
   protected:
     virtual int32_t runOnce() override;

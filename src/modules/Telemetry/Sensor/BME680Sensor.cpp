@@ -7,6 +7,8 @@
 #include "FSCommon.h"
 #include "SPILock.h"
 #include "TelemetrySensor.h"
+#include "UptimeClock.h"
+#include "mesh/Throttle.h"
 
 #if __has_include(<Adafruit_BME680.h>)
 #include <cmath>
@@ -163,7 +165,8 @@ void BME680Sensor::updateState()
         }
     } else {
         /* Update every STATE_SAVE_PERIOD minutes */
-        if ((stateUpdateCounter * STATE_SAVE_PERIOD) < millis()) {
+        // Interval since the last save; counter * period overflows uint32 past ~198 saves.
+        if (Throttle::hasElapsed(lastStateSaveMs, STATE_SAVE_PERIOD)) {
             LOG_DEBUG("%s state update every %d minutes", sensorName, STATE_SAVE_PERIOD / 60000);
             update = true;
             stateUpdateCounter++;
@@ -181,6 +184,9 @@ void BME680Sensor::updateState()
             file.write((uint8_t *)&bsecState, BSEC_MAX_STATE_BLOB_SIZE);
             file.flush();
             file.close();
+            // Checkpoint on success only: stamping at the interval test left the first save at 0
+            // (next save timed from boot) and deferred the retry a full period after a failed write.
+            lastStateSaveMs = Time::getMillis();
         } else {
             LOG_INFO("Can't write %s state (File: %s)", sensorName, bsecConfigFileName);
         }
