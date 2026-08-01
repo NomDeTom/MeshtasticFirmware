@@ -39,19 +39,20 @@ void resetMonotonicForTests();
 void setMonotonicPublishHookForTests(MonotonicPublishHook hook);
 #endif
 
-/// Milliseconds since boot, 32-bit (wraps ~49.7 days). Drop-in for millis(), and the only clock
-/// read here that is safe from an ISR. For "has this interval elapsed / deadline arrived" use
-/// Throttle (isWithinTimespanMs / hasElapsed / deadlinePassed), which is wrap-correct with no
-/// carry state at all.
+/// Milliseconds since boot, 32-bit (wraps ~49.7 days). Drop-in for millis(). For "has this interval
+/// elapsed / deadline arrived" use Throttle (isWithinTimespanMs / hasElapsed / deadlinePassed),
+/// which is wrap-correct with no carry state at all.
 uint32_t getMillis();
 
 /// Milliseconds since boot as a monotonic 64-bit count.
 ///
 /// A pure read: it derives its answer from a complete snapshot published by serviceMonotonic()
 /// plus the unsigned elapsed time since that snapshot, which is exact across the wrap. A reader
-/// that preempts publication uses the previous snapshot instead of waiting for the writer.
+/// that preempts publication uses the previous snapshot. If publication completes during a copy,
+/// the reader retries; it never waits for a publish in progress.
 ///
-/// Not intended for ISR call sites; they use getMillis().
+/// Not intended for ISR call sites because lock-free std::atomic operations are not guaranteed by
+/// every supported toolchain. ISRs use getMillis(); the publication protocol itself never waits.
 uint64_t getMillisMonotonic();
 
 /// Whole seconds since boot, derived from getMillisMonotonic() (~136 years of range). This is

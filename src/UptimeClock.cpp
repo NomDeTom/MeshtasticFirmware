@@ -19,6 +19,7 @@ struct PublishedSnapshot {
     std::atomic<uint32_t> low{0};
 };
 
+// The constexpr atomic initializers make both snapshots available before firmware startup.
 PublishedSnapshot published[2];
 std::atomic<uint32_t> publishedGeneration{0};
 #ifdef PIO_UNIT_TESTING
