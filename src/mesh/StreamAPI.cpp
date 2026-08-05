@@ -72,53 +72,58 @@ bool StreamAPI::writeStream()
     return len != 0;
 }
 
+/// Advance the framed ToRadio receive state machine by one byte.
+///
+/// The single copy of the parser: both byte sources (the stream and a caller-supplied buffer) feed
+/// it one byte at a time, so a framing fix lands once rather than needing to be applied twice.
+void StreamAPI::feedRxByte(uint8_t c)
+{
+    // Use the read pointer for a little state machine, first look for framing, then length bytes, then payload
+    size_t ptr = rxPtr;
+
+    rxPtr++;        // assume we will probably advance the rxPtr
+    rxBuf[ptr] = c; // store all bytes (including framing)
+
+    // console->printf("rxPtr %d ptr=%d c=0x%x\n", rxPtr, ptr, c);
+
+    if (ptr == 0) { // looking for START1
+        if (c != START1)
+            rxPtr = 0;     // failed to find framing
+    } else if (ptr == 1) { // looking for START2
+        if (c != START2)
+            rxPtr = 0;                             // failed to find framing
+    } else if (ptr >= HEADER_LEN - 1) {            // we have at least read our 4 byte framing
+        uint32_t len = (rxBuf[2] << 8) + rxBuf[3]; // big endian 16 bit length follows framing
+
+        // console->printf("len %d\n", len);
+
+        if (ptr == HEADER_LEN - 1) {
+            // we _just_ finished our 4 byte header, validate length now (note: a length of zero is a valid
+            // protobuf also)
+            if (len > MAX_TO_FROM_RADIO_SIZE)
+                rxPtr = 0; // length is bogus, restart search for framing
+        }
+
+        if (rxPtr != 0)                        // Is packet still considered 'good'?
+            if (ptr + 1 >= len + HEADER_LEN) { // have we received all of the payload?
+                rxPtr = 0;                     // start over again on the next packet
+
+                // If we didn't just fail the packet and we now have the right # of bytes, parse it
+                handleToRadio(rxBuf + HEADER_LEN, len);
+            }
+    }
+}
+
 /// Parse supplied bytes through the framed ToRadio receive state machine.
 int32_t StreamAPI::handleRecStream(const char *buf, uint16_t bufLen)
 {
-    uint16_t index = 0;
-    while (bufLen > index) { // Currently we never want to block
-        int cInt = buf[index++];
-        if (cInt < 0)
-            break; // We ran out of characters (even though available said otherwise) - this can happen on rf52 adafruit
-                   // arduino
+    // No end-of-input check here: unlike stream->read(), indexing a caller's buffer cannot report
+    // exhaustion. The stream version's `< 0` test used to be duplicated into this loop, where a
+    // signed `char` made it fire on any byte with the high bit set - START1 (0x94) among them, so
+    // on a signed-char target the parser rejected every frame at its first byte.
+    for (uint16_t index = 0; index < bufLen; index++)
+        feedRxByte((uint8_t)buf[index]);
 
-        uint8_t c = (uint8_t)cInt;
-
-        // Use the read pointer for a little state machine, first look for framing, then length bytes, then payload
-        size_t ptr = rxPtr;
-
-        rxPtr++;        // assume we will probably advance the rxPtr
-        rxBuf[ptr] = c; // store all bytes (including framing)
-
-        // console->printf("rxPtr %d ptr=%d c=0x%x\n", rxPtr, ptr, c);
-
-        if (ptr == 0) { // looking for START1
-            if (c != START1)
-                rxPtr = 0;     // failed to find framing
-        } else if (ptr == 1) { // looking for START2
-            if (c != START2)
-                rxPtr = 0;                             // failed to find framing
-        } else if (ptr >= HEADER_LEN - 1) {            // we have at least read our 4 byte framing
-            uint32_t len = (rxBuf[2] << 8) + rxBuf[3]; // big endian 16 bit length follows framing
-
-            // console->printf("len %d\n", len);
-
-            if (ptr == HEADER_LEN - 1) {
-                // we _just_ finished our 4 byte header, validate length now (note: a length of zero is a valid
-                // protobuf also)
-                if (len > MAX_TO_FROM_RADIO_SIZE)
-                    rxPtr = 0; // length is bogus, restart search for framing
-            }
-
-            if (rxPtr != 0)                        // Is packet still considered 'good'?
-                if (ptr + 1 >= len + HEADER_LEN) { // have we received all of the payload?
-                    rxPtr = 0;                     // start over again on the next packet
-
-                    // If we didn't just fail the packet and we now have the right # of bytes, parse it
-                    handleToRadio(rxBuf + HEADER_LEN, len);
-                }
-        }
-    }
     return 0;
 }
 
@@ -138,42 +143,7 @@ int32_t StreamAPI::readStream()
                 break; // We ran out of characters (even though available said otherwise) - this can happen on rf52 adafruit
                        // arduino
 
-            uint8_t c = (uint8_t)cInt;
-
-            // Use the read pointer for a little state machine, first look for framing, then length bytes, then payload
-            size_t ptr = rxPtr;
-
-            rxPtr++;        // assume we will probably advance the rxPtr
-            rxBuf[ptr] = c; // store all bytes (including framing)
-
-            // console->printf("rxPtr %d ptr=%d c=0x%x\n", rxPtr, ptr, c);
-
-            if (ptr == 0) { // looking for START1
-                if (c != START1)
-                    rxPtr = 0;     // failed to find framing
-            } else if (ptr == 1) { // looking for START2
-                if (c != START2)
-                    rxPtr = 0;                             // failed to find framing
-            } else if (ptr >= HEADER_LEN - 1) {            // we have at least read our 4 byte framing
-                uint32_t len = (rxBuf[2] << 8) + rxBuf[3]; // big endian 16 bit length follows framing
-
-                // console->printf("len %d\n", len);
-
-                if (ptr == HEADER_LEN - 1) {
-                    // we _just_ finished our 4 byte header, validate length now (note: a length of zero is a valid
-                    // protobuf also)
-                    if (len > MAX_TO_FROM_RADIO_SIZE)
-                        rxPtr = 0; // length is bogus, restart search for framing
-                }
-
-                if (rxPtr != 0)                        // Is packet still considered 'good'?
-                    if (ptr + 1 >= len + HEADER_LEN) { // have we received all of the payload?
-                        rxPtr = 0;                     // start over again on the next packet
-
-                        // If we didn't just fail the packet and we now have the right # of bytes, parse it
-                        handleToRadio(rxBuf + HEADER_LEN, len);
-                    }
-            }
+            feedRxByte((uint8_t)cInt);
         }
 
         // we had bytes available this time, so assume we might have them next time also

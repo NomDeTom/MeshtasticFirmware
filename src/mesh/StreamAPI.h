@@ -68,6 +68,9 @@ class StreamAPI : public PhoneAPI
     int32_t readStream(const char *buf, uint16_t bufLen);
     int32_t handleRecStream(const char *buf, uint16_t bufLen);
 
+    /// Advance the framed receive state machine by one byte; the only copy of the parser.
+    void feedRxByte(uint8_t c);
+
     /// Emit a slice of pending output. True asks the caller to come straight back; false covers
     /// both a drained queue and backpressure, so it does not mean the queue is empty.
     bool writeStream();
