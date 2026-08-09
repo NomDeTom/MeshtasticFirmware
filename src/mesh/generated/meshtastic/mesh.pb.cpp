@@ -27,6 +27,12 @@ PB_BIND(meshtastic_KeyVerification, meshtastic_KeyVerification, AUTO)
 PB_BIND(meshtastic_StoreForwardPlusPlus, meshtastic_StoreForwardPlusPlus, 2)
 
 
+PB_BIND(meshtastic_SfppPeerBinding, meshtastic_SfppPeerBinding, AUTO)
+
+
+PB_BIND(meshtastic_SfppCatchUpRequest, meshtastic_SfppCatchUpRequest, AUTO)
+
+
 PB_BIND(meshtastic_RemoteShell, meshtastic_RemoteShell, AUTO)
 
 

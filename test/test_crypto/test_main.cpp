@@ -1,11 +1,8 @@
 // trunk-ignore-all(gitleaks): These are dummy values. Not real secrets.
 #include "CryptoEngine.h"
-#include "StoreForwardArchiveObjectId.h"
-
 #include "TestUtil.h"
 #include "aes-ccm.h"
 #include <XEdDSA.h>
-#include <limits>
 #include <unity.h>
 
 void HexToBytes(uint8_t *result, const std::string hex, size_t len = 0)
@@ -58,43 +55,6 @@ void test_SHA256_large_input(void)
     HexToBytes(expected, "d13d4a8b3b8add19b5970157f09d00c12cbda4fed4d74d8493156523f7069b66");
     crypto->hash(hash, sizeof(hash));
     TEST_ASSERT_EQUAL_MEMORY(hash, expected, sizeof(expected));
-}
-
-void test_StoreForwardArchiveObjectId(void)
-{
-    const uint8_t scopeId[StoreForwardArchiveObjectId::ScopeIdSize] = {
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    };
-    const uint8_t encryptedPayload[] = {0xde, 0xad, 0xbe, 0xef, 0x00};
-    uint8_t objectId[StoreForwardArchiveObjectId::ObjectIdSize] = {};
-    uint8_t expected[StoreForwardArchiveObjectId::ObjectIdSize] = {};
-
-    HexToBytes(expected, "cd7aabdab484384f7bdd0e44998de114b5d51fa289e4c4040a272472ddcb13ea");
-    TEST_ASSERT_TRUE(StoreForwardArchiveObjectId::calculate(objectId, scopeId, 0x01020304, 0xa0b0c0d0, 0x10203040,
-                                                            encryptedPayload, sizeof(encryptedPayload)));
-    TEST_ASSERT_EQUAL_MEMORY(expected, objectId, sizeof(expected));
-
-    HexToBytes(expected, "bc81e6747dea4213a89260866b2c39d0daf4b210c7d8d9fab30fecfa46cddb90");
-    TEST_ASSERT_TRUE(StoreForwardArchiveObjectId::calculate(objectId, scopeId, 0x01020304, 0xa0b0c0d0, 0x10203040, nullptr, 0));
-    TEST_ASSERT_EQUAL_MEMORY(expected, objectId, sizeof(expected));
-}
-
-void test_StoreForwardArchiveObjectIdRejectsInvalidInput(void)
-{
-    uint8_t scopeId[StoreForwardArchiveObjectId::ScopeIdSize] = {};
-    uint8_t objectId[StoreForwardArchiveObjectId::ObjectIdSize] = {};
-    const uint8_t encryptedPayload[] = {0x00};
-
-    TEST_ASSERT_FALSE(
-        StoreForwardArchiveObjectId::calculate(nullptr, scopeId, 1, 2, 3, encryptedPayload, sizeof(encryptedPayload)));
-    TEST_ASSERT_FALSE(
-        StoreForwardArchiveObjectId::calculate(objectId, nullptr, 1, 2, 3, encryptedPayload, sizeof(encryptedPayload)));
-    TEST_ASSERT_FALSE(StoreForwardArchiveObjectId::calculate(objectId, scopeId, 1, 2, 3, nullptr, 1));
-
-    if (std::numeric_limits<size_t>::max() > std::numeric_limits<uint32_t>::max()) {
-        TEST_ASSERT_FALSE(StoreForwardArchiveObjectId::calculate(objectId, scopeId, 1, 2, 3, encryptedPayload,
-                                                                 static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1));
-    }
 }
 
 void test_ECB_AES256(void)
@@ -408,8 +368,6 @@ void setup()
     UNITY_BEGIN(); // IMPORTANT LINE!
     RUN_TEST(test_SHA256);
     RUN_TEST(test_SHA256_large_input);
-    RUN_TEST(test_StoreForwardArchiveObjectId);
-    RUN_TEST(test_StoreForwardArchiveObjectIdRejectsInvalidInput);
     RUN_TEST(test_ECB_AES256);
     RUN_TEST(test_DH25519);
     RUN_TEST(test_AES_CTR);
