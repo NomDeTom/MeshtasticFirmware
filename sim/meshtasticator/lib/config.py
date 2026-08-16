@@ -1,0 +1,575 @@
+from enum import Enum
+
+class Config:
+
+    class ROUTER_TYPE(Enum):
+        MANAGED_FLOOD = 'MANAGED_FLOOD'
+
+    def __init__(self):
+        self.MODEL = 5  # Path loss model to use (see README)
+
+        self.XSIZE = 15000  # horizontal size of the area to simulate in m
+        self.YSIZE = 15000  # vertical size of the area to simulate in m
+        self.OX = 0.0  # origin x-coordinate
+        self.OY = 0.0  # origin y-coordinate
+        self.MINDIST = 10  # minimum distance between each node in the area in m
+
+        self.GL = 0  # antenna gain of each node in dBi
+        self.HM = 1.0  # height of each node in m
+
+        ### Meshtastic specific ###
+        self.hopLimit = 3  # default 3
+        self.router = False  # set role of each node as router (True) or normal client (False)
+        self.maxRetransmission = 3  # default 3 -- not configurable by Meshtastic
+        ### End of Meshtastic specific ###
+
+        self.ONE_SECOND_INTERVAL = 1000
+        self.TEN_SECONDS_INTERVAL = self.ONE_SECOND_INTERVAL * 10
+        self.ONE_MIN_INTERVAL = self.TEN_SECONDS_INTERVAL * 6
+        self.ONE_HR_INTERVAL = self.ONE_MIN_INTERVAL * 60
+
+        ### Discrete-event specific ###
+        self.ENABLE_CONNECTIVITY_MAP = True # use the connectivity map optimization
+        self.CONNECTIVITY_MAP_RSSI_MARGIN = 8
+
+        self.MODEM_PRESET = "LONG_FAST"  # LoRa modem preset to use (default LONG_FAST matches firmware)
+        self.PERIOD = 100 * self.ONE_SECOND_INTERVAL  # mean period of generating a new message with exponential distribution in ms
+        self.PACKETLENGTH = 40  # payload in bytes
+        self.SIMTIME = 30 * self.ONE_MIN_INTERVAL  # duration of one simulation in ms
+        self.INTERFERENCE_LEVEL = 0.05  # chance that at a given moment there is already a LoRa packet being sent on your channel, outside of the Meshtastic traffic. Given in a ratio from 0 to 1.
+        self.COLLISION_DUE_TO_INTERFERENCE = False
+        self.CAPTURE_COLLISION_MODEL_ENABLED = False
+        self.COLLISION_CAPTURE_THRESHOLD_DB = 6.0
+        self.COLLISION_PAYLOAD_OVERLAP_LOSS_FRACTION = 0.15
+        self.DMs = False  # Set True for sending DMs (with random destination), False for broadcasts
+
+        #################################################
+        ####### DYNAMIC CODING RATE #####################
+        #################################################
+        # Disabled by default so historical simulations keep the preset CR.
+        # When enabled, the node chooses CR 4/5..4/8 per packet immediately
+        # before TX, after queueing and listen-before-talk have settled.
+        self.DCR_ENABLED = False
+        self.DCR_MIN_CR = 5
+        self.DCR_MAX_CR = 8
+        self.DCR_USER_MIN_CR = 5
+        # Limit non-urgent CR8 airtime as a share of this node's own TX airtime.
+        # This is a mesh-behavior safety rail, separate from region duty cycle.
+        self.DCR_CR8_AIRTIME_LIMIT_PERCENT = 10.0
+        # Local utilization thresholds are deliberately not regulatory limits.
+        # `_selected_region_duty_limit()` in lib.dcr compares against region
+        # duty cycle only when the selected region actually has one.
+        self.DCR_IDLE_UTIL_PERCENT = 2.0
+        self.DCR_BUSY_UTIL_PERCENT = 7.0
+        self.DCR_CONGESTED_UTIL_PERCENT = 17.5
+        self.DCR_BUSY_QUEUE_DEPTH = 3
+        self.DCR_CONGESTED_QUEUE_DEPTH = 6
+
+        #################################################
+        ####### DYNAMIC TX POWER ########################
+        #################################################
+        # Disabled by default. DTP is deliberately a power-reduction policy,
+        # not an alternate way to exceed region limits. PTX remains the maximum;
+        # DTP only lowers individual relay/control packets to shrink their
+        # interference radius in dense capture-collision experiments.
+        self.DTP_ENABLED = False
+        self.DTP_MAX_POWER_DROP_DB = 12
+        self.DTP_POWER_STEP_DB = 3
+        self.DTP_MIN_TX_POWER_DBM = None
+        self.DTP_STRONG_LINK_MARGIN_DB = 20.0
+        self.DTP_VERY_STRONG_LINK_MARGIN_DB = 24.0
+        # from firmware RegionInfo regions[] in src/mesh/RadioInterface.cpp
+        self.regions = {
+            "US": {
+                "freq_start": 902.0e6,
+                "freq_end": 928.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 30,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "EU_433": {
+                "freq_start": 433.0e6,
+                "freq_end": 434.0e6,
+                "duty_cycle": 10,
+                "spacing": 0,
+                "power_limit": 10,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "EU_868": {
+                "freq_start": 869.4e6,
+                "freq_end": 869.65e6,
+                "duty_cycle": 10,
+                "spacing": 0,
+                "power_limit": 27,
+                "audio_permitted": False,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "CN": {
+                "freq_start": 470.0e6,
+                "freq_end": 510.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 19,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "JP": {
+                "freq_start": 920.5e6,
+                "freq_end": 923.5e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 13,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "ANZ": {
+                "freq_start": 915.0e6,
+                "freq_end": 928.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 30,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "ANZ_433": {
+                "freq_start": 433.05e6,
+                "freq_end": 434.79e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 14,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "RU": {
+                "freq_start": 868.7e6,
+                "freq_end": 869.2e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 20,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "KR": {
+                "freq_start": 920.0e6,
+                "freq_end": 923.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 23,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "TW": {
+                "freq_start": 920.0e6,
+                "freq_end": 925.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 27,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "IN": {
+                "freq_start": 865.0e6,
+                "freq_end": 867.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 30,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "NZ_865": {
+                "freq_start": 864.0e6,
+                "freq_end": 868.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 36,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "TH": {
+                "freq_start": 920.0e6,
+                "freq_end": 925.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 16,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "UA_433": {
+                "freq_start": 433.0e6,
+                "freq_end": 434.7e6,
+                "duty_cycle": 10,
+                "spacing": 0,
+                "power_limit": 10,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "UA_868": {
+                "freq_start": 868.0e6,
+                "freq_end": 868.6e6,
+                "duty_cycle": 1,
+                "spacing": 0,
+                "power_limit": 14,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "MY_433": {
+                "freq_start": 433.0e6,
+                "freq_end": 435.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 20,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "MY_919": {
+                "freq_start": 919.0e6,
+                "freq_end": 924.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 27,
+                "audio_permitted": True,
+                "frequency_switching": True,
+                "wide_lora": False
+            },
+            "SG_923": {
+                "freq_start": 917.0e6,
+                "freq_end": 925.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 20,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "PH_433": {
+                "freq_start": 433.0e6,
+                "freq_end": 434.7e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 10,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "PH_868": {
+                "freq_start": 868.0e6,
+                "freq_end": 869.4e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 14,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "PH_915": {
+                "freq_start": 915.0e6,
+                "freq_end": 918.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 24,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "KZ_433": {
+                "freq_start": 433.075e6,
+                "freq_end": 434.775e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 10,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "KZ_863": {
+                "freq_start": 863.0e6,
+                "freq_end": 868.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 30,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "NP_865": {
+                "freq_start": 865.0e6,
+                "freq_end": 868.0e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 30,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "BR_902": {
+                "freq_start": 902.0e6,
+                "freq_end": 907.5e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 30,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": False
+            },
+            "LORA_24": {
+                "freq_start": 2400.0e6,
+                "freq_end": 2483.5e6,
+                "duty_cycle": 100,
+                "spacing": 0,
+                "power_limit": 10,
+                "audio_permitted": True,
+                "frequency_switching": False,
+                "wide_lora": True
+            },
+        }
+        self.REGION = self.regions["US"]  # Select a different region here
+        self.CHANNEL_NUM = 27  # Channel number
+
+        self.GUI_ENABLED = True # whether to update/save the Tk/Matplotlib node-placement graph during CLI simulation
+        self.PLOT = True # whether to plot the time schedule of packets after the simulation
+        ### End of discrete-event specific ###
+
+        ### PHY parameters (normally no change needed) ###
+        self.PTX = self.REGION["power_limit"]
+
+        # Modem presets from firmware RadioInterface::applyModemConfig() in src/mesh/RadioInterface.cpp
+        # minimum sensitivity from https://www.rfwireless-world.com/calculators/LoRa-Sensitivity-Calculator.html, using a Noise Figure (NF) of 6dB
+        # minimum received power for CAD: 3dB less than sensitivity
+        # TODO: the 'bw' parameter is changed based on the region's 'wide_lora' setting. Implement this.
+        # Note: we store bandwidth here in Hz, but the firmware uses KHz.
+        self.MODEM_PRESETS = {
+            "SHORT_TURBO": {
+                "bw": 500e3,
+                "cr": 5,
+                "sf": 7,
+                "sensitivity": -118.5,
+                "cad_threshold": -121.5
+            },
+            "SHORT_FAST": {
+                "bw": 250e3,
+                "cr": 5,
+                "sf": 7,
+                "sensitivity": -121.5,
+                "cad_threshold": -124.5
+            },
+            "SHORT_SLOW": {
+                "bw": 250e3,
+                "cr": 5,
+                "sf": 8,
+                "sensitivity": -124.0,
+                "cad_threshold": -127.0
+            },
+            "MEDIUM_FAST": {
+                "bw": 250e3,
+                "cr": 5,
+                "sf": 9,
+                "sensitivity": -126.5,
+                "cad_threshold": -129.5
+            },
+            "MEDIUM_SLOW": {
+                "bw": 250e3,
+                "cr": 5,
+                "sf": 10,
+                "sensitivity": -129.0,
+                "cad_threshold": -132.0
+            },
+            "LONG_TURBO": {
+                "bw": 500e3,
+                "cr": 8,
+                "sf": 11,
+                "sensitivity": -128.5,
+                "cad_threshold": -131.5
+            },
+            "LONG_FAST": {
+                "bw": 250e3,
+                "cr": 5,
+                "sf": 11,
+                "sensitivity": -131.5,
+                "cad_threshold": -134.5
+            },
+            "LONG_MODERATE": {
+                "bw": 125e3,
+                "cr": 8,
+                "sf": 11,
+                "sensitivity": -134.5,
+                "cad_threshold": -137.5
+            },
+            "LONG_SLOW": {
+                "bw": 125e3,
+                "cr": 8,
+                "sf": 12,
+                "sensitivity": -137.0,
+                "cad_threshold": -140.0
+            },
+            # It doesn't appear like this is a preset that actually exists in the firmware now?
+            "VERY_LONG_SLOW": {
+                "bw": 62.5e3,
+                "sf": 12,
+                "cr": 8,
+                "sensitivity": -140.0,
+                "cad_threshold": -143.0
+            }
+        }
+
+        self.FREQ = self.REGION["freq_start"] + self.MODEM_PRESETS[self.MODEM_PRESET]["bw"] * self.CHANNEL_NUM
+        self.HEADERLENGTH = 16  # number of Meshtastic header bytes
+        self.ACKLENGTH = 2  # ACK payload in bytes
+        self.NOISE_LEVEL = -119.25  # some noise level in dB, based on SNR_MIN and minimum receiver sensitivity
+        self.GAMMA = 2.08  # PHY parameter
+        self.D0 = 40.0  # PHY parameter
+        self.LPLD0 = 127.41  # PHY parameter
+        # Optional scenario-level calibration knobs. Defaults preserve the old
+        # simulator behavior; field presets can tighten these to match
+        # aggregate receive observations without changing generic simulations.
+        self.PATH_LOSS_DISTANCE_FLOOR_M = 0.001
+        self.REPORTED_SNR_MIN_DB = None
+        self.REPORTED_SNR_MAX_DB = None
+        self.LINK_CALIBRATION_MODEL_ENABLED = False
+        self.LINK_CALIBRATION_COEFFICIENTS = {}
+        self.LINK_CALIBRATION_SNR_MIN_DB = None
+        self.LINK_CALIBRATION_SNR_MAX_DB = None
+        self.NPREAM = 16   # number of preamble symbols from RadioInterface.h
+        ### End of PHY parameters ###
+
+        #################################################
+        ####### TERRAIN OBSTRUCTION MODEL ###############
+        #################################################
+        # Disabled by default. When enabled, TERRAIN_GRID holds an in-memory
+        # grid sampled from SRTM HGT tiles.
+        self.TERRAIN_ENABLED = False
+        self.TERRAIN_GRID = None
+        # "ground": Point.z is antenna height above local ground.
+        # "sea_level": Point.z is absolute antenna altitude after adding
+        # terrain ground elevation.
+        self.NODE_Z_REFERENCE = "ground"
+        self.GEO_ORIGIN_LAT = None
+        self.GEO_ORIGIN_LON = None
+        self.TERRAIN_PROFILE_SAMPLES = 24
+        self.TERRAIN_FRESNEL_CLEARANCE = 0.6
+        # Match the common radio-planning 4/3 Earth-radius approximation. The
+        # terrain model uses it as an earth-bulge term so long coastal and ridge
+        # links do not look unrealistically flat.
+        self.TERRAIN_EFFECTIVE_EARTH_RADIUS_MULTIPLIER = 4.0 / 3.0
+        self.TERRAIN_MIN_ANTENNA_HEIGHT_M = 1.5
+        self.TERRAIN_MAX_LOSS_DB = 35.0
+
+        #################################################
+        ####### LAND-COVER CLUTTER MODEL ################
+        #################################################
+        # Optional excess loss from buildings/land use. This is intentionally
+        # separate from terrain: hills can be visible while low urban fabric
+        # still blocks balcony-to-balcony links.
+        self.CLUTTER_ENABLED = False
+        self.CLUTTER_GRID_FILE = None
+        self.CLUTTER_PROFILE_SAMPLES = 16
+        self.CLUTTER_URBAN_LOSS_DB_PER_KM = 4.0
+        self.CLUTTER_SUBURBAN_LOSS_DB_PER_KM = 2.0
+        self.CLUTTER_FOREST_LOSS_DB_PER_KM = 2.5
+        self.CLUTTER_OPEN_LOSS_DB_PER_KM = 0.2
+        self.CLUTTER_WATER_LOSS_DB_PER_KM = 0.0
+        self.CLUTTER_URBAN_ENDPOINT_LOSS_DB = 3.0
+        self.CLUTTER_HIGH_VANTAGE_ELEVATION_M = 120.0
+        self.CLUTTER_HIGH_VANTAGE_LOSS_FACTOR = 0.35
+        self.CLUTTER_COASTAL_PATH_LOSS_FACTOR = 0.25
+        self.CLUTTER_COASTAL_SAMPLE_FRACTION = 0.55
+        self.CLUTTER_MAX_LOSS_DB = 25.0
+
+        #################################################
+        ####### EMPIRICAL PAYLOAD LOSS MODEL ############
+        #################################################
+        # Disabled by default. When enabled, RSSI/sensitivity still decides
+        # whether a packet can be heard; this model only adds a smooth
+        # CR-dependent payload-success probability after that gate.
+        self.PHY_LOSS_MODEL_ENABLED = False
+        self.PHY_LOSS_MODEL_NAME = "snr_payload_v1"
+        self.PHY_LOSS_SNR_P50_BY_CR = {
+            5: -17.0,
+            6: -17.8,
+            7: -18.6,
+            8: -19.4,
+        }
+        self.PHY_LOSS_SNR_TRANSITION_DB = 1.4
+        self.PHY_LOSS_REFERENCE_PACKET_BYTES = 40
+        self.PHY_LOSS_LONG_PACKET_PENALTY_DB_PER_100B = 0.8
+        self.PHY_LOSS_MIN_SUCCESS_PROB = 0.02
+        self.PHY_LOSS_MAX_SUCCESS_PROB = 0.995
+
+        # Misc
+        self.SEED = 44  # random seed to use
+        # End of misc
+
+        # Initializers
+        self.NR_NODES = None
+        # End of initializers
+
+        ############################
+        ####### ROUTER TYPE ########
+        ############################
+        # This can also be overwritten by scenarios defined in batchSim.py
+        # or by passing this as the second command line param to loraMesh.py
+        self.SELECTED_ROUTER_TYPE = self.ROUTER_TYPE.MANAGED_FLOOD
+
+        #####################################################
+        ####### ASYMMETRIC LINK SIMULATION VARIABLES ########
+        #####################################################
+        # Set this to True to enable the asymmetric link model
+        # Adds a random offset to the link quality of each link
+        self.MODEL_ASYMMETRIC_LINKS = True
+        self.MODEL_ASYMMETRIC_LINKS_MEAN = 0
+        self.MODEL_ASYMMETRIC_LINKS_STDDEV = 2
+
+        #################################################
+        ####### MOVING NODE SIMULATION VARIABLES ########
+        #################################################
+        self.MOVEMENT_ENABLED = True
+        # The average number of meters a human walks in a minute
+        self.WALKING_METERS_PER_MIN = 96
+        # The average number of meters a human bikes in a minute
+        self.BIKING_METERS_PER_MIN = 390
+        # The average number of meters a human drives in a minute
+        self.DRIVING_METERS_PER_MIN = 1500
+        # The % of nodes that end up mobile in the simulation 0.4 = ~40%
+        self.APPROX_RATIO_NODES_MOVING = 0.3
+        # The % of mobile nodes that have GPS enabled 0.5 = 50%
+        self.APPROX_RATIO_OF_NODES_MOVING_W_GPS_ENABLED = 0.3
+
+        # 100 meters
+        self.SMART_POSITION_DISTANCE_THRESHOLD = 100
+        # 30s minimum time in firmware
+        self.SMART_POSITION_DISTANCE_MIN_TIME = 30 * self.ONE_SECOND_INTERVAL
+        # This mirrors the firmware's approach to monitoring channel utilization
+        self.CHANNEL_UTILIZATION_PERIODS = 6
+
+    @property
+    def current_preset(self):
+        """Returns the currently selected modem preset configuration"""
+        return self.MODEM_PRESETS[self.MODEM_PRESET]
+
+    # Function that needs to be run to ensure the router dependent variables change appropriately
+    def update_router_dependencies(self):
+        # Example: Overwrite hop limit in the case of X new awesome routing algorithm
+        # if self.SELECTED_ROUTER_TYPE == self.ROUTER_TYPE.AWESOME_ROUTER:
+        #     Change config values if necessary for your router here
+        return
+
+# single module-level config for all users to reference unambiguously
+CONFIG = Config()
