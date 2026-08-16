@@ -541,7 +541,23 @@ typedef enum _meshtastic_StoreForwardPlusPlus_SFPP_message_type {
     /* If we must fragment, send the first half */
     meshtastic_StoreForwardPlusPlus_SFPP_message_type_LINK_PROVIDE_FIRSTHALF = 5,
     /* If we must fragment, send the second half */
-    meshtastic_StoreForwardPlusPlus_SFPP_message_type_LINK_PROVIDE_SECONDHALF = 6
+    meshtastic_StoreForwardPlusPlus_SFPP_message_type_LINK_PROVIDE_SECONDHALF = 6,
+    /* Summarise one bucket: its member count, checksum and sketch.
+ Also serves as discovery - the sender is the enclosing packet's sender. */
+    meshtastic_StoreForwardPlusPlus_SFPP_message_type_ADVERT = 7,
+    /* Request the objects named by a set of short IDs, usually the ones an
+ ADVERT exchange decoded as missing. */
+    meshtastic_StoreForwardPlusPlus_SFPP_message_type_ITEM_REQUEST = 8,
+    /* Provide one object, in the same encoding the chain messages use. */
+    meshtastic_StoreForwardPlusPlus_SFPP_message_type_ITEM_PROVIDE = 9,
+    /* Ask for a bucket's full short-ID list. Escalation after a checksum
+ mismatch, or after a sketch that would not decode. */
+    meshtastic_StoreForwardPlusPlus_SFPP_message_type_ENUM_REQUEST = 10,
+    /* The full short-ID list for one bucket. */
+    meshtastic_StoreForwardPlusPlus_SFPP_message_type_ENUM_PROVIDE = 11,
+    /* Signed retention checkpoint: everything below this bucket is gone, so
+ stop asking for it. */
+    meshtastic_StoreForwardPlusPlus_SFPP_message_type_GONE = 12
 } meshtastic_StoreForwardPlusPlus_SFPP_message_type;
 
 /* Frame op code for PTY session control and stream transport.
@@ -907,6 +923,7 @@ typedef PB_BYTES_ARRAY_T(32) meshtastic_StoreForwardPlusPlus_message_hash_t;
 typedef PB_BYTES_ARRAY_T(32) meshtastic_StoreForwardPlusPlus_commit_hash_t;
 typedef PB_BYTES_ARRAY_T(32) meshtastic_StoreForwardPlusPlus_root_hash_t;
 typedef PB_BYTES_ARRAY_T(240) meshtastic_StoreForwardPlusPlus_message_t;
+typedef PB_BYTES_ARRAY_T(64) meshtastic_StoreForwardPlusPlus_sr_signature_t;
 /* The actual over-the-mesh message doing store and forward++ */
 typedef struct _meshtastic_StoreForwardPlusPlus {
     /* Which message type is this */
@@ -915,9 +932,16 @@ typedef struct _meshtastic_StoreForwardPlusPlus {
     meshtastic_StoreForwardPlusPlus_message_hash_t message_hash;
     /* The hash of a link on a chain */
     meshtastic_StoreForwardPlusPlus_commit_hash_t commit_hash;
-    /* the root hash of a chain */
+    /* the root hash of a chain
+ On ADVERT through GONE this is the reconciliation scope, which is the same
+ thing named differently: the chain root already identifies the channel a
+ bucket covers, and a partial hash resolves through the same mappings. */
     meshtastic_StoreForwardPlusPlus_root_hash_t root_hash;
-    /* The encrypted bytes from a message */
+    /* The encrypted bytes from a message
+ On an ADVERT this instead carries the sketch: odd power sums over
+ GF(2^32), four bytes per unit of capacity, little-endian per element. XOR
+ two of them and the result is the sketch of the symmetric difference.
+ Capacity 32 is 128 bytes, well inside this field's bound. */
     meshtastic_StoreForwardPlusPlus_message_t message;
     /* Message ID of the contained message */
     uint32_t encapsulated_id;
@@ -927,8 +951,40 @@ typedef struct _meshtastic_StoreForwardPlusPlus {
     uint32_t encapsulated_from;
     /* The receive time of the message in question */
     uint32_t encapsulated_rxtime;
-    /* Used in a LINK_REQUEST to specify the message X spots back from head */
+    /* Used in a LINK_REQUEST to specify the message X spots back from head
+ On ADVERT through GONE this is the bucket index, which is the same counter
+ quantised: buckets close on a fixed object count, so both sides derive the
+ index from the chain counter rather than from local time. */
     uint32_t chain_count;
+    /* Which derivation produced the set-reconciliation fields: the hash, the
+ short-ID width, the checksum domain string, the bucket size and the
+ counter origin. All of them must match before a decoded difference means
+ anything, so one number covers the lot and any change to any of them is a
+ bump. Required on ADVERT through GONE; zero is invalid rather than
+ defaulting to 1. A receiver that does not implement the stated version
+ discards the message rather than parsing it under its own rules. */
+    uint32_t sr_version;
+    /* Members in the bucket. Sizing only, never correctness: a peer learns a
+ lower bound on how much the two sides differ by before building anything. */
+    uint32_t sr_count;
+    /* Fragment position for a message that did not fit one frame: index in bits
+ 0-7, total in bits 8-15. Absent means single-frame. A receiver missing any
+ index discards the whole set - a truncated sketch decodes to a confident
+ wrong answer, which is worse than the loss. */
+    uint32_t sr_frame;
+    /* XOR of every member's checksum contribution. Fixed rather than varint
+ because it is uniformly random, so a varint would cost 9-10 bytes every
+ time. This is what proves two sides hold the same set: short IDs are
+ truncated and collide, and a colliding pair cancels inside the sketch. */
+    uint64_t sr_checksum;
+    /* Short IDs, in an ITEM_REQUEST naming what is wanted or in an ENUM_PROVIDE
+ enumerating a bucket. Zero is not a representable member. */
+    pb_size_t sr_short_ids_count;
+    uint32_t sr_short_ids[40];
+    /* Signature over the message. Only GONE requires one: it is the message that
+ means "stop asking", so an unsigned one denies service against a bucket
+ that still exists. */
+    meshtastic_StoreForwardPlusPlus_sr_signature_t sr_signature;
 } meshtastic_StoreForwardPlusPlus;
 
 typedef PB_BYTES_ARRAY_T(200) meshtastic_RemoteShell_payload_t;
@@ -1267,15 +1323,15 @@ typedef struct _meshtastic_LockdownStatus {
     /* Current lockdown state being reported. */
     meshtastic_LockdownStatus_State state;
     /* For LOCKED: machine-readable reason. Known values:
-   "needs_auth"        — storage already unlocked, client must auth
-   "token_missing"     — no boot token on flash
-   "token_expired"     — boot token wall-clock TTL elapsed
-   "token_boots_zero"  — boot token boot-count TTL exhausted
-   "token_hmac_fail"   — token tampered or wrong device
-   "token_dek_fail"    — token DEK decrypt failed
-   "token_wrong_size"  — token file corrupted
-   "token_bad_magic"   — token file corrupted
-   "not_provisioned"   — should generally use NEEDS_PROVISION state instead
+   "needs_auth"        - storage already unlocked, client must auth
+   "token_missing"     - no boot token on flash
+   "token_expired"     - boot token wall-clock TTL elapsed
+   "token_boots_zero"  - boot token boot-count TTL exhausted
+   "token_hmac_fail"   - token tampered or wrong device
+   "token_dek_fail"    - token DEK decrypt failed
+   "token_wrong_size"  - token file corrupted
+   "token_bad_magic"   - token file corrupted
+   "not_provisioned"   - should generally use NEEDS_PROVISION state instead
  Other values may be added; clients should treat unknown values as
  "locked, ask for passphrase". */
     char lock_reason[32];
@@ -1644,8 +1700,8 @@ extern "C" {
 #define _meshtastic_Routing_Error_ARRAYSIZE ((meshtastic_Routing_Error)(meshtastic_Routing_Error_PKI_SEND_FAIL_PUBLIC_KEY+1))
 
 #define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_MIN meshtastic_StoreForwardPlusPlus_SFPP_message_type_CANON_ANNOUNCE
-#define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_MAX meshtastic_StoreForwardPlusPlus_SFPP_message_type_LINK_PROVIDE_SECONDHALF
-#define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_ARRAYSIZE ((meshtastic_StoreForwardPlusPlus_SFPP_message_type)(meshtastic_StoreForwardPlusPlus_SFPP_message_type_LINK_PROVIDE_SECONDHALF+1))
+#define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_MAX meshtastic_StoreForwardPlusPlus_SFPP_message_type_GONE
+#define _meshtastic_StoreForwardPlusPlus_SFPP_message_type_ARRAYSIZE ((meshtastic_StoreForwardPlusPlus_SFPP_message_type)(meshtastic_StoreForwardPlusPlus_SFPP_message_type_GONE+1))
 
 #define _meshtastic_RemoteShell_OpCode_MIN meshtastic_RemoteShell_OpCode_OP_UNSET
 #define _meshtastic_RemoteShell_OpCode_MAX meshtastic_RemoteShell_OpCode_PONG
@@ -1739,7 +1795,7 @@ extern "C" {
 #define meshtastic_Routing_init_default          {0, {meshtastic_RouteDiscovery_init_default}}
 #define meshtastic_Data_init_default             {_meshtastic_PortNum_MIN, {0, {0}}, 0, 0, 0, 0, 0, 0, false, 0, {0, {0}}}
 #define meshtastic_KeyVerification_init_default  {0, {0, {0}}, {0, {0}}}
-#define meshtastic_StoreForwardPlusPlus_init_default {_meshtastic_StoreForwardPlusPlus_SFPP_message_type_MIN, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0}
+#define meshtastic_StoreForwardPlusPlus_init_default {_meshtastic_StoreForwardPlusPlus_SFPP_message_type_MIN, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, {0}}}
 #define meshtastic_RemoteShell_init_default      {_meshtastic_RemoteShell_OpCode_MIN, 0, 0, 0, {0, {0}}, 0, 0, 0, 0, 0}
 #define meshtastic_BoundingBox_init_default      {0, 0, 0, 0}
 #define meshtastic_Waypoint_init_default         {0, false, 0, false, 0, 0, 0, "", "", 0, 0, false, meshtastic_BoundingBox_init_default, 0, 0, 0}
@@ -1778,7 +1834,7 @@ extern "C" {
 #define meshtastic_Routing_init_zero             {0, {meshtastic_RouteDiscovery_init_zero}}
 #define meshtastic_Data_init_zero                {_meshtastic_PortNum_MIN, {0, {0}}, 0, 0, 0, 0, 0, 0, false, 0, {0, {0}}}
 #define meshtastic_KeyVerification_init_zero     {0, {0, {0}}, {0, {0}}}
-#define meshtastic_StoreForwardPlusPlus_init_zero {_meshtastic_StoreForwardPlusPlus_SFPP_message_type_MIN, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0}
+#define meshtastic_StoreForwardPlusPlus_init_zero {_meshtastic_StoreForwardPlusPlus_SFPP_message_type_MIN, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, {0}}}
 #define meshtastic_RemoteShell_init_zero         {_meshtastic_RemoteShell_OpCode_MIN, 0, 0, 0, {0, {0}}, 0, 0, 0, 0, 0}
 #define meshtastic_BoundingBox_init_zero         {0, 0, 0, 0}
 #define meshtastic_Waypoint_init_zero            {0, false, 0, false, 0, 0, 0, "", "", 0, 0, false, meshtastic_BoundingBox_init_zero, 0, 0, 0}
@@ -1875,6 +1931,12 @@ extern "C" {
 #define meshtastic_StoreForwardPlusPlus_encapsulated_from_tag 8
 #define meshtastic_StoreForwardPlusPlus_encapsulated_rxtime_tag 9
 #define meshtastic_StoreForwardPlusPlus_chain_count_tag 10
+#define meshtastic_StoreForwardPlusPlus_sr_version_tag 11
+#define meshtastic_StoreForwardPlusPlus_sr_count_tag 12
+#define meshtastic_StoreForwardPlusPlus_sr_frame_tag 13
+#define meshtastic_StoreForwardPlusPlus_sr_checksum_tag 14
+#define meshtastic_StoreForwardPlusPlus_sr_short_ids_tag 15
+#define meshtastic_StoreForwardPlusPlus_sr_signature_tag 16
 #define meshtastic_RemoteShell_op_tag            1
 #define meshtastic_RemoteShell_session_id_tag    2
 #define meshtastic_RemoteShell_seq_tag           3
@@ -2140,7 +2202,13 @@ X(a, STATIC,   SINGULAR, UINT32,   encapsulated_id,   6) \
 X(a, STATIC,   SINGULAR, UINT32,   encapsulated_to,   7) \
 X(a, STATIC,   SINGULAR, UINT32,   encapsulated_from,   8) \
 X(a, STATIC,   SINGULAR, UINT32,   encapsulated_rxtime,   9) \
-X(a, STATIC,   SINGULAR, UINT32,   chain_count,      10)
+X(a, STATIC,   SINGULAR, UINT32,   chain_count,      10) \
+X(a, STATIC,   SINGULAR, UINT32,   sr_version,       11) \
+X(a, STATIC,   SINGULAR, UINT32,   sr_count,         12) \
+X(a, STATIC,   SINGULAR, UINT32,   sr_frame,         13) \
+X(a, STATIC,   SINGULAR, FIXED64,  sr_checksum,      14) \
+X(a, STATIC,   REPEATED, FIXED32,  sr_short_ids,     15) \
+X(a, STATIC,   SINGULAR, BYTES,    sr_signature,     16)
 #define meshtastic_StoreForwardPlusPlus_CALLBACK NULL
 #define meshtastic_StoreForwardPlusPlus_DEFAULT NULL
 
@@ -2568,7 +2636,7 @@ extern const pb_msgdesc_t meshtastic_ChunkedPayloadResponse_msg;
 /* Maximum encoded size of messages (where known) */
 /* meshtastic_resend_chunks_size depends on runtime parameters */
 /* meshtastic_ChunkedPayloadResponse_size depends on runtime parameters */
-#define MESHTASTIC_MESHTASTIC_MESH_PB_H_MAX_SIZE meshtastic_FromRadio_size
+#define MESHTASTIC_MESHTASTIC_MESH_PB_H_MAX_SIZE meshtastic_StoreForwardPlusPlus_size
 #define meshtastic_BoundingBox_size              20
 #define meshtastic_ChunkedPayload_size           245
 #define meshtastic_ClientNotification_size       482
@@ -2602,7 +2670,7 @@ extern const pb_msgdesc_t meshtastic_ChunkedPayloadResponse_msg;
 #define meshtastic_RouteDiscovery_size           256
 #define meshtastic_Routing_size                  259
 #define meshtastic_StatusMessage_size            81
-#define meshtastic_StoreForwardPlusPlus_size     377
+#define meshtastic_StoreForwardPlusPlus_size     671
 #define meshtastic_ToRadio_size                  504
 #define meshtastic_User_size                     115
 #define meshtastic_Waypoint_size                 199
