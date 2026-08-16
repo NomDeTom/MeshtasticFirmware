@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+oracle
+*.db
+*.db-wal
+*.db-shm
