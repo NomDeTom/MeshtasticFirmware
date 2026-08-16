@@ -123,6 +123,11 @@ lint:
     - linters: [ALL]
       paths:
         - bin/**
+    # Vendored third-party trees, pinned by their own UPSTREAM file. Formatting them to this
+    # repo's rules turns every re-sync into a conflict against changes we never made.
+    - linters: [ALL]
+      paths:
+        - sim/meshtasticator/**
     # Fake-NodeDB fixture JSONL files contain deterministic synthetic
     # public_key_hex (64-char hex) values that gitleaks misidentifies as
     # generic-api-key. These are not secrets - they're test fixtures
