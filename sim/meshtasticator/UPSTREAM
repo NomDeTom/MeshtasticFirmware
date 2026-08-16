@@ -1,0 +1,25 @@
+Vendored copy of Meshtasticator. Do not edit in place: change it upstream, then re-sync.
+
+vendored-from  https://github.com/NomDeTom/Meshtasticator  branch sfpp-sr-vendor-base
+commit         d1f64afc0af2160b39378aa11293b6ba1170291b
+vendored-on    2026-08-16
+
+That commit is a merge of:
+  ec0a51e  Komzpa/Meshtasticator  codex/pr33-remaining-optimizations
+           (PR meshtastic/Meshtasticator#77, itself stacking powersjcb's PR #33)
+  17ceb82  meshtastic/Meshtasticator  master
+
+Conflict resolved in batchSim.py: upstream #83 converted the NodeConfig construction to
+keyword arguments while the stack had edited the same positional call. Upstream's form kept.
+
+Local deviations from that tree, and the only ones:
+  .github/  removed - a nested workflow directory in a firmware repo is confusing even
+            though GitHub does not read it.
+
+Formatting is exempted in .trunk/trunk.yaml so `git diff` against the upstream branch shows
+our changes and nothing else.
+
+To re-sync:
+  git remote add meshtasticator https://github.com/NomDeTom/Meshtasticator.git
+  git fetch meshtasticator sfpp-sr-vendor-base
+  git diff <this-tree> meshtasticator/sfpp-sr-vendor-base
