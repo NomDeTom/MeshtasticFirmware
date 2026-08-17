@@ -49,6 +49,10 @@ BLOCKS = {
     "E-width": ("short-id-bits", [16, 24, 32, 64], []),
     "E-signed": ("signed", [False, True], []),
     "F-loss": ("extra-loss", [0.0, 0.1, 0.2, 0.3], []),
+    # Same nominal loss, delivered in 60-second stretches of deafness rather than spread evenly.
+    # A sketch cares about the difference: flat loss spreads divergence across every bucket, a
+    # burst puts a whole bucket's worth into one and can push it past the capacity in a single go.
+    "F-burst": ("burst-loss", [0.0, 0.1, 0.2, 0.3], []),
     "G-place": (
         "place",
         [
@@ -101,7 +105,12 @@ def run_block(name, seeds, out_dir, grid=None):
                 flush=True,
             )
             line(report)
-    path = os.path.join(out_dir, f"{name}.json")
+    suffix = ""
+    if grid:
+        # A grid run is a different experiment, not a rerun of the same one, so it gets its own
+        # file. Without this the second capacity in a capacity-by-loss sweep overwrites the first.
+        suffix = "-" + "-".join(g.lstrip("-") for g in grid).replace(" ", "")
+    path = os.path.join(out_dir, f"{name}{suffix}.json")
     os.makedirs(out_dir, exist_ok=True)
     with open(path, "w") as f:
         json.dump(results, f, indent=2)

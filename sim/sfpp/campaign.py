@@ -259,6 +259,7 @@ class Campaign:
             hop_limit=opts.hop_limit,
             router_fraction=opts.router_fraction,
             extra_loss=opts.extra_loss,
+            burst_loss=opts.burst_loss,
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(self.mesh, self.rng, self.root_hash, mix=MIX)
@@ -884,7 +885,16 @@ def build_parser():
     ap.add_argument("--preset", default="LONG_FAST")
     ap.add_argument("--no-phy-loss", action="store_true")
     ap.add_argument(
-        "--extra-loss", type=float, default=0.0, help="added per-hop loss on SR traffic"
+        "--extra-loss",
+        type=float,
+        default=0.0,
+        help="flat loss floor on every reception, on top of the modelled physics",
+    )
+    ap.add_argument(
+        "--burst-loss",
+        type=float,
+        default=0.0,
+        help="chance a node is deaf for a whole 60 s window, instead of losing packets evenly",
     )
 
     ap.add_argument("--baseline", action="store_true", help="no SF++ servers at all")

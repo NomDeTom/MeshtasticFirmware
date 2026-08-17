@@ -183,7 +183,17 @@ class Mesh:
     on insertion order rather than on dict iteration.
     """
 
-    def __init__(self, conf, nodes, rng, hop_limit=3, area=8000.0, extra_loss=0.0):
+    def __init__(
+        self,
+        conf,
+        nodes,
+        rng,
+        hop_limit=3,
+        area=8000.0,
+        extra_loss=0.0,
+        burst_loss=0.0,
+        burst_ms=60000.0,
+    ):
         self.conf = conf
         self.nodes = nodes
         self.rng = rng
@@ -193,6 +203,14 @@ class Mesh:
         # the model does not carry - interference from outside the mesh, fading, a receiver busy
         # elsewhere - and is the knob the capacity-against-loss sweep turns.
         self.extra_loss = extra_loss
+        # Bursty deafness: a node is periodically unable to receive for a stretch, standing in for
+        # a blocked antenna, a neighbour keying up nearby, or a radio busy elsewhere. Flat loss and
+        # bursty loss are different problems for a sketch - flat loss spreads the divergence evenly
+        # across buckets, a burst puts a whole bucket's worth into one.
+        self.burst_loss = burst_loss
+        self.burst_ms = burst_ms
+        self._deaf_until = [0.0] * len(nodes)
+        self._deaf_checked = [0.0] * len(nodes)
         self.now = 0.0
         self._queue = []
         self._seq = 0
@@ -410,8 +428,10 @@ class Mesh:
             if not self._survives_capture(tx, rx, rssi, interferers, sensitivity):
                 self.stats["lost_to_collision"] += 1
                 continue
-            if self._lost_to_phy(rssi, packet.length) or (
-                self.extra_loss and self.rng.random() < self.extra_loss
+            if (
+                self._deaf(rx)
+                or self._lost_to_phy(rssi, packet.length)
+                or (self.extra_loss and self.rng.random() < self.extra_loss)
             ):
                 self.stats["lost_to_phy"] += 1
                 continue
@@ -432,6 +452,16 @@ class Mesh:
         if earliest.start < tx.start:
             return rssi >= self.rssi[earliest.tx_node][rx] + CAPTURE_DB
         return all(rssi >= self.rssi[o.tx_node][rx] + CAPTURE_DB for o in audible)
+
+    def _deaf(self, node):
+        """Is this node inside a loss burst? Redrawn once per burst window, not per packet."""
+        if not self.burst_loss:
+            return False
+        if self.now >= self._deaf_checked[node]:
+            self._deaf_checked[node] = self.now + self.burst_ms
+            if self.rng.random() < self.burst_loss:
+                self._deaf_until[node] = self.now + self.burst_ms
+        return self.now < self._deaf_until[node]
 
     def _lost_to_phy(self, rssi, length):
         import lib.radio_loss as radio_loss
@@ -516,6 +546,7 @@ def build(
     min_dist=300.0,
     router_fraction=0.0,
     extra_loss=0.0,
+    burst_loss=0.0,
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -524,7 +555,15 @@ def build(
     """
     points = place_nodes(node_count, area, rng, min_dist)
     nodes = [Node(i, x, y) for i, (x, y) in enumerate(points)]
-    mesh = Mesh(conf, nodes, rng, hop_limit=hop_limit, area=area, extra_loss=extra_loss)
+    mesh = Mesh(
+        conf,
+        nodes,
+        rng,
+        hop_limit=hop_limit,
+        area=area,
+        extra_loss=extra_loss,
+        burst_loss=burst_loss,
+    )
 
     if router_fraction > 0:
         want = max(1, int(round(node_count * router_fraction)))
