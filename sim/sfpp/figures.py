@@ -154,38 +154,57 @@ def fig_capacity(runs_dir, out_dir):
 
 
 def fig_loss(runs_dir, out_dir):
-    reports = load(runs_dir, "F-loss")
-    if not reports:
+    """The paired capacity-by-loss grid: what loss does, and what it conspicuously does not do."""
+    groups = {}
+    for capacity in (8, 16, 32):
+        reports = load(runs_dir, f"F-loss-capacity-{capacity}")
+        if reports:
+            groups[capacity] = cells(reports)
+    if not groups:
         return
-    by_capacity = {}
-    for report in reports:
-        if "sfpp" not in report:
-            continue
-        by_capacity.setdefault(report["opts"]["capacity"], []).append(report)
 
-    fig, ax = plt.subplots(figsize=(7.4, 4.4), facecolor=BG)
-    ax.set_facecolor(BG)
-    colours = [COOL, ACCENT, "#4E86A8", "#7FB0CB"]
-    for i, (capacity, group) in enumerate(sorted(by_capacity.items())):
-        grouped = cells(group)
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.4), facecolor=BG)
+    for ax in axes:
+        ax.set_facecolor(BG)
+    colours = {8: "#7FB0CB", 16: COOL, 32: ACCENT}
+
+    for capacity, grouped in sorted(groups.items()):
         losses = sorted(grouped)
-        held = [mean(grouped[loss], ("sfpp", "held_fraction_mean")) for loss in losses]
-        ax.plot(
+        held = [mean(grouped[x], ("sfpp", "held_fraction_mean")) for x in losses]
+        fails = [mean(grouped[x], ("sfpp", "decode_failures")) for x in losses]
+        axes[0].plot(
             losses,
             held,
             "o-",
-            color=colours[i % len(colours)],
+            color=colours[capacity],
             linewidth=2,
             label=f"capacity {capacity}",
         )
+        axes[1].plot(
+            losses,
+            fails,
+            "o-",
+            color=colours[capacity],
+            linewidth=2,
+            label=f"capacity {capacity}",
+        )
+
     style(
-        ax,
-        "Capacity against added packet loss",
+        axes[0],
+        "Loss costs holdings, as it should",
         "added loss floor",
         "fraction of chain held",
     )
-    ax.set_ylim(0, 1)
-    ax.legend(frameon=False, fontsize=9)
+    axes[0].set_ylim(0, 1)
+    axes[0].legend(frameon=False, fontsize=9)
+    style(
+        axes[1],
+        "Loss does not cost decodes, at any capacity",
+        "added loss floor",
+        "decode failures per run",
+    )
+    axes[1].set_ylim(bottom=-2)
+    axes[1].legend(frameon=False, fontsize=9)
     fig.tight_layout()
     save(fig, out_dir, "capacity-vs-loss")
 
