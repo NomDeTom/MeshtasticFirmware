@@ -11,6 +11,7 @@ and to be missed - which is what the baseline measures.
 """
 
 import hashlib
+import math
 from dataclasses import dataclass
 
 # Portnums, from mesh.proto.
@@ -72,6 +73,69 @@ class TextObject:
         return len(self.encrypted_bytes)
 
 
+# Hourly weights, local time, index 0 = midnight. Normalised by the caller so the daily mean matches
+# the configured rate whichever shape is chosen - a diurnal curve should move *when* traffic happens,
+# not how much of it there is, or the shapes would not be comparable.
+#
+# `commuter` is the two-peak human pattern: a morning bump, a lull, a larger evening peak, and a deep
+# overnight trough. `sinusoid` is the naive single-peak version, kept because it is what most models
+# reach for and it is worth being able to show the difference. Measured hourly weights from a real
+# packet feed would replace `commuter`, which is a shape drawn from how people behave rather than from
+# data - see the plan's stretch goal.
+DIURNAL = {
+    "flat": [1.0] * 24,
+    "sinusoid": [
+        1.0 + 0.7 * math.sin((h - 15) / 24.0 * 2 * math.pi) for h in range(24)
+    ],
+    "commuter": [
+        0.25,
+        0.18,
+        0.14,
+        0.12,
+        0.15,
+        0.30,  # 00-05 overnight trough
+        0.70,
+        1.30,
+        1.55,
+        1.20,
+        1.00,
+        0.95,  # 06-11 morning peak then settle
+        1.05,
+        1.00,
+        0.95,
+        1.00,
+        1.35,
+        1.85,  # 12-17 afternoon into the evening rise
+        2.10,
+        1.95,
+        1.60,
+        1.15,
+        0.70,
+        0.40,  # 18-23 evening peak and decline
+    ],
+}
+
+
+def diurnal_weight(shape, hour_of_day):
+    weights = DIURNAL[shape]
+    return weights[int(hour_of_day) % 24] / (sum(weights) / 24.0)
+
+
+def congestion_coefficient(node_count, sf, bw_hz, event_mode=False):
+    """The firmware's own broadcast-interval scaling, from Default.h:106.
+
+    At or below 40 nodes it is 1.0. Above that, every extra node lengthens device-originated
+    broadcast intervals by 2^SF / (BW_kHz * 100) - which on LONG_FAST is 0.08192 per node, so a
+    150-node mesh stretches its intervals by a factor of ten. A size sweep that ignores this models
+    a mesh nobody running 2.8 would actually have.
+    """
+    if node_count <= 40:
+        return 1.0
+    divisor = 25.0 if event_mode else 100.0
+    throttling_factor = (2.0**sf) / ((bw_hz / 1000.0) * divisor)
+    return 1.0 + (node_count - 40) * throttling_factor
+
+
 class Generator:
     """Schedules every node's originated traffic across the run, then hands it to the mesh.
 
@@ -80,12 +144,44 @@ class Generator:
     own phase.
     """
 
-    def __init__(self, mesh, rng, root_hash, mix=DEFAULT_MIX, text_scale=1.0):
+    def __init__(
+        self,
+        mesh,
+        rng,
+        root_hash,
+        mix=DEFAULT_MIX,
+        text_scale=1.0,
+        congestion_scaling=True,
+        position_throttle=1,
+        telemetry_throttle=1,
+        diurnal="flat",
+        start_hour=8.0,
+    ):
         self.mesh = mesh
         self.rng = rng
         self.root_hash = root_hash
         self.mix = mix
         self.text_scale = text_scale
+        preset = mesh.conf.current_preset
+        # Device-originated broadcasts stretch with mesh size; user-typed text does not, because
+        # nothing in the firmware throttles a person deciding to send a message.
+        self.congestion = (
+            congestion_coefficient(len(mesh.nodes), preset["sf"], preset["bw"])
+            if congestion_scaling
+            else 1.0
+        )
+        # Region profile multipliers, RegionProfile::positionThrottle / telemetryThrottle. Integer,
+        # 1 is neutral, and applied on top of the congestion coefficient.
+        self.throttle = {
+            "position": max(1, position_throttle),
+            "telemetry": max(1, telemetry_throttle),
+        }
+        # Text follows the clock because a person sends it. Telemetry and nodeinfo do not - a device
+        # reports on a timer regardless of the hour. Position sits in between and is treated as
+        # human-driven, since a node only has a new position when someone has moved it.
+        self.diurnal = diurnal
+        self.diurnal_classes = {"text", "position"}
+        self.start_hour = start_hour
         self.emitters = {}
         self.objects = (
             {}
@@ -107,14 +203,34 @@ class Generator:
     def schedule(self, duration_ms):
         """Lay every originated packet onto the mesh's event queue."""
         for cls in self.mix:
-            rate = cls.per_hour * (self.text_scale if cls.archived else 1.0)
+            if cls.archived:
+                rate = cls.per_hour * self.text_scale
+            else:
+                rate = cls.per_hour / self.congestion / self.throttle.get(cls.name, 1)
             if rate <= 0:
                 continue
-            mean_gap_ms = 3600_000.0 / rate
+            diurnal = self.diurnal != "flat" and cls.name in self.diurnal_classes
+            peak = (
+                max(DIURNAL[self.diurnal]) / (sum(DIURNAL[self.diurnal]) / 24.0)
+                if diurnal
+                else 1.0
+            )
+            # Non-homogeneous Poisson by thinning: generate at the peak rate and keep each candidate
+            # with probability weight(t)/peak. Simpler and less error-prone than integrating the rate
+            # curve, and it produces the right arrival process rather than a rescaled uniform one.
+            mean_gap_ms = 3600_000.0 / (rate * peak)
             for node in self.emitters[cls.name]:
                 t = self.rng.expovariate(1.0 / mean_gap_ms)
                 while t < duration_ms:
-                    self._schedule_one(node, cls, t)
+                    if not diurnal:
+                        self._schedule_one(node, cls, t)
+                    else:
+                        hour = (self.start_hour + t / 3600_000.0) % 24
+                        if (
+                            self.rng.random()
+                            < diurnal_weight(self.diurnal, hour) / peak
+                        ):
+                            self._schedule_one(node, cls, t)
                     t += self.rng.expovariate(1.0 / mean_gap_ms)
 
     def _schedule_one(self, node, cls, when):

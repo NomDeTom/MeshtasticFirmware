@@ -207,6 +207,7 @@ class Counters:
         "window_checksum_closed",
         "bystander_pickups",
         "replays_backfiled",
+        "adverts_deferred",
     )
 
     def __init__(self):
@@ -354,10 +355,24 @@ class Campaign:
             hop_spread=opts.hop_spread,
         )
         self.root_hash = bytes(range(16))
-        self.generator = T.Generator(self.mesh, self.rng, self.root_hash, mix=MIX)
+        self.generator = T.Generator(
+            self.mesh,
+            self.rng,
+            self.root_hash,
+            mix=MIX,
+            congestion_scaling=not opts.no_congestion_scaling,
+            diurnal=opts.diurnal,
+            start_hour=opts.start_hour,
+            position_throttle=opts.position_throttle,
+            telemetry_throttle=opts.telemetry_throttle,
+        )
         self.counters = Counters()
         self.duration_ms = opts.hours * 3600_000.0
 
+        self.catch_up = None
+        if opts.catch_up_hours:
+            start, end = opts.catch_up_hours.split("-")
+            self.catch_up = (float(start), float(end))
         self.counter_of = {}  # message_hash -> canonical chain counter
         self._counted = 0
         self.heard_text = {i: set() for i in range(opts.nodes)}
@@ -670,8 +685,25 @@ class Campaign:
         }[kind]
         handler(server, payload)
 
+    def _in_catch_up_window(self):
+        """Is now inside the configured quiet period?
+
+        The argument for a catch-up window is that reconciliation is delay-tolerant and contention is
+        not: an archive that waits for the small hours pays for its airtime when the channel is cheap
+        and nobody is waiting on a text message. The cost is latency - a message missed at the evening
+        peak is not replicated until the small hours - which is why it is an arm and not a default.
+        """
+        if not self.catch_up:
+            return True
+        start, end = self.catch_up
+        hour = (self.opts.start_hour + self.mesh.now / 3600_000.0) % 24
+        return start <= hour < end if start <= end else (hour >= start or hour < end)
+
     def _advertise_window(self, server):
         """One sketch over this server's most recent N objects, addressed to nobody in particular."""
+        if not self._in_catch_up_window():
+            self.counters.adverts_deferred += 1
+            return
         size = self.opts.window_size
         summary = server.window_summary(size, self.opts.capacity, self.width)
         if summary is None:
@@ -762,6 +794,11 @@ class Campaign:
 
     def _advertise(self, server, bucket):
         """Broadcast one bucket's summary. This is the only unsolicited message in the protocol."""
+        if not self._in_catch_up_window():
+            # Held rather than dropped: the bucket is still sealed and still worth advertising, just
+            # not now. It will be picked up by the next interval tick inside the window.
+            self.counters.adverts_deferred += 1
+            return
         capacity = self.opts.capacity
         summary = server.summary(self.root_hash, bucket, capacity, self.width)
         if summary is None:
@@ -1163,6 +1200,7 @@ class Campaign:
             },
             "traffic": {
                 "originated": dict(self.generator.originated),
+                "congestion_coefficient": round(self.generator.congestion, 3),
                 "text_objects": total,
                 "airtime_ms": round(self.mesh.stats["airtime_ms"], 1),
                 "channel_utilisation": round(
@@ -1321,6 +1359,25 @@ def build_parser():
     ap.add_argument("--area", type=float, default=8000.0)
     ap.add_argument("--hop-limit", type=int, default=3)
     ap.add_argument("--router-fraction", type=float, default=0.1)
+    ap.add_argument(
+        "--diurnal",
+        default="flat",
+        choices=("flat", "sinusoid", "commuter"),
+        help="time-of-day shape for human-driven traffic; device timers stay flat",
+    )
+    ap.add_argument("--start-hour", type=float, default=8.0)
+    ap.add_argument(
+        "--catch-up-hours",
+        default="",
+        help='defer reconciliation to the quiet hours, e.g. "02-06". Empty means reconcile any time',
+    )
+    ap.add_argument(
+        "--no-congestion-scaling",
+        action="store_true",
+        help="disable the firmware's node-count broadcast scaling (Default.h congestionScalingCoefficient)",
+    )
+    ap.add_argument("--position-throttle", type=int, default=1)
+    ap.add_argument("--telemetry-throttle", type=int, default=1)
     ap.add_argument(
         "--scale-area",
         action="store_true",

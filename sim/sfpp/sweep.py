@@ -131,6 +131,18 @@ BLOCKS = {
         ["--place", "hops-apart", "--hop-spread"],
     ),
     "N-servers": ("servers", [2, 3, 5, 8], ["--hop-spread"]),
+    # Time of day. Text and position follow the clock; device timers do not.
+    "P-diurnal": ("diurnal", ["flat", "sinusoid", "commuter"], []),
+    # The catch-up window, which only means anything once traffic has a time of day.
+    "P-catchup": (
+        "catch-up-hours",
+        ["", "02-06", "00-08"],
+        ["--diurnal", "commuter", "--trigger", "bucket+interval"],
+    ),
+    # Slow presets scale device intervals far harder, so an archive should be cheaper to run there.
+    "P-preset": ("preset", ["SHORT_FAST", "LONG_FAST", "LONG_SLOW"], []),
+    # Congestion scaling on against off, to size what the firmware's own throttling is worth.
+    "P-congestion": ("no-congestion-scaling", [False, True], ["--nodes", "120"]),
     # All six routers as servers, against three of them, against three nodes beside them. Same
     # mesh, same traffic; only who is holding the archive changes.
     "G-allrouters": ("servers", [3, 6], ["--place", "routers"]),
