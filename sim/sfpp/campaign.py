@@ -478,6 +478,10 @@ class Campaign:
                 "sketch": body,
                 "checksum": summary.checksum,
                 "count": summary.count,
+                # Ground truth for the safety gate only, never read by the protocol. An advert is
+                # a snapshot: the sender keeps ingesting while it is in flight, so a checksum has
+                # to be judged against the set it was computed over, not the sender's later state.
+                "members": server.members(bucket),
             },
             length,
         )
@@ -491,7 +495,7 @@ class Campaign:
         if local is not None and local.checksum == payload["checksum"]:
             server.matched.add((payload["src"], bucket))
             self.counters.checksum_closed += 1
-            self._verify(server, payload["src"], bucket, closed=True)
+            self._verify(server, payload, bucket)
             return
         self.counters.checksum_open += 1
 
@@ -656,13 +660,37 @@ class Campaign:
             dst=payload["src"],
         )
 
-    def _verify(self, server, peer_index, bucket, closed):
-        """The gate. A closed checksum must mean the two sides really do hold the same set."""
-        peer = self.servers.get(peer_index)
-        if peer is None:
-            return
-        if closed and server.members(bucket) != peer.members(bucket):
+    def _verify(self, server, payload, bucket):
+        """The gate. A checksum that closes must mean the two sets really were identical."""
+        if server.members(bucket) != payload["members"]:
             self.counters.silent_losses += 1
+
+    def _final_audit(self):
+        """Every server pair, every bucket, at rest: does checksum equality imply set equality?
+
+        The in-flight check can only judge the exchanges that happened. This one judges the end
+        state, where nothing is in flight and no snapshot is stale, so a disagreement here is
+        unambiguous. It is the same claim the three-store simulator made, restated over a mesh.
+        """
+        keys = sorted(self.servers)
+        buckets = {bucket_of(c) for c in self.counter_of.values() if c}
+        agree_and_differ = 0
+        for i, a in enumerate(keys):
+            for b in keys[i + 1 :]:
+                for bucket in buckets:
+                    sa = self.servers[a].summary(
+                        self.root_hash, bucket, self.opts.capacity, self.width
+                    )
+                    sb = self.servers[b].summary(
+                        self.root_hash, bucket, self.opts.capacity, self.width
+                    )
+                    if sa is None or sb is None:
+                        continue
+                    if sa.checksum == sb.checksum and self.servers[a].members(
+                        bucket
+                    ) != self.servers[b].members(bucket):
+                        agree_and_differ += 1
+        return agree_and_differ
 
     # ---- interval and AIMD triggers ---------------------------------------------------
 
@@ -705,6 +733,7 @@ class Campaign:
                 self.mesh.at(start, lambda s=server: self._tick(s))
 
         self.mesh.run(self.duration_ms + 900_000)
+        self.final_audit_failures = 0 if self.opts.baseline else self._final_audit()
         return self._report(time.time() - started)
 
     def _report(self, wall_seconds):
@@ -807,6 +836,7 @@ class Campaign:
                     4,
                 ),
                 **self.counters.as_dict(),
+                "audit_checksum_agrees_sets_differ": self.final_audit_failures,
             }
         return report
 
@@ -925,7 +955,10 @@ def summarise(report):
             f"decode fail {s['decode_failures']}  misdecode {s['misdecodes']}  "
             f"escalations {s['escalations']}  SR airtime {s['sr_airtime_share']:.1%}"
         )
-        print(f"  SILENT LOSSES {s['silent_losses']}")
+        print(
+            f"  SILENT LOSSES {s['silent_losses']}  "
+            f"final audit {s['audit_checksum_agrees_sets_differ']}"
+        )
 
 
 if __name__ == "__main__":
