@@ -353,6 +353,7 @@ class Campaign:
             burst_loss=opts.burst_loss,
             burst_ms=opts.burst_ms,
             hop_spread=opts.hop_spread,
+            topology=opts.topology,
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(
@@ -1197,6 +1198,11 @@ class Campaign:
                 "nodes_per_km2": round(self.opts.nodes / (self.area / 1000.0) ** 2, 2),
                 "hop_limit": self.opts.hop_limit,
                 "routers": sum(1 for n in self.mesh.nodes if n.role == M.ROUTER),
+                "topology": getattr(self.mesh, "topology", "uniform"),
+                "diameter": max(
+                    max(self.mesh.hops_from([i]).values())
+                    for i in range(min(self.opts.nodes, 40))
+                ),
             },
             "traffic": {
                 "originated": dict(self.generator.originated),
@@ -1382,6 +1388,12 @@ def build_parser():
         "--scale-area",
         action="store_true",
         help="grow the area with the node count so density is held constant, not conflated with size",
+    )
+    ap.add_argument(
+        "--topology",
+        default="uniform",
+        choices=("uniform", "clustered", "corridor", "hub", "mixed"),
+        help="mesh shape; `mixed` draws the generator from the seed so a sweep samples shapes",
     )
     ap.add_argument(
         "--hop-spread",

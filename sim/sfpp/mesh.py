@@ -158,6 +158,103 @@ def place_nodes(count, area, rng, min_dist=300.0):
     return points
 
 
+def place_clustered(count, area, rng, min_dist, towns=4, spread=0.10):
+    """Towns, with a thin scatter between them. What most regional meshes actually look like.
+
+    A uniform field gives every node roughly the same neighbourhood; a clustered one gives dense
+    pockets joined by a handful of long links, which is where placement advice either holds or does
+    not. Nine in ten nodes belong to a town; the rest are the ones holding the mesh together.
+    """
+    centres = [
+        (rng.uniform(0.15, 0.85) * area, rng.uniform(0.15, 0.85) * area)
+        for _ in range(towns)
+    ]
+    points, attempts = [], 0
+    while len(points) < count and attempts < count * 4000:
+        attempts += 1
+        if rng.random() < 0.9:
+            cx, cy = centres[rng.randrange(towns)]
+            p = (rng.gauss(cx, spread * area), rng.gauss(cy, spread * area))
+        else:
+            p = (rng.uniform(0, area), rng.uniform(0, area))
+        if not (0 <= p[0] <= area and 0 <= p[1] <= area):
+            continue
+        if all(math.dist(p, q) >= min_dist for q in points):
+            points.append(p)
+    if len(points) < count:
+        raise RuntimeError("clustered placement could not converge")
+    return points
+
+
+def place_corridor(count, area, rng, min_dist, aspect=6.0):
+    """A valley, a road, a coastline: long and thin, so the diameter is huge for the node count.
+
+    Hop limit binds far harder here than in a square, and placement becomes nearly one-dimensional -
+    the interesting question stops being "where in the area" and becomes "how far along".
+    """
+    length = area * math.sqrt(aspect)
+    width = area / math.sqrt(aspect)
+    points, attempts = [], 0
+    while len(points) < count and attempts < count * 4000:
+        attempts += 1
+        p = (rng.uniform(0, length), rng.uniform(0, width))
+        if all(math.dist(p, q) >= min_dist for q in points):
+            points.append(p)
+    if len(points) < count:
+        raise RuntimeError("corridor placement could not converge")
+    return points
+
+
+def place_hub(count, area, rng, min_dist, spokes=6):
+    """A dense core with radial arms. The core hears everything; the spoke ends hear almost nothing.
+
+    This is the sharpest test of "put the archive beside a router": in a hub the well-connected nodes
+    are all in one place, so an archive there is maximally redundant with its peers.
+    """
+    centre = (area / 2, area / 2)
+    points, attempts = [], 0
+    core = max(1, count // 3)
+    while len(points) < count and attempts < count * 4000:
+        attempts += 1
+        if len(points) < core:
+            p = (rng.gauss(centre[0], 0.08 * area), rng.gauss(centre[1], 0.08 * area))
+        else:
+            angle = (rng.randrange(spokes) / spokes) * 2 * math.pi
+            along = rng.uniform(0.1, 0.5) * area
+            jitter = rng.gauss(0, 0.02 * area)
+            p = (
+                centre[0] + math.cos(angle) * along + jitter,
+                centre[1] + math.sin(angle) * along + jitter,
+            )
+        if not (0 <= p[0] <= area and 0 <= p[1] <= area):
+            continue
+        if all(math.dist(p, q) >= min_dist for q in points):
+            points.append(p)
+    if len(points) < count:
+        raise RuntimeError("hub placement could not converge")
+    return points
+
+
+TOPOLOGIES = {
+    "uniform": lambda c, a, r, m: place_nodes(c, a, r, m),
+    "clustered": place_clustered,
+    "corridor": place_corridor,
+    "hub": place_hub,
+}
+
+
+def place(topology, count, area, rng, min_dist=300.0):
+    """Place nodes by the named generator. `mixed` draws the generator from the same seed.
+
+    Drawing the shape from the seed is the point: a sweep then samples across mesh *shapes* rather
+    than across draws of one shape, and a placement rule that only survives uniform points is visibly
+    an artefact of the generator rather than advice.
+    """
+    if topology == "mixed":
+        topology = sorted(TOPOLOGIES)[rng.randrange(len(TOPOLOGIES))]
+    return TOPOLOGIES[topology](count, area, rng, min_dist), topology
+
+
 def make_config(preset="LONG_FAST", model=5, phy_loss=True):
     from lib.config import Config
 
@@ -565,13 +662,14 @@ def build(
     burst_loss=0.0,
     burst_ms=60000.0,
     hop_spread=False,
+    topology="uniform",
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
     Routers are chosen by degree rather than at random: a deployment puts the repeater on the hill,
     and choosing them randomly would understate how much a flood depends on a few well-sited nodes.
     """
-    points = place_nodes(node_count, area, rng, min_dist)
+    points, resolved = place(topology, node_count, area, rng, min_dist)
     nodes = [Node(i, x, y) for i, (x, y) in enumerate(points)]
     mesh = Mesh(
         conf,
@@ -583,6 +681,7 @@ def build(
         burst_loss=burst_loss,
         burst_ms=burst_ms,
     )
+    mesh.topology = resolved
 
     if hop_spread:
         # Real meshes are not uniform in this. A node in the middle of a dense mesh sees everything

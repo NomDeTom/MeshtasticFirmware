@@ -143,6 +143,12 @@ BLOCKS = {
     "P-preset": ("preset", ["SHORT_FAST", "LONG_FAST", "LONG_SLOW"], []),
     # Congestion scaling on against off, to size what the firmware's own throttling is worth.
     "P-congestion": ("no-congestion-scaling", [False, True], ["--nodes", "120"]),
+    # Round three. Mesh shape as its own variable - round one and two only ever ran uniform points.
+    "Q-topology": (
+        "topology",
+        ["uniform", "clustered", "corridor", "hub"],
+        ["--hop-spread"],
+    ),
     # All six routers as servers, against three of them, against three nodes beside them. Same
     # mesh, same traffic; only who is holding the archive changes.
     "G-allrouters": ("servers", [3, 6], ["--place", "routers"]),
