@@ -662,6 +662,7 @@ def build(
     burst_loss=0.0,
     burst_ms=60000.0,
     hop_spread=False,
+    hop_assign="centrality",
     topology="uniform",
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
@@ -682,16 +683,26 @@ def build(
         burst_ms=burst_ms,
     )
     mesh.topology = resolved
+    mesh.hop_assign = hop_assign
 
     if hop_spread:
         # Real meshes are not uniform in this. A node in the middle of a dense mesh sees everything
         # it needs at 3 or 4 hops and its owner leaves the default alone; someone on the edge turns
-        # it up until they can reach the rest, and 7 is where the field guidance tops out. Assigning
-        # by centrality reproduces that correlation instead of scattering hop limits at random.
-        degrees = sorted(range(node_count), key=lambda i: -len(mesh.neighbours[i]))
+        # it up until they can reach the rest, and 7 is where the field guidance tops out.
+        #
+        # `centrality` reproduces that correlation, and in doing so makes hop limit and position
+        # perfectly confounded: a table of receptions-by-hop-limit then measures position and labels it
+        # hop limit, which cannot answer whether raising your own limit helps you. `random` breaks the
+        # correlation on purpose. It is not how operators behave - it is the control that isolates the
+        # hop limit's own effect from the siting of the nodes that happen to have raised it.
+        if hop_assign == "random":
+            order = list(range(node_count))
+            rng.shuffle(order)
+        else:
+            order = sorted(range(node_count), key=lambda i: -len(mesh.neighbours[i]))
         rank = {
             node: position / max(1, node_count - 1)
-            for position, node in enumerate(degrees)
+            for position, node in enumerate(order)
         }
         mesh.node_hop_limit = [
             min(7, 3 + int(rank[i] * 4 + rng.random() * 1.5)) for i in range(node_count)

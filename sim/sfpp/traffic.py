@@ -154,6 +154,7 @@ class Generator:
         congestion_scaling=True,
         position_throttle=1,
         telemetry_throttle=1,
+        online_cap=120,
         diurnal="flat",
         start_hour=8.0,
     ):
@@ -166,7 +167,11 @@ class Generator:
         # Device-originated broadcasts stretch with mesh size; user-typed text does not, because
         # nothing in the firmware throttles a person deciding to send a message.
         self.congestion = (
-            congestion_coefficient(len(mesh.nodes), preset["sf"], preset["bw"])
+            # getNumOnlineMeshNodes() iterates the hot store, so a node cannot count mesh members it
+            # has evicted. The coefficient is bounded by MAX_NUM_NODES, not by mesh size.
+            congestion_coefficient(
+                min(len(mesh.nodes), online_cap), preset["sf"], preset["bw"]
+            )
             if congestion_scaling
             else 1.0
         )

@@ -357,6 +357,7 @@ class Campaign:
             burst_loss=opts.burst_loss,
             burst_ms=opts.burst_ms,
             hop_spread=opts.hop_spread,
+            hop_assign=opts.hop_assign,
             topology=opts.topology,
         )
         self.root_hash = bytes(range(16))
@@ -366,6 +367,7 @@ class Campaign:
             self.root_hash,
             mix=MIX,
             congestion_scaling=not opts.no_congestion_scaling,
+            online_cap=opts.max_num_nodes,
             diurnal=opts.diurnal,
             start_hour=opts.start_hour,
             position_throttle=opts.position_throttle,
@@ -381,6 +383,12 @@ class Campaign:
         self.counter_of = {}  # message_hash -> canonical chain counter
         self._counted = 0
         self.heard_text = {i: set() for i in range(opts.nodes)}
+        # Every class, not just the archived one. Position, telemetry and nodeinfo were generated,
+        # flooded and charged airtime while nothing recorded whether anyone received them - roughly
+        # six packets in seven were invisible, and any airtime share quoted against them was a share
+        # of an unmeasured denominator.
+        self.heard_by_class = {}
+        self.hop_stats = {}
         self.servers = {}
         self.db_dir = tempfile.mkdtemp(prefix="sfpp-campaign-")
         self.bucket_closed_at = {}
@@ -446,7 +454,25 @@ class Campaign:
 
     # ---- ingest -----------------------------------------------------------------------
 
+    def _note_class_reception(self, node, packet):
+        kind = packet.kind or str(packet.portnum)
+        seen = self.heard_by_class.setdefault(kind, {})
+        key = (node.index, packet.id)
+        if key in seen:
+            return
+        seen[key] = True
+        # Split by the receiver's own hop limit, so "does turning it up help me" is answerable
+        # separately from "does it help everyone else".
+        limit = self.mesh.hop_limit_for(node.index)
+        stats = self.hop_stats.setdefault(
+            limit, {"nodes": set(), "received": 0, "hops": []}
+        )
+        stats["nodes"].add(node.index)
+        stats["received"] += 1
+        stats["hops"].append(packet.hops_taken())
+
     def _on_receive(self, node, packet, rssi, snr):
+        self._note_class_reception(node, packet)
         if packet.kind == "text":
             self._on_text(node, packet)
         elif packet.kind == "sr:item_provide" and packet.payload is not None:
@@ -1244,6 +1270,8 @@ class Campaign:
                     for i in range(min(self.opts.nodes, 40))
                 ),
             },
+            "by_class": self._class_report(),
+            "by_hop_limit": self._hop_report(),
             "traffic": {
                 "originated": dict(self.generator.originated),
                 "congestion_coefficient": round(self.generator.congestion, 3),
@@ -1378,6 +1406,44 @@ class Campaign:
             "replays_with_conflicting_claims": disagreements,
         }
 
+    def _class_report(self):
+        """Sent against heard, per class, plus the airtime each class actually spent."""
+        out = {}
+        for name, sent in self.generator.originated.items():
+            receipts = len(self.heard_by_class.get(name, {}))
+            air = self.mesh.airtime_by_kind.get(name, 0.0)
+            out[name] = {
+                "originated": sent,
+                "receptions": receipts,
+                # Mean nodes that heard each originated packet - the useful figure, since a broadcast
+                # has many intended receivers rather than one.
+                "mean_receivers_per_packet": round(receipts / sent, 2) if sent else 0,
+                "reception_rate": (
+                    round(receipts / (sent * max(1, self.opts.nodes - 1)), 4)
+                    if sent
+                    else 0
+                ),
+                "airtime_s": round(air / 1000.0, 1),
+                "airtime_share": round(
+                    air / max(1.0, self.mesh.stats["airtime_ms"]), 4
+                ),
+            }
+        return out
+
+    def _hop_report(self):
+        """Reception and traversal split by the node's own configured hop limit."""
+        out = {}
+        for limit, st in sorted(self.hop_stats.items()):
+            count = len(st["nodes"])
+            out[str(limit)] = {
+                "nodes": count,
+                "receptions_per_node": round(st["received"] / count, 1) if count else 0,
+                "mean_hops_traversed": (
+                    round(sum(st["hops"]) / len(st["hops"]), 2) if st["hops"] else 0
+                ),
+            }
+        return out
+
     def _reach_ceiling(self):
         """The best any node could do: the share of the mesh within the hop limit of it.
 
@@ -1400,14 +1466,14 @@ class Campaign:
 
 def build_parser():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--hours", type=float, default=6.0)
+    ap.add_argument("--hours", type=float, default=72.0)
     ap.add_argument("--nodes", type=int, default=60)
     ap.add_argument("--area", type=float, default=8000.0)
     ap.add_argument("--hop-limit", type=int, default=3)
     ap.add_argument("--router-fraction", type=float, default=0.1)
     ap.add_argument(
         "--diurnal",
-        default="flat",
+        default="commuter",
         choices=("flat", "sinusoid", "commuter"),
         help="time-of-day shape for human-driven traffic; device timers stay flat",
     )
@@ -1421,6 +1487,12 @@ def build_parser():
         "--no-congestion-scaling",
         action="store_true",
         help="disable the firmware's node-count broadcast scaling (Default.h congestionScalingCoefficient)",
+    )
+    ap.add_argument(
+        "--max-num-nodes",
+        type=int,
+        default=120,
+        help="modelled hot-store cap; bounds the congestion input, as getNumOnlineMeshNodes does",
     )
     ap.add_argument("--position-throttle", type=int, default=1)
     ap.add_argument("--telemetry-throttle", type=int, default=1)
@@ -1436,7 +1508,21 @@ def build_parser():
         help="mesh shape; `mixed` draws the generator from the seed so a sweep samples shapes",
     )
     ap.add_argument(
+        "--hop-assign",
+        default="centrality",
+        choices=("centrality", "random"),
+        help="centrality is realistic but confounds hop limit with position; random isolates it",
+    )
+    ap.add_argument(
+        "--no-hop-spread",
+        dest="hop_spread",
+        action="store_false",
+        help="one hop limit for everyone - the round-one and round-two control",
+    )
+    ap.add_argument(
         "--hop-spread",
+        dest="hop_spread",
+        default=True,
         action="store_true",
         help="per-node hop limits 3-7 by centrality, instead of one value for everyone",
     )
