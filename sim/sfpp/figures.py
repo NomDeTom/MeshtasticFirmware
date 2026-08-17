@@ -287,6 +287,70 @@ def fig_baseline(runs_dir, out_dir):
     save(fig, out_dir, "baseline")
 
 
+def fig_placements(out_dir, seed=20260817, nodes=60, area=8000.0, servers=3):
+    """The same mesh five times, with the servers put somewhere different each time.
+
+    Placement is the one arm whose result is meaningless as a number without the picture: knowing
+    that 'beside a router' holds less than 'two hops apart' says nothing until you can see that the
+    first arrangement puts three servers inside one neighbourhood.
+    """
+    import random
+
+    from . import mesh as M
+    from .campaign import Placement
+
+    strategies = [
+        "routers",
+        "alternate-routers",
+        "beside-router",
+        "random-clients",
+        "hops-apart",
+    ]
+    fig, axes = plt.subplots(
+        1, len(strategies), figsize=(4.0 * len(strategies), 4.3), facecolor=BG
+    )
+
+    for ax, strategy in zip(axes, strategies):
+        rng = random.Random(seed)
+        conf = M.make_config()
+        mesh = M.build(conf, nodes, area, rng, hop_limit=3, router_fraction=0.1)
+        chosen = Placement.BY_NAME[strategy](mesh, servers, rng, 2)
+        ax.set_facecolor(BG)
+
+        for i in range(nodes):
+            for j in mesh.neighbours[i]:
+                if j > i:
+                    ax.plot(
+                        [mesh.nodes[i].x / 1000, mesh.nodes[j].x / 1000],
+                        [mesh.nodes[i].y / 1000, mesh.nodes[j].y / 1000],
+                        color="#c9d6e0",
+                        linewidth=0.4,
+                        zorder=1,
+                    )
+        xs = [n.x / 1000 for n in mesh.nodes]
+        ys = [n.y / 1000 for n in mesh.nodes]
+        roles = ["#8FA8B8" if n.role == M.ROUTER else "#D8D2C6" for n in mesh.nodes]
+        ax.scatter(xs, ys, c=roles, s=26, zorder=2, edgecolors="none")
+        ax.scatter(
+            [mesh.nodes[i].x / 1000 for i in chosen],
+            [mesh.nodes[i].y / 1000 for i in chosen],
+            c=ACCENT,
+            s=110,
+            marker="s",
+            zorder=3,
+            edgecolors="none",
+        )
+        depth = mesh.hops_from([chosen[0]])
+        seps = [depth.get(c, -1) for c in chosen[1:]]
+        ax.set_title(f"{strategy}\nseparation {seps}", fontsize=10, color=INK)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_color(GRID)
+    fig.tight_layout()
+    save(fig, out_dir, "placements")
+
+
 def save(fig, out_dir, name):
     os.makedirs(out_dir, exist_ok=True)
     for ext in ("svg", "png"):
@@ -303,7 +367,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--placements", action="store_true", help="draw the placement strategies"
+    )
     opts = ap.parse_args(argv)
+    if opts.placements:
+        fig_placements(opts.out)
     for fn in (
         fig_baseline,
         fig_cadence,
