@@ -161,6 +161,11 @@ BLOCKS = {
     # What the 2.8 fold-in is worth against the pre-fold-in transport: same seed, same mesh, same
     # traffic, only the MAC and routing rules change.
     "R-firmware": ("profile", ["legacy", "2.8"], []),
+    # The cheapest rival to the archive: spend one extra relay of a text rather than replicate it
+    # afterwards. Measured against the archive in the same arm rather than separately.
+    "R-repeats": ("extra-repeats", [False, True], []),
+    # The same, on a mesh busy enough for the suppression thresholds to be deciding it.
+    "R-repeats-busy": ("extra-repeats", [False, True], ["--nodes", "120"]),
     # 64 bytes on every signable broadcast, against the reliability that buys. Report the share of
     # signable traffic that was actually signed rather than assuming all of it was.
     "R-signing": ("signature-policy", ["COMPATIBLE", "BALANCED", "STRICT"], []),

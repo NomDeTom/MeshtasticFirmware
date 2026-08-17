@@ -178,9 +178,20 @@ def signed_data_fits(length):
     )
 
 
+# RepeatScalingModule (branch `extra-repeats`). Cancelling a queued rebroadcast on the first heard
+# copy costs delivery on the one class with no ACK behind it, so text tolerates a second copy first.
+# The suppression thresholds are the module's own, and none of the three is validated.
+REPEAT_TRACKER_SIZE = 8
+REPEAT_THRESHOLD_TEXT = 2
+REPEAT_THRESHOLD_DEFAULT = 1
+BUSY_CHANNEL_UTIL_PERCENT = 10.0
+BUSY_AIR_UTIL_TX_PERCENT = 4.0
+BUSY_DIRECT_ACTIVE_NODES = 10
+
 # mesh.proto portnums the transport itself reads. NodeInfo is the one that carries a public key, so
 # it is where a node learns whom it can encrypt to.
 NODEINFO_PORTNUM = 4
+TEXT_PORTNUMS = frozenset({1, 8})  # TEXT_MESSAGE_APP and TEXT_MESSAGE_COMPRESSED_APP
 
 # NodeDB.h LastByteResolution. Callers must treat anything but UNIQUE as untrustworthy.
 RESOLUTION_NONE = "none"
@@ -477,6 +488,7 @@ class Profile:
         "congestion_clamp",
         "signing",
         "hop_scaling",
+        "extra_repeats",
         "exhaust_hops",
         "event_relay_hop_limit",
         "opaque_relay",
@@ -575,7 +587,9 @@ class Profile:
         self.signing = self.at_least("2.8")
         self.hop_scaling = self.at_least("2.8")
 
-        # Off unless the module or the build flag is on.
+        # Off unless the module or the build flag is on. `extra_repeats` is RepeatScalingModule,
+        # which is on a branch rather than in any release, so no series turns it on by itself.
+        self.extra_repeats = False
         self.exhaust_hops = False
         self.event_relay_hop_limit = None
         self.opaque_relay = self.at_least("2.8")
@@ -620,6 +634,7 @@ class Profile:
         self.hop_scaling = False
         self.exhaust_hops = False
         self.event_relay_hop_limit = None
+        self.extra_repeats = False
         self.opaque_relay = False
 
 
@@ -925,6 +940,11 @@ class Node:
         "util_ring",
         "util_index",
         "util_epoch",
+        "tx_ring",
+        "tx_index",
+        "tx_epoch",
+        "repeat_counts",
+        "repeat_slot",
     )
 
     def __init__(
@@ -999,6 +1019,16 @@ class Node:
         self.util_ring = [0.0] * 6
         self.util_index = 0
         self.util_epoch = 0.0
+        # AirTime's TX ring: 60 x 1 minute of our own transmit time, which is a different window
+        # from the channel-utilisation ring above.
+        self.tx_ring = [0.0] * 60
+        self.tx_index = 0
+        self.tx_epoch = 0.0
+        # RepeatScalingModule's ring of (sender, id) -> heard duplicates, eight entries deep and
+        # replaced round-robin. Small enough to thrash on a busy mesh, which is the point of
+        # modelling its size rather than a dict.
+        self.repeat_counts = [None] * REPEAT_TRACKER_SIZE
+        self.repeat_slot = 0
 
     @property
     def relay_byte(self):
@@ -1015,6 +1045,16 @@ class Node:
 
     def is_router_like(self):
         return self.role in ROUTER_LIKE
+
+    @property
+    def direct_neighbours(self):
+        """Peers in the hot store recorded at zero hops away.
+
+        Stands in for HopScalingModule::getLastPerHopCounts().perHop[0], which is a sampled and
+        capped estimate of the same quantity - so this is the exact figure the estimator is trying
+        to approximate rather than the estimate itself.
+        """
+        return sum(1 for record in self.nodedb.values() if record.hops_away == 0)
 
     # ---- NodeDB (hot store) ------------------------------------------------------------
 
@@ -1184,6 +1224,30 @@ class Node:
     def channel_utilization_percent(self, now):
         self.log_airtime(now, 0.0)  # roll the ring forward before reading it
         return (sum(self.util_ring) / (len(self.util_ring) * 10000.0)) * 100.0
+
+    def log_tx_airtime(self, now, ms):
+        """AirTime's second ring: our own transmissions only, per minute over the last hour.
+
+        A separate structure from channel utilisation, and over a different window - sixty minutes
+        against sixty seconds - so the two answer different questions. This one is what the duty
+        cycle is enforced against.
+        """
+        elapsed = int((now - self.tx_epoch) // 60000.0)
+        if elapsed > 0:
+            if elapsed >= len(self.tx_ring):
+                self.tx_ring = [0.0] * len(self.tx_ring)
+                self.tx_index = 0
+            else:
+                for _ in range(elapsed):
+                    self.tx_index = (self.tx_index + 1) % len(self.tx_ring)
+                    self.tx_ring[self.tx_index] = 0.0
+            self.tx_epoch += elapsed * 60000.0
+        self.tx_ring[self.tx_index] += ms
+
+    def utilization_tx_percent(self, now):
+        """AirTime::utilizationTXPercent - the share of the last hour we spent transmitting."""
+        self.log_tx_airtime(now, 0.0)
+        return (sum(self.tx_ring) / (len(self.tx_ring) * 60000.0)) * 100.0
 
 
 class Transmission:
@@ -1420,6 +1484,10 @@ class Mesh:
             "dropped_unverifiable": 0,
             "dropped_downgrade": 0,
             "signature_bootstraps": 0,
+            # A duplicate heard and tolerated rather than cancelled on, and the times the mesh was
+            # too busy for that to be allowed.
+            "extra_repeats_tolerated": 0,
+            "extra_repeats_suppressed": 0,
             "reliable_retx": 0,
             "reliable_failures": 0,
             "opaque_relays": 0,
@@ -1914,6 +1982,7 @@ class Mesh:
         radio = self.nodes[node]
         radio.busy_until = self.now + duration
         radio.log_airtime(self.now, duration)
+        radio.log_tx_airtime(self.now, duration)
         packet.relay_node = radio.relay_byte
         tx = Transmission(packet, node, self.now, self.now + duration, radio.role)
         self.transmissions.append(tx)
@@ -2552,6 +2621,73 @@ class Mesh:
             self.on_receive(node, packet, rssi, snr)
         self.perhaps_rebroadcast(rx, heard)
 
+    # ---- extra repeats (RepeatScalingModule) -------------------------------------------
+
+    def _mesh_too_busy_for_extra_repeats(self, rx):
+        """meshTooBusyForExtraRepeats: three unvalidated constants, any one of which forces 1.
+
+        Channel utilisation over 10%, our own transmit share of the last hour over 4%, or more than
+        ten direct neighbours. The last reads HopScalingModule's per-hop counts, which the model
+        does not have yet, so the neighbour count stands in for it - the same quantity, measured
+        exactly rather than sampled.
+        """
+        node = self.nodes[rx]
+        if node.channel_utilization_percent(self.now) > BUSY_CHANNEL_UTIL_PERCENT:
+            return True
+        if node.utilization_tx_percent(self.now) > BUSY_AIR_UTIL_TX_PERCENT:
+            return True
+        if node.direct_neighbours > BUSY_DIRECT_ACTIVE_NODES:
+            return True
+        return False
+
+    def _dupe_cancel_threshold(self, rx, packet):
+        """RepeatScalingModule::getDupeCancelThreshold. Text tolerates one heard copy; nothing else.
+
+        An undecodable packet is classified from the plaintext header instead: flooded traffic is
+        treated as text-like, directed traffic as not.
+        """
+        if packet.opaque:
+            threshold = (
+                REPEAT_THRESHOLD_TEXT
+                if packet.next_hop == NO_NEXT_HOP_PREFERENCE
+                else REPEAT_THRESHOLD_DEFAULT
+            )
+        elif packet.portnum in TEXT_PORTNUMS:
+            threshold = REPEAT_THRESHOLD_TEXT
+        else:
+            threshold = REPEAT_THRESHOLD_DEFAULT
+        if threshold > 1 and self._mesh_too_busy_for_extra_repeats(rx):
+            self.stats["extra_repeats_suppressed"] += 1
+            return REPEAT_THRESHOLD_DEFAULT
+        return threshold
+
+    def _should_cancel_dupe(self, rx, packet):
+        """RepeatScalingModule::shouldCancelDupe - count this copy, and say whether to give up.
+
+        Without the module the answer is always yes on the first duplicate, which is what every
+        release does today.
+        """
+        node = self.nodes[rx]
+        if not node.profile.extra_repeats:
+            return True
+        threshold = self._dupe_cancel_threshold(rx, packet)
+        key = (packet.origin, packet.id)
+        for index, entry in enumerate(node.repeat_counts):
+            if entry is not None and entry[0] == key:
+                count = entry[1] + 1
+                if count >= threshold:
+                    node.repeat_counts[index] = None
+                    return True
+                node.repeat_counts[index] = (key, count)
+                self.stats["extra_repeats_tolerated"] += 1
+                return False
+        if 1 >= threshold:
+            return True
+        node.repeat_counts[node.repeat_slot] = (key, 1)
+        node.repeat_slot = (node.repeat_slot + 1) % REPEAT_TRACKER_SIZE
+        self.stats["extra_repeats_tolerated"] += 1
+        return False
+
     def _handle_dupe(self, rx, packet, we_were_next_hop):
         """FloodingRouter / NextHopRouter::shouldFilterReceived, the seen-recently branch."""
         node = self.nodes[rx]
@@ -2567,13 +2703,13 @@ class Mesh:
         if we_were_next_hop:
             return  # we were explicitly asked to relay this; a dupe does not excuse us
 
-        if self.role_allows_canceling_dupe(rx, packet):
+        if not self.role_allows_canceling_dupe(rx, packet):
+            self.stats["cancel_refused_by_role"] += 1
+        elif self._should_cancel_dupe(rx, packet):
             entry = self._cancel_sending(rx, packet.id)
             if entry is not None:
                 node.pending.pop(packet.id, None)
                 self.stats["rebroadcasts_cancelled"] += 1
-        else:
-            self.stats["cancel_refused_by_role"] += 1
 
         if node.profile.late_window and (
             node.role == ROUTER_LATE
