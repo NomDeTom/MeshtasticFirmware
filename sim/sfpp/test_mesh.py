@@ -75,7 +75,7 @@ class ContentionWindow(unittest.TestCase):
         mesh = small_mesh()
         slot = mesh.slot_time_ms()
         mesh.nodes[0].role = M.ROUTER
-        cw = mesh.cw_size(0.0)
+        cw = mesh.cw_size(0, 0.0)
         for _ in range(50):
             delay = mesh.tx_delay_weighted(0, 0.0)
             self.assertLess(delay, 2 * cw * slot)
@@ -100,9 +100,9 @@ class ContentionWindow(unittest.TestCase):
         """getTxDelayMsecWeightedWorst: (2 * CWmax + 2^CWsize) * slot."""
         mesh = small_mesh()
         slot = mesh.slot_time_ms()
-        cw = mesh.cw_size(-2.0)
+        cw = mesh.cw_size(0, -2.0)
         self.assertAlmostEqual(
-            mesh.tx_delay_weighted_worst(-2.0), (2 * M.CW_MAX + 2**cw) * slot
+            mesh.tx_delay_weighted_worst(0, -2.0), (2 * M.CW_MAX + 2**cw) * slot
         )
 
     def test_retransmission_timer_matches_the_formula(self):
@@ -359,7 +359,7 @@ class LateWindow(unittest.TestCase):
         self.assertEqual(len(mesh.nodes[0].queue), 1)
         entry = mesh.nodes[0].queue[0]
         self.assertAlmostEqual(
-            entry.tx_after, mesh.now + mesh.tx_delay_weighted_worst(5.0)
+            entry.tx_after, mesh.now + mesh.tx_delay_weighted_worst(0, 5.0)
         )
         self.assertEqual(mesh.stats["late_window_clamps"], 1)
 

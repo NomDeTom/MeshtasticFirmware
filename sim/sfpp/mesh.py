@@ -460,6 +460,8 @@ class Node:
         "max_num_nodes",
         "history_max",
         "platform",
+        "profile",
+        "online",
         "route_health",
         "reliable",
         "util_ring",
@@ -476,6 +478,7 @@ class Node:
         node_num=None,
         max_num_nodes=MAX_NUM_NODES,
         platform="nrf52840",
+        profile=None,
     ):
         self.index = index
         self.x = x
@@ -508,6 +511,12 @@ class Node:
         self.nodedb = {}
         # Which board this is, and therefore how much of the mesh it can hold in RAM.
         self.platform = platform
+        # Which firmware this node is running. Per-node, because a real mesh is never all on one
+        # version - the interesting question is what a 2.8 node does surrounded by older ones.
+        self.profile = profile if profile is not None else Profile("2.8")
+        # False once the node has been taken down. An offline node neither transmits nor receives,
+        # and its NodeDB goes stale in everyone else's store rather than being deleted from it.
+        self.online = True
         self.max_num_nodes = max_num_nodes
         self.history_max = packet_history_max(max_num_nodes)
         self.route_health = {}  # destination index -> RouteHealth
@@ -786,7 +795,12 @@ class Mesh:
         self.rng = rng
         self.hop_limit = hop_limit
         self.area = area
+        # The mesh-wide default. Individual nodes carry their own and may disagree with it; this
+        # is what a node gets when nothing said otherwise, and what the report labels the run with.
         self.profile = profile if isinstance(profile, Profile) else Profile(profile)
+        for node in nodes:
+            if node.profile is None:
+                node.profile = self.profile
         # A hook the traffic-management arm sets: fn(packet) -> bool, forcing one relay at
         # hop_limit 0 (TrafficManagementModule::shouldExhaustHops).
         self.should_exhaust_hops = None
@@ -838,6 +852,10 @@ class Mesh:
             "opaque_relays": 0,
             "hops_exhausted": 0,
             "rebroadcast_suppressed_by_mode": 0,
+            "nodes_taken_down": 0,
+            "nodes_brought_up": 0,
+            "links_severed": 0,
+            "sends_while_offline": 0,
         }
         self.airtime_by_kind = {}
         # Filled by build() when per-node hop limits are in play; None means everyone uses the same.
@@ -960,27 +978,24 @@ class Mesh:
 
     # ---- contention window (RadioInterface.cpp:779-855) --------------------------------
 
-    def cw_size(self, snr):
+    def cw_size(self, node, snr):
         """RadioInterface::getCWsize. Integer map, and no clamp - see arduino_map()."""
+        profile = self.nodes[node].profile
         cw = arduino_map(
-            snr,
-            self.profile.snr_min,
-            self.profile.snr_max,
-            self.profile.cw_min,
-            self.profile.cw_max,
+            snr, profile.snr_min, profile.snr_max, profile.cw_min, profile.cw_max
         )
-        if self.profile.clamp_cw:
-            cw = min(self.profile.cw_max, max(self.profile.cw_min, cw))
+        if profile.clamp_cw:
+            cw = min(profile.cw_max, max(profile.cw_min, cw))
         return cw
 
-    def _draw_slots(self, bound):
+    def _draw_slots(self, node, bound):
         """random(0, bound): integer and half-open, so `bound` itself never comes out.
 
         Under the legacy profile this stays a continuous draw. That difference is not cosmetic: two
         nodes can only pick the same slot if slots are discrete, so a continuous draw removes an
         entire class of collision the firmware produces routinely.
         """
-        if self.profile.quantised_slots:
+        if self.nodes[node].profile.quantised_slots:
             bound = int(bound)
             return self.rng.randrange(0, bound) if bound > 0 else 0
         return self.rng.uniform(0, bound) if bound > 0 else 0.0
@@ -991,11 +1006,12 @@ class Mesh:
         The window is sized from channel utilisation, so a busy mesh backs off harder. Nothing fed
         this before the fold-in, which is why congestion used to cost latency but never contention.
         """
-        if not self.profile.util_backoff:
+        profile = self.nodes[node].profile
+        if not profile.util_backoff:
             return self.slot_time_ms() * self.rng.uniform(1, 4)
         util = self.nodes[node].channel_utilization_percent(self.now)
-        cw = arduino_map(util, 0, 100, self.profile.cw_min, self.profile.cw_max)
-        return self._draw_slots(2**cw) * self.slot_time_ms()
+        cw = arduino_map(util, 0, 100, profile.cw_min, profile.cw_max)
+        return self._draw_slots(node, 2**cw) * self.slot_time_ms()
 
     def _rebroadcasts_early(self, node):
         """RadioInterface::shouldRebroadcastEarlyLikeRouter - ROUTER, and only ROUTER."""
@@ -1008,22 +1024,24 @@ class Mesh:
         sender and its relay adds least. The router offset is the part that was missing: everyone
         who is not a ROUTER waits out the whole router window first, so routers always go first.
         """
-        cw = self.cw_size(snr)
+        profile = self.nodes[node].profile
+        cw = self.cw_size(node, snr)
         slot = self.slot_time_ms()
         if self._rebroadcasts_early(node):
-            if self.profile.router_cw_floor:
-                return self._draw_slots(2**self.profile.cw_min) * slot
-            return self._draw_slots(2 * cw) * slot
-        offset = 2 * self.profile.cw_max * slot if self.profile.router_offset else 0.0
-        return offset + self._draw_slots(2**cw) * slot
+            if profile.router_cw_floor:
+                return self._draw_slots(node, 2**profile.cw_min) * slot
+            return self._draw_slots(node, 2 * cw) * slot
+        offset = 2 * profile.cw_max * slot if profile.router_offset else 0.0
+        return offset + self._draw_slots(node, 2**cw) * slot
 
-    def tx_delay_weighted_worst(self, snr):
+    def tx_delay_weighted_worst(self, node, snr):
         """RadioInterface::getTxDelayMsecWeightedWorst - the far end of a non-router's window.
 
         This is the whole definition of "late": ROUTER_LATE relays at the point everyone else would
         already have given up on.
         """
-        return (2 * self.profile.cw_max + 2 ** self.cw_size(snr)) * self.slot_time_ms()
+        profile = self.nodes[node].profile
+        return (2 * profile.cw_max + 2 ** self.cw_size(node, snr)) * self.slot_time_ms()
 
     def retransmission_msec(self, node, packet):
         """RadioInterface::getRetransmissionMsec - long enough for a send and an ACK to come back.
@@ -1033,14 +1051,15 @@ class Mesh:
         """
         airtime = int(self.airtime_ms(packet.length))
         util = self.nodes[node].channel_utilization_percent(self.now)
-        cw = arduino_map(util, 0, 100, self.profile.cw_min, self.profile.cw_max)
+        profile = self.nodes[node].profile
+        cw = arduino_map(util, 0, 100, profile.cw_min, profile.cw_max)
         slot = self.slot_time_ms()
         return (
             2 * airtime
             + (
                 2**cw
-                + 2 * self.profile.cw_max
-                + 2 ** ((self.profile.cw_max + self.profile.cw_min) // 2)
+                + 2 * profile.cw_max
+                + 2 ** ((profile.cw_max + profile.cw_min) // 2)
             )
             * slot
             + PROCESSING_TIME_MSEC
@@ -1078,6 +1097,9 @@ class Mesh:
         `sent` and `event` keys so callers written against the old signature keep working.
         """
         radio = self.nodes[node]
+        if not radio.online:
+            self.stats["sends_while_offline"] += 1
+            return None
         entry = QueueEntry(packet)
         if len(radio.queue) >= QUEUE_DEPTH:
             # Something is dropped either way, so the counter fires either way - the question the
@@ -1192,7 +1214,7 @@ class Mesh:
             )
             entry.tx_after = min(
                 max(entry.tx_after + add, self.now + add),
-                self.now + 2 * self.tx_delay_weighted_worst(packet.rx_snr),
+                self.now + 2 * self.tx_delay_weighted_worst(node, packet.rx_snr),
             )
             self._arm(node, entry.tx_after)
         elif packet.rx_snr == 0 and packet.rx_rssi == 0:
@@ -1215,6 +1237,9 @@ class Mesh:
         entry = radio.queue[0]
         if entry.tx_after and self.now < entry.tx_after:
             self._arm(node, entry.tx_after)
+            return
+        if not radio.online:
+            radio.queue.clear()
             return
         if self._channel_busy(node) or radio.busy_until > self.now:
             self.stats["deferrals"] += 1
@@ -1248,7 +1273,9 @@ class Mesh:
         entry = self._cancel_sending(node, packet.id, only_ready=True)
         if entry is None:
             return False
-        entry.tx_after = self.now + self.tx_delay_weighted_worst(entry.packet.rx_snr)
+        entry.tx_after = self.now + self.tx_delay_weighted_worst(
+            node, entry.packet.rx_snr
+        )
         self._enqueue(self.nodes[node], entry)
         self.stats["late_window_clamps"] += 1
         self._arm(node, self.nodes[node].queue[0].tx_after or self.now)
@@ -1306,6 +1333,8 @@ class Mesh:
             rssi = self.rssi[tx.tx_node][rx]
             if rssi < sensitivity:
                 continue
+            if not self.nodes[rx].online:
+                continue
             if rx in transmitting:
                 self.stats["lost_to_half_duplex"] += 1
                 continue
@@ -1355,6 +1384,182 @@ class Mesh:
         return radio_loss.payload_is_lost(
             self.conf, rssi, self.conf.current_preset["cr"], length, self.rng.random()
         )
+
+    # ---- breaking the mesh -------------------------------------------------------------
+
+    def take_down(self, index):
+        """Turn a node off. It stops transmitting and stops hearing anything.
+
+        Deliberately *not* a deletion. Every other node keeps its NodeDB record for this one and
+        keeps believing whatever it last learned - including a next hop pointing through it. That
+        gap between what the mesh knows and what is true is the thing worth simulating; a mesh
+        where failure instantly updates everyone's routing table is not a mesh under test.
+        """
+        node = self.nodes[index]
+        if not node.online:
+            return False
+        node.online = False
+        node.queue.clear()
+        self.cancel(node.tx_token)
+        node.tx_token = None
+        node.busy_until = 0.0
+        self.stats["nodes_taken_down"] += 1
+        return True
+
+    def bring_up(self, index):
+        """Turn a node back on, with everything it knew intact.
+
+        A real node that reboots loses far more than this, but a node that was merely out of range
+        loses nothing, and both are "offline" to the rest of the mesh. `wipe` covers the other case.
+        """
+        node = self.nodes[index]
+        if node.online:
+            return False
+        node.online = True
+        self.stats["nodes_brought_up"] += 1
+        return True
+
+    def wipe(self, index):
+        """Forget everything this node learned - a factory reset, or a store that did not persist."""
+        node = self.nodes[index]
+        node.nodedb.clear()
+        node.history.clear()
+        node.seen.clear()
+        node.route_health.clear()
+
+    def sever(self, a, b):
+        """Cut the link between two nodes in both directions, leaving the rest of the mesh intact.
+
+        A partition is the sharpest question an archive can be asked - two halves that each keep
+        working, diverge, and then have to reconcile when the link comes back.
+        """
+        self.rssi[a][b] = -999.0
+        self.rssi[b][a] = -999.0
+        if b in self.neighbours[a]:
+            self.neighbours[a].remove(b)
+        if a in self.neighbours[b]:
+            self.neighbours[b].remove(a)
+
+    def partition(self, group):
+        """Sever every link crossing out of `group`, splitting the mesh in two.
+
+        Returns the number of links cut. Zero means the group was already disconnected from the
+        rest, which is worth knowing rather than silently succeeding.
+        """
+        inside = set(group)
+        cut = 0
+        # Both directions, because links are not reciprocal here - `_build_links` gives each pair an
+        # asymmetry draw, so A can hear B without B hearing A. Scanning only outward from the group
+        # leaves every inbound-only link intact, and the mesh stays connected through them.
+        for a in range(len(self.nodes)):
+            for b in list(self.neighbours[a]):
+                if (a in inside) != (b in inside):
+                    self.sever(a, b)
+                    cut += 1
+        self.stats["links_severed"] += cut
+        return cut
+
+    def articulation_nodes(self):
+        """The nodes whose loss would split the mesh - the bridges worth breaking.
+
+        Plain Hopcroft-Tarjan over the link graph. Killing random nodes mostly does nothing on a
+        well-connected mesh; killing these is what actually tests what the archive survives.
+        """
+        n = len(self.nodes)
+        depth = [None] * n
+        low = [0] * n
+        parent = [None] * n
+        found = set()
+
+        for root in range(n):
+            if depth[root] is not None:
+                continue
+            # Iterative, because a corridor topology can be deep enough to blow the stack.
+            stack = [(root, iter(self.neighbours[root]))]
+            depth[root] = low[root] = 0
+            root_children = 0
+            while stack:
+                node, peers = stack[-1]
+                advanced = False
+                for peer in peers:
+                    if depth[peer] is None:
+                        parent[peer] = node
+                        depth[peer] = low[peer] = depth[node] + 1
+                        stack.append((peer, iter(self.neighbours[peer])))
+                        if node == root:
+                            root_children += 1
+                        advanced = True
+                        break
+                    if peer != parent[node]:
+                        low[node] = min(low[node], depth[peer])
+                if advanced:
+                    continue
+                stack.pop()
+                if stack:
+                    up = stack[-1][0]
+                    low[up] = min(low[up], low[node])
+                    if up != root and low[node] >= depth[up]:
+                        found.add(up)
+            if root_children > 1:
+                found.add(root)
+        return sorted(found)
+
+    def break_mesh(self, mode, count=3, rng=None):
+        """Damage the mesh in a named way, and report what was done.
+
+        The modes are ordered by how targeted they are. `random` is the null hypothesis and on a
+        well-connected mesh it usually does nothing at all, which is worth seeing. `bridge` is the
+        sharpest, but a mesh at degree 8 has no articulation points to take - so it falls back to
+        degree, and says so rather than silently doing something else.
+
+        `split` does not remove any node: it cuts every link across a geographic line, which is the
+        only one of these guaranteed to actually partition a healthy mesh. That is the case an
+        archive most needs answered - two halves that keep working and diverge.
+        """
+        rng = rng or self.rng
+        live = [n.index for n in self.nodes if n.online]
+        if mode == "none":
+            return {"mode": mode, "taken_down": [], "links_cut": 0}
+
+        if mode == "split":
+            # Cut on the median x, so both halves are viable rather than one being a fragment.
+            median = sorted(self.nodes[i].x for i in live)[len(live) // 2]
+            west = {i for i in live if self.nodes[i].x < median}
+            cut = self.partition(west)
+            return {
+                "mode": mode,
+                "taken_down": [],
+                "links_cut": cut,
+                "sides": (len(west), len(live) - len(west)),
+            }
+
+        if mode == "bridge":
+            targets = [i for i in self.articulation_nodes() if self.nodes[i].online]
+            fell_back = not targets
+            if fell_back:
+                targets = sorted(live, key=lambda i: -len(self.neighbours[i]))
+        elif mode == "routers":
+            fell_back = False
+            targets = sorted(
+                (i for i in live if self.nodes[i].is_router_like()),
+                key=lambda i: -len(self.neighbours[i]),
+            )
+        elif mode == "degree":
+            fell_back = False
+            targets = sorted(live, key=lambda i: -len(self.neighbours[i]))
+        elif mode == "random":
+            fell_back = False
+            targets = rng.sample(live, min(count, len(live)))
+        else:
+            raise ValueError(f"unknown break mode {mode!r}")
+
+        taken = [i for i in targets[:count] if self.take_down(i)]
+        return {
+            "mode": mode,
+            "taken_down": taken,
+            "links_cut": 0,
+            "fell_back_to_degree": fell_back,
+        }
 
     def note_heard(self, rx, peer, hops_away=None):
         """Record a peer in rx's hot store, trimming it if that pushed it over the cap.
@@ -1451,7 +1656,7 @@ class Mesh:
         job. That is deliberate - the role exists to be the copy that definitely goes out - and it
         is the single biggest reason a 2.8 router carries more airtime than the old model showed.
         """
-        if not self.profile.role_aware_cancel:
+        if not self.nodes[rx].profile.role_aware_cancel:
             return True
         role = self.nodes[rx].role
         if role in (ROUTER, ROUTER_LATE):
@@ -1467,7 +1672,7 @@ class Mesh:
         sender's hop budget. The first hop always pays, and an ambiguous relay byte always pays,
         because preserving hops for the wrong node is worse than charging one too many.
         """
-        if not self.profile.preserve_hops:
+        if not self.nodes[rx].profile.preserve_hops:
             return True
         if packet.hops_taken() == 0:
             return True
@@ -1494,7 +1699,7 @@ class Mesh:
         does, so **evicting a peer forgets the way to it**. That is the cost of a small store on a
         large mesh, and it is a different cost from the ambiguity the relay byte causes.
         """
-        if destination == BROADCAST or not self.profile.next_hop_routing:
+        if destination == BROADCAST or not self.nodes[rx].profile.next_hop_routing:
             return None
         node = self.nodes[rx]
         record = node.nodedb.get(destination)
@@ -1573,7 +1778,7 @@ class Mesh:
             # wasSeenRecently, the update half: the record tracks the best hop limit anyone has
             # shown us and everyone we have seen relay this, both of which later decisions read.
             upgraded = (
-                self.profile.hop_upgrade and packet.hop_limit > record.highest_hop_limit
+                node.profile.hop_upgrade and packet.hop_limit > record.highest_hop_limit
             )
             record.highest_hop_limit = max(record.highest_hop_limit, packet.hop_limit)
             record.note_relayer(packet.relay_node)
@@ -1619,7 +1824,7 @@ class Mesh:
         else:
             self.stats["cancel_refused_by_role"] += 1
 
-        if self.profile.late_window and (
+        if node.profile.late_window and (
             node.role == ROUTER_LATE
             or (node.role == CLIENT_BASE and self._favourite_traffic(rx, packet))
         ):
@@ -1653,7 +1858,7 @@ class Mesh:
     def _relay_opaque(self, rx, packet):
         """NextHopRouter::relayOpaquePacket - relay from the immutable outer header only."""
         node = self.nodes[rx]
-        if not self.profile.opaque_relay:
+        if not node.profile.opaque_relay:
             return
         if node.rebroadcast_mode not in (
             REBROADCAST_ALL,
@@ -1677,7 +1882,9 @@ class Mesh:
 
     def _cap_event_hops(self, packet):
         """NextHopRouter::capEventRelayHops - event mode bounds what a relay may pass on."""
-        cap = self.profile.event_relay_hop_limit
+        cap = (
+            self.profile.event_relay_hop_limit
+        )  # a mesh-wide build flag, not a per-node one
         if cap is None or packet.hop_limit <= cap:
             return
         reduction = packet.hop_limit - cap
@@ -1688,7 +1895,7 @@ class Mesh:
         """NextHopRouter::perhapsRebroadcast. True when a relay copy was queued."""
         node = self.nodes[rx]
         exhaust = bool(
-            self.profile.exhaust_hops
+            self.nodes[rx].profile.exhaust_hops
             and self.should_exhaust_hops is not None
             and self.should_exhaust_hops(packet)
         )
@@ -1738,7 +1945,7 @@ class Mesh:
         touched this path, and without the second we would aim every future DM at whichever node
         happened to share a last byte.
         """
-        if not self.profile.next_hop_routing or not packet.is_ack_or_reply():
+        if not self.nodes[rx].profile.next_hop_routing or not packet.is_ack_or_reply():
             return
         node = self.nodes[rx]
         original = node.history.get(packet.request_id or packet.reply_id)
@@ -1762,7 +1969,7 @@ class Mesh:
     # ---- reliable delivery (ReliableRouter, NextHopRouter::doRetransmissions) ----------
 
     def _start_retransmission(self, node, packet, attempts):
-        if not self.profile.reliable_retx:
+        if not self.nodes[node].profile.reliable_retx:
             return
         self.nodes[node].reliable[packet.id] = {
             "packet": packet,
@@ -1841,6 +2048,12 @@ class Mesh:
         coming back are recognised as our own, and set the next hop before it goes out.
         """
         radio = self.nodes[node]
+        if not radio.online:
+            # The radio is off, so nothing is composed. Returning the packet anyway would let the
+            # caller register a message that never existed - an archive counting objects it never
+            # sent is exactly the silent accounting error this whole exercise is trying to avoid.
+            self.stats["sends_while_offline"] += 1
+            return None
         packet = Packet(
             self.new_packet_id(),
             node,
@@ -1911,6 +2124,7 @@ def build(
     hop_assign="centrality",
     topology="uniform",
     profile="2.8",
+    legacy_fraction=0.0,
     router_late_fraction=0.0,
     client_base_fraction=0.0,
     favourite_routers=False,
@@ -1932,6 +2146,15 @@ def build(
     # of where it sits. `max_num_nodes` overrides the mix outright, so a sweep can hold the store
     # fixed and vary something else.
     platforms = assign_platforms(node_count, platform_mix, rng)
+    # Firmware version per node. Drawn at random rather than by degree: a node's owner updating it
+    # has nothing to do with how well sited it is, and assuming otherwise would quietly decide the
+    # answer to "do the old nodes hold the mesh back" before the sweep ran.
+    default_profile = profile if isinstance(profile, Profile) else Profile(profile)
+    legacy_profile = Profile("legacy")
+    stale = set()
+    if legacy_fraction > 0:
+        want = max(1, int(round(node_count * legacy_fraction)))
+        stale = set(rng.sample(range(node_count), min(want, node_count)))
     nodes = [
         Node(
             i,
@@ -1939,6 +2162,7 @@ def build(
             y,
             node_num=node_nums[i],
             platform=platforms[i],
+            profile=legacy_profile if i in stale else default_profile,
             max_num_nodes=(
                 max_num_nodes
                 if max_num_nodes is not None
