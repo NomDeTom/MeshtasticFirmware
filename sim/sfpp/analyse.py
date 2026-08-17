@@ -58,13 +58,17 @@ def block_table(path):
         union = mean(cells, "sfpp", "union_fraction")
         # The payoff, stated the way it matters to a client: of everything an ordinary node failed
         # to hear, how much does the archive between them actually hold?
-        recovered = (union - reception) / max(1e-9, 1.0 - reception)
+        # Meaningless when there is no archive: the formula reads a union of zero as a catastrophic
+        # loss rather than as "not applicable", and printed -193% for the baseline row.
+        recovered = (
+            (union - reception) / max(1e-9, 1.0 - reception) if union > 0 else None
+        )
         lines.append(
             f"| {value} "
             f"| {mean(cells, 'sfpp', 'held_fraction_mean'):.3f} "
             f"| {union:.3f} "
             f"| {reception:.3f} "
-            f"| {recovered:.1%} "
+            f"| {'n/a' if recovered is None else format(recovered, '.1%')} "
             f"| {mean(cells, 'sfpp', 'adverts'):.0f} "
             f"| {mean(cells, 'sfpp', 'objects_moved'):.0f} "
             f"| {mean(cells, 'sfpp', 'sr_bytes') / 1000:.1f} KB "
