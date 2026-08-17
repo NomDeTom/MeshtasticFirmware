@@ -45,6 +45,10 @@ BASE = [
 BLOCKS = {
     "D-cadence": ("trigger", ["bucket", "interval", "aimd", "bucket+interval"], []),
     "D-resolve": ("resolve", ["sketch", "enum", "hybrid"], []),
+    # Every server seals the same bucket at nearly the same moment, because sealing follows the
+    # chain counter and the counter is global. If that synchronisation is why only 46% of
+    # bucket-close adverts reach a peer, spreading them should show it.
+    "D-jitter": ("advert-jitter-s", [1, 30, 120, 600], []),
     "E-capacity": ("capacity", [4, 8, 16, 32, 50], []),
     "E-width": ("short-id-bits", [16, 24, 32, 64], []),
     "E-signed": ("signed", [False, True], []),
