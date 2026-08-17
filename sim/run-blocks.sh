@@ -58,11 +58,15 @@ if ! python3 -m pytest sfpp/test_mesh.py -q >"$OUT_ROOT/.tests.log" 2>&1; then
 fi
 echo "transport $PIN, tests pass ($(tail -1 "$OUT_ROOT/.tests.log"))"
 
+# Blocks arrive as positional arguments, NOT as an exported array: bash silently accepts
+# `BLOCKS=(a b) runner` as a command prefix but assigns the literal string "(a b)", so every
+# launch queued one block named after the whole list and died on a KeyError in one second.
 runner() {
 	echo $$ >"$LOCK"
 	{
 		echo "started $(date -Is) · transport $PIN · seed base $SEED_BASE"
-		for blk in "${BLOCKS[@]}"; do
+		echo "blocks: $*"
+		for blk in "$@"; do
 			if ls "$OUT_ROOT/$blk"*.json >/dev/null 2>&1; then
 				echo "skip $blk (already present)"
 				continue
@@ -79,9 +83,8 @@ runner() {
 	rm -f "$LOCK"
 }
 
-export -f runner
-setsid bash -c "$(declare -f runner); OUT_ROOT='$OUT_ROOT' LOCK='$LOCK' PIN='$PIN' \
-  SEED_BASE='$SEED_BASE' BLOCKS=(${BLOCKS[*]@Q}) runner" </dev/null >/dev/null 2>&1 &
+setsid bash -c "$(declare -f runner); export OUT_ROOT=${OUT_ROOT@Q} LOCK=${LOCK@Q} \
+  PIN=${PIN@Q} SEED_BASE=${SEED_BASE@Q}; runner ${BLOCKS[*]@Q}" </dev/null >/dev/null 2>&1 &
 disown
 sleep 1
 echo "detached runner started; ${#BLOCKS[@]} blocks queued"
