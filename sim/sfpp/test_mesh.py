@@ -508,6 +508,58 @@ class RebroadcastMode(unittest.TestCase):
 class LastByteResolution(unittest.TestCase):
     """NodeDB::resolveLastByte - unique, ambiguous, or unknown."""
 
+    def test_a_zero_low_byte_is_sent_as_ff(self):
+        """getLastByteOfNodeNum: `(num & 0xFF) ? (num & 0xFF) : 0xFF`, because 0 is the sentinel."""
+        node = M.Node(0, 0.0, 0.0, node_num=0x1234AB00)
+        self.assertEqual(node.relay_byte, 0xFF)
+        self.assertEqual(M.Node(0, 0.0, 0.0, node_num=0x1234AB07).relay_byte, 0x07)
+
+    def test_the_three_outcomes_are_distinguished(self):
+        """resolveLastByte returns a status, not just a node: NONE and AMBIGUOUS differ."""
+        mesh = small_mesh()
+        byte = mesh.nodes[3].relay_byte
+        self.assertEqual(
+            mesh.resolve_last_byte(0, byte), (M.RESOLUTION_NONE, None)
+        )
+        heard(mesh, 0, 3)
+        self.assertEqual(mesh.resolve_last_byte(0, byte), (M.RESOLUTION_UNIQUE, 3))
+        mesh.nodes[4].node_num = (mesh.nodes[4].node_num & ~0xFF) | byte
+        heard(mesh, 0, 4)
+        self.assertEqual(
+            mesh.resolve_last_byte(0, byte), (M.RESOLUTION_AMBIGUOUS, None)
+        )
+        self.assertEqual(mesh.stats["next_hop_ambiguous"], 1)
+        self.assertEqual(mesh.stats["next_hop_unresolved"], 1)
+
+    def test_the_sentinel_byte_resolves_to_nothing(self):
+        """0 is NO_RELAY_NODE, and getLastByteOfNodeNum never yields it."""
+        mesh = small_mesh()
+        heard(mesh, 0, 3)
+        self.assertEqual(mesh.resolve_last_byte(0, 0), (M.RESOLUTION_NONE, None))
+
+    def test_an_ignored_node_is_not_a_candidate(self):
+        """The candidate gate drops ignored nodes, so they cannot collide with anyone."""
+        mesh = small_mesh()
+        byte = mesh.nodes[3].relay_byte
+        mesh.nodes[4].node_num = (mesh.nodes[4].node_num & ~0xFF) | byte
+        heard(mesh, 0, 3)
+        heard(mesh, 0, 4)
+        self.assertIsNone(mesh.resolve_unique_last_byte(0, byte))
+        mesh.nodes[0].nodedb[4].is_ignored = True
+        self.assertEqual(mesh.resolve_unique_last_byte(0, byte), 3)
+
+    def test_pre_2_8_takes_the_first_match_without_checking(self):
+        """resolveLastByte is new here; 2.6 and 2.7 resolve a colliding byte to whoever comes first."""
+        mesh = small_mesh(profile="2.7")
+        byte = mesh.nodes[3].relay_byte
+        mesh.nodes[4].node_num = (mesh.nodes[4].node_num & ~0xFF) | byte
+        heard(mesh, 0, 3)
+        heard(mesh, 0, 4)
+        status, peer = mesh.resolve_last_byte(0, byte)
+        self.assertEqual(status, M.RESOLUTION_UNIQUE)
+        self.assertIn(peer, (3, 4))
+        self.assertEqual(mesh.stats["next_hop_ambiguous"], 0)
+
     def test_unique_byte_resolves(self):
         mesh = small_mesh()
         heard(mesh, 0, 3)
