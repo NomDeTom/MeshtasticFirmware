@@ -1460,16 +1460,33 @@ class Campaign:
         return out
 
     def _reach_ceiling(self):
-        """The best any node could do: the share of the mesh within the hop limit of it.
+        """The best a node could do: the share of senders whose packets can physically reach it.
 
-        A message that originated five hops away was never going to arrive, and counting it as a
-        loss would blame the radio for the routing. Separating the two is the point of the baseline.
+        A message that originated five hops away under a hop limit of three was never going to
+        arrive, and counting it as a loss would blame the radio for the routing.
+
+        The bound is the **sender's** hop limit, not the receiver's or a global one. That distinction
+        was wrong here until 2026-08-17: this used `opts.hop_limit`, a single value, while `--hop-spread`
+        has been the default since round three and gives every node its own limit of 3 to 7. The result
+        was a "ceiling" computed at 3 for a mesh actually running 3-7, which understated it badly enough
+        that measured reception exceeded it - 0.900 against a claimed 0.622, which is impossible and is
+        what exposed the bug.
+
+        Reception itself was always measured directly and is unaffected. What was wrong is every
+        decomposition derived from this: `reach_ceiling_mean`, `missed_beyond_hop_limit` and
+        `missed_within_reach`, in rounds two and three wherever hop spread was on.
         """
         out = []
         n = self.opts.nodes
+        reachable_from = {}
+        for sender in range(n):
+            depth = self.mesh.hops_from([sender])
+            limit = self.mesh.hop_limit_for(sender)
+            reachable_from[sender] = {
+                target for target, hops in depth.items() if 0 < hops <= limit
+            }
         for i in range(n):
-            depth = self.mesh.hops_from([i])
-            within = sum(1 for k, v in depth.items() if 0 < v <= self.opts.hop_limit)
+            within = sum(1 for j in range(n) if j != i and i in reachable_from[j])
             out.append(within / (n - 1))
         return out
 
