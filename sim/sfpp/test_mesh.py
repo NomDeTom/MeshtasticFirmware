@@ -1108,6 +1108,167 @@ class WarmTier(unittest.TestCase):
         self.assertFalse(M.Profile("2.7").warm_store)
 
 
+class Acknowledgements(unittest.TestCase):
+    """ReliableRouter: the destination answers, which is what makes a route learnable."""
+
+    def test_the_destination_acks_a_request_that_asked_for_it(self):
+        mesh = small_mesh(nodes=8, seed=9)
+        peer = next(iter(mesh.neighbours[0]))
+        mesh.originate(0, 1, 40, destination=peer, want_ack=True)
+        mesh.run(60000.0)
+        self.assertGreaterEqual(mesh.stats["acks_sent"], 1)
+        self.assertGreaterEqual(mesh.stats["acks_delivered"], 1)
+
+    def test_nothing_acks_a_broadcast_or_a_packet_addressed_elsewhere(self):
+        mesh = small_mesh(nodes=8, seed=9)
+        mesh.originate(0, 1, 40, want_ack=True)
+        mesh.run(60000.0)
+        self.assertEqual(mesh.stats["acks_sent"], 0)
+
+    def test_an_ack_answers_over_the_distance_the_request_came(self):
+        """getHopLimitForResponse: hops used plus a margin, not the sender's whole budget."""
+        mesh = small_mesh(nodes=8)
+        packet = M.Packet(1, 3, 1, 40, hop_limit=1)
+        packet.hop_start = 3  # two hops used
+        self.assertEqual(mesh.hop_limit_for_response(0, packet), 3)
+        direct = M.Packet(2, 3, 1, 40, hop_limit=0)
+        direct.hop_start = 0
+        self.assertEqual(
+            mesh.hop_limit_for_response(0, direct), 0, "a direct request is answered directly"
+        )
+
+    def test_an_ack_is_priority_ack_and_two_bytes(self):
+        mesh = small_mesh(nodes=8, seed=9)
+        peer = next(iter(mesh.neighbours[0]))
+        request = M.Packet(5, 0, 1, 40, hop_limit=3, want_ack=True, destination=peer)
+        request.hop_start = 3
+        ack = mesh._perhaps_ack(peer, request)
+        self.assertIsNotNone(ack)
+        self.assertEqual(ack.priority, M.PRIORITY_ACK)
+        self.assertEqual(ack.length, M.ACK_PAYLOAD_BYTES)
+        self.assertEqual(ack.request_id, request.id)
+        self.assertEqual(ack.destination, 0)
+
+    def test_an_ack_lets_the_sender_learn_a_route(self):
+        """The whole point: without a reply coming back, next_hop is never learned at all."""
+        mesh = small_mesh(nodes=14, seed=9, router_fraction=0.15)
+        for index in range(14):
+            mesh.originate(index, M.NODEINFO_PORTNUM, 40, kind="nodeinfo")
+            mesh.run(mesh.now + 5000.0)
+        for step in range(12):
+            mesh.originate(
+                step % 14, 1, 40, destination=(step * 5 + 3) % 14, want_ack=True
+            )
+            mesh.run(mesh.now + 30000.0)
+        self.assertGreater(mesh.stats["acks_sent"], 0)
+        self.assertGreater(mesh.stats["next_hop_learned"], 0)
+
+
+class RouteHealthLifetimes(unittest.TestCase):
+    """NextHopRouter's health table: what refreshes a route, what forgives it, and what does not."""
+
+    def test_relearning_the_same_hop_keeps_the_failure_count(self):
+        """noteRouteLearned clears failures only when the hop itself changes."""
+        mesh = small_mesh(nodes=8)
+        mesh.note_route_learned(0, 3, 0x40)
+        mesh.note_route_failure(0, 3)
+        mesh.note_route_failure(0, 3)
+        self.assertEqual(mesh.nodes[0].route_health[3].consecutive_failures, 2)
+        mesh.note_route_learned(0, 3, 0x40)
+        self.assertEqual(
+            mesh.nodes[0].route_health[3].consecutive_failures,
+            2,
+            "a dead hop taught again is still the same dead hop",
+        )
+        mesh.note_route_learned(0, 3, 0x55)
+        self.assertEqual(mesh.nodes[0].route_health[3].consecutive_failures, 0)
+
+    def test_an_ack_refreshes_a_route_but_does_not_invent_one(self):
+        mesh = small_mesh(nodes=8)
+        mesh.note_route_success(0, 3)
+        self.assertNotIn(3, mesh.nodes[0].route_health, "nothing to refresh")
+        mesh.note_route_learned(0, 3, 0x40)
+        mesh.note_route_failure(0, 3)
+        mesh.now = 1000.0
+        mesh.note_route_success(0, 3)
+        self.assertEqual(mesh.nodes[0].route_health[3].consecutive_failures, 0)
+        self.assertEqual(mesh.nodes[0].route_health[3].learned_at, 1000.0)
+
+    def test_verified_means_learned_fresh_and_never_since_failed(self):
+        mesh = small_mesh(nodes=8)
+        self.assertFalse(mesh.route_is_verified(0, 3), "no route at all")
+        mesh.note_route_learned(0, 3, 0x40)
+        self.assertTrue(mesh.route_is_verified(0, 3))
+        mesh.note_route_failure(0, 3)
+        self.assertFalse(mesh.route_is_verified(0, 3))
+        mesh.note_route_success(0, 3)
+        self.assertTrue(mesh.route_is_verified(0, 3))
+        mesh.now += M.ROUTE_TTL_MSEC
+        self.assertFalse(mesh.route_is_verified(0, 3), "stale, however healthy")
+
+
+class CodingRateLadder(unittest.TestCase):
+    """Branch CRCRRCRRR: base, then one step slower, then 4/8."""
+
+    def test_the_ladder_steps_by_attempt(self):
+        mesh = small_mesh(nodes=6)
+        base = mesh.conf.current_preset["cr"]
+        self.assertEqual(mesh._ladder_coding_rate(0), base)
+        self.assertEqual(mesh._ladder_coding_rate(1), base + 1)
+        self.assertEqual(mesh._ladder_coding_rate(2), 8)
+        self.assertEqual(mesh._ladder_coding_rate(3), 8)
+
+    def test_a_slower_rate_is_a_longer_packet(self):
+        mesh = small_mesh(nodes=6)
+        base = mesh.conf.current_preset["cr"]
+        self.assertGreater(
+            mesh.airtime_ms(60, 8),
+            mesh.airtime_ms(60, base),
+            "more redundancy takes longer to send",
+        )
+
+    def test_no_release_carries_the_ladder(self):
+        for version in M.VERSIONS:
+            self.assertFalse(M.Profile(version).coding_rate_ladder, version)
+
+
+class EarlyFloodM4(unittest.TestCase):
+    """NEXTHOP_EARLY_FLOOD_ON_UNVERIFIED, written and compiled out."""
+
+    def test_it_is_off_in_every_release(self):
+        for version in M.VERSIONS:
+            self.assertFalse(M.Profile(version).early_flood_on_unverified, version)
+
+    def test_an_unverified_route_floods_a_retry_early(self):
+        mesh = small_mesh(
+            nodes=8, profile=M.Profile("2.8", early_flood_on_unverified=True)
+        )
+        heard(mesh, 0, 3, hops_away=1)
+        neighbour = next(iter(mesh.neighbours[0]))
+        heard(mesh, 0, neighbour, hops_away=0)
+        mesh.nodes[0].nodedb[3].next_hop = mesh.nodes[neighbour].relay_byte
+        mesh.note_route_learned(0, 3, mesh.nodes[neighbour].relay_byte)
+        mesh.note_route_failure(0, 3)  # so the route is no longer verified
+        packet = mesh.originate(0, 1, 40, destination=3, want_ack=True)
+        self.assertIsNotNone(packet)
+        mesh._do_retransmission(0, packet.id)
+        self.assertEqual(mesh.stats["early_floods"], 1)
+        self.assertEqual(mesh.nodes[0].nodedb[3].next_hop, M.NO_NEXT_HOP_PREFERENCE)
+
+    def test_a_verified_route_keeps_its_directed_retry(self):
+        mesh = small_mesh(
+            nodes=8, profile=M.Profile("2.8", early_flood_on_unverified=True)
+        )
+        neighbour = next(iter(mesh.neighbours[0]))
+        heard(mesh, 0, neighbour, hops_away=0)
+        heard(mesh, 0, 3, hops_away=1)
+        mesh.nodes[0].nodedb[3].next_hop = mesh.nodes[neighbour].relay_byte
+        mesh.note_route_learned(0, 3, mesh.nodes[neighbour].relay_byte)
+        packet = mesh.originate(0, 1, 40, destination=3, want_ack=True)
+        mesh._do_retransmission(0, packet.id)
+        self.assertEqual(mesh.stats["early_floods"], 0)
+
+
 class ExtraRepeats(unittest.TestCase):
     """RepeatScalingModule - tolerate a heard copy of a text before cancelling our own relay."""
 
