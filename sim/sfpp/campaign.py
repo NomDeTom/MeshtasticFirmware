@@ -1,9 +1,8 @@
 """SF++ set reconciliation over a real mesh: server placement, the protocol, and what it costs.
 
-Every message the protocol sends is a packet on the transport in mesh.py. An advert contends for
-the channel, is relayed by nodes that gain nothing from it, and is lost when it collides. That is
-the point: the three-store simulator settled whether the checksum ever misses a misdecode, and this
-one asks what the thing costs and where the servers should go.
+Every message the protocol sends is a packet on the transport in mesh.py: an advert contends for the
+channel, is relayed by nodes that gain nothing from it, and is lost when it collides. What this
+measures is what the protocol costs and where the servers should go.
 
 Three arms are swept independently:
 
@@ -126,9 +125,8 @@ class Placement:
     def beside_router(mesh, count, rng, hops=None):
         """A plain client one hop from each router - the 'off to the side of a router' case.
 
-        A server beside a router hears everything the router hears without competing with it for
-        the channel, which is the argument for the arrangement. Whether that survives contact with
-        the contention window is the thing being measured.
+        The argument for it: such a server hears most of what the router hears without competing
+        with it for the channel.
         """
         routers = [i for i, node in enumerate(mesh.nodes) if node.role == M.ROUTER]
         routers.sort(key=lambda i: -len(mesh.neighbours[i]))
@@ -236,12 +234,11 @@ class Counters:
 class Server:
     """One SF++ node: a store, plus the reconciliation state the protocol needs.
 
-    Bucket membership is deliberately per-server. The firmware assigns a chain counter as
-    `chain_end.counter + 1` when it ingests a message that arrived without an official one
-    (StoreForwardPlusPlus.cpp:1366), so two servers that each hear the same broadcast off the air
-    number it differently. `SketchIndex.h` claims a count boundary is "one both sides derive from the
-    data itself"; it is not - it is derived from local arrival order, and that is exactly the thing
-    the bucket-mode arm exists to measure.
+    Bucket membership is per-server. The firmware assigns a chain counter as `chain_end.counter + 1`
+    when it ingests a message that arrived without an official one (StoreForwardPlusPlus.cpp:1366),
+    so two servers hearing the same broadcast off the air number it differently. `SketchIndex.h`
+    describes a count boundary as one both sides derive from the data itself; it is derived from
+    local arrival order instead, which is what the bucket-mode arm measures.
     """
 
     def __init__(self, index, store, opts):
@@ -271,10 +268,9 @@ class Server:
     def window(self, size):
         """The N objects this server ingested most recently, by its own numbering.
 
-        A sliding window needs no agreement with anyone. Two servers' windows overlap because they
-        heard mostly the same recent traffic, not because they negotiated a boundary, which is the
-        whole point: the XOR of two sketches is the symmetric difference of whatever two sets they
-        were built over, agreed or not.
+        A sliding window needs no agreement. Two servers' windows overlap because they heard mostly
+        the same recent traffic, not because they negotiated a boundary: the XOR of two sketches is
+        the symmetric difference of whatever sets they were built over.
         """
         recent = sorted(self.held.items(), key=lambda kv: -kv[1])[:size]
         return {h for h, _ in recent}
@@ -394,10 +390,9 @@ class Campaign:
         self.counter_of = {}  # message_hash -> canonical chain counter
         self._counted = 0
         self.heard_text = {i: set() for i in range(opts.nodes)}
-        # Every class, not just the archived one. Position, telemetry and nodeinfo were generated,
-        # flooded and charged airtime while nothing recorded whether anyone received them - roughly
-        # six packets in seven were invisible, and any airtime share quoted against them was a share
-        # of an unmeasured denominator.
+        # Every class, not just the archived one. Position, telemetry and nodeinfo are generated,
+        # flooded and charged airtime, so any airtime share quoted against them needs their
+        # receptions measured too.
         self.heard_by_class = {}
         self.hop_stats = {}
         self.servers = {}
@@ -488,9 +483,8 @@ class Campaign:
             self._on_text(node, packet)
         elif packet.kind == "sr:item_provide" and packet.payload is not None:
             # A replayed object is useful to whoever hears it, not only to whoever asked. A server
-            # files it in its store; any other node records it for its own history. Both paths run -
-            # intercepting here and returning was a bug that stopped servers ingesting broadcast
-            # replays at all, and it cost a third of their holdings.
+            # files it in its store and any other node records it for its own history, so both paths
+            # run: returning here instead would stop servers ingesting broadcast replays.
             if node.index in self.servers:
                 self._on_sr(node, packet)
             else:
@@ -504,11 +498,10 @@ class Campaign:
     def _global_counter(self, message_hash):
         """Origination order across the whole mesh. A FICTION, kept only as an upper bound.
 
-        No canonical counter exists. The firmware comment at StoreForwardPlusPlus.cpp:1364 reads "if
-        we get an official counter, use it. Otherwise, just increment" - and there is no official
-        counter to get. Every counter is a local increment off the local chain tip, so this mode
-        describes a mesh nobody can build. It is here to bound what bucket agreement would be worth
-        if it existed, and for no other purpose.
+        No canonical counter exists. StoreForwardPlusPlus.cpp:1364 reads "if we get an official
+        counter, use it. Otherwise, just increment", and there is no official counter to get: every
+        counter is a local increment off the local chain tip. This mode therefore describes a mesh
+        that cannot be built, and exists only to bound what bucket agreement would be worth.
         """
         counter = self.counter_of.get(message_hash)
         if counter is None:
@@ -808,8 +801,8 @@ class Campaign:
             return
 
         if local.checksum == payload["checksum"]:
-            # Both windows are byte-identical. This is the only case the bucket design's safety
-            # mechanism can still fire on, and counting how often it happens is the point.
+            # Both windows are byte-identical: the only case in which the bucket design's safety
+            # mechanism can still fire, so it is counted.
             self.counters.window_checksum_closed += 1
             if server.window(size) != payload["members"]:
                 self.counters.silent_losses += 1
@@ -1142,9 +1135,8 @@ class Campaign:
     def _final_audit(self):
         """Every server pair, every bucket, at rest: does checksum equality imply set equality?
 
-        The in-flight check can only judge the exchanges that happened. This one judges the end
-        state, where nothing is in flight and no snapshot is stale, so a disagreement here is
-        unambiguous. It is the same claim the three-store simulator made, restated over a mesh.
+        The in-flight check can only judge the exchanges that happened. This judges the end state,
+        where nothing is in flight and no snapshot is stale, so a disagreement here is unambiguous.
         """
         if self.opts.bucket_mode == "window":
             # There is no shared bucket to audit: the windows were never agreed. The in-flight gate
@@ -1470,16 +1462,10 @@ class Campaign:
         A message that originated five hops away under a hop limit of three was never going to
         arrive, and counting it as a loss would blame the radio for the routing.
 
-        The bound is the **sender's** hop limit, not the receiver's or a global one. That distinction
-        was wrong here until 2026-08-17: this used `opts.hop_limit`, a single value, while `--hop-spread`
-        has been the default since round three and gives every node its own limit of 3 to 7. The result
-        was a "ceiling" computed at 3 for a mesh actually running 3-7, which understated it badly enough
-        that measured reception exceeded it - 0.900 against a claimed 0.622, which is impossible and is
-        what exposed the bug.
-
-        Reception itself was always measured directly and is unaffected. What was wrong is every
-        decomposition derived from this: `reach_ceiling_mean`, `missed_beyond_hop_limit` and
-        `missed_within_reach`, in rounds two and three wherever hop spread was on.
+        The bound is the sender's own hop limit, taken per sender. Under `--hop-spread` every node
+        has its own limit of 3 to 7, so a single global value would compute a ceiling below the
+        reception actually measured. `reach_ceiling_mean`, `missed_beyond_hop_limit` and
+        `missed_within_reach` all derive from this; measured reception does not.
         """
         out = []
         n = self.opts.nodes
@@ -1505,8 +1491,7 @@ def _hot_store_size(opts):
     """The hot-store cap to hand every node, or None to let the platform mix decide.
 
     --max-num-nodes and MAX_NUM_NODES are the same constant, so one flag drives both the congestion
-    input and the store. A platform mix overrides it, because then the whole point is that nodes
-    differ; asking for both is asking for two different things and the mix wins.
+    input and the store. A platform mix asks for nodes that differ, so it overrides the flag.
     """
     if getattr(opts, "platform_mix", "uniform") != "uniform":
         return None
@@ -1628,7 +1613,7 @@ def build_parser():
         "--no-hop-spread",
         dest="hop_spread",
         action="store_false",
-        help="one hop limit for everyone - the round-one and round-two control",
+        help="one hop limit for everyone; the control against --hop-spread",
     )
     ap.add_argument(
         "--hop-spread",

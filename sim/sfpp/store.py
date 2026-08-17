@@ -5,8 +5,7 @@ writes the database the firmware reads. Only the parts the set-reconciliation wo
 modelled - channel_messages, its counter, and the two set-index columns. DMs, canon_scratch and the
 peers table exist in the schema but the simulator does not drive them.
 
-What is deliberately *not* modelled: the git-chain link walk. The point of the exercise is to
-compare reconciliation against it, and the chain's cost is already characterised analytically.
+Not modelled: the git-chain link walk, whose cost is characterised analytically in chain.py.
 """
 
 import sqlite3
@@ -75,7 +74,7 @@ BUCKET_SUMMARY_SQL = """select short_id, checksum from channel_messages
 
 
 class SfppStore:
-    """One node's store. Three of these, sharing nothing, is the experiment."""
+    """One node's store, sharing nothing with any other."""
 
     def __init__(self, path, node_id, index_on_insert=True):
         self.node_id = node_id

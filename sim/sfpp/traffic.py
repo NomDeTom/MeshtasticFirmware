@@ -77,11 +77,9 @@ class TextObject:
 # the configured rate whichever shape is chosen - a diurnal curve should move *when* traffic happens,
 # not how much of it there is, or the shapes would not be comparable.
 #
-# `commuter` is the two-peak human pattern: a morning bump, a lull, a larger evening peak, and a deep
-# overnight trough. `sinusoid` is the naive single-peak version, kept because it is what most models
-# reach for and it is worth being able to show the difference. Measured hourly weights from a real
-# packet feed would replace `commuter`, which is a shape drawn from how people behave rather than from
-# data - see the plan's stretch goal.
+# `commuter` is the two-peak human pattern: a morning bump, a lull, a larger evening peak and a deep
+# overnight trough. `sinusoid` is the single-peak version, kept for comparison. Both are drawn from
+# how people behave rather than from a measured feed.
 DIURNAL = {
     "flat": [1.0] * 24,
     "sinusoid": [
@@ -201,9 +199,9 @@ class Generator:
         self.text_scale = text_scale
         preset = mesh.conf.current_preset
         # Device-originated broadcasts stretch with mesh size; user-typed text does not, because
-        # nothing in the firmware throttles a person deciding to send a message.
-        # Which era's throttle to apply. Taken from the mesh's own default profile, so a 2.5 mesh
-        # gets the per-preset table and its small-mesh speedup rather than 2.8's SF/BW curve.
+        # nothing in the firmware throttles a person deciding to send a message. Which era's
+        # throttle applies comes from the mesh's own default profile, so a 2.5 mesh gets the
+        # per-preset table and its small-mesh speedup rather than 2.8's SF/BW curve.
         profile = mesh.nodes[0].profile if mesh.nodes else None
         self.congestion = (
             # getNumOnlineMeshNodes() iterates the hot store, so a node cannot count mesh members it

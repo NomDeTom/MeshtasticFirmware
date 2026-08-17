@@ -1,8 +1,8 @@
 """Pins the transport's MAC and routing to what the firmware in this tree actually does.
 
-Every expected value here was computed by hand from the C++ named in the test, not from a previous
-run of this simulator. That is the only way a test like this is worth anything: a regression test
-against my own output would pass just as happily if I had read RadioInterface wrong.
+Every expected value here is computed by hand from the C++ named in the test, never from a previous
+run of this simulator. A test written against the simulator's own output would pass whether or not
+the firmware was read correctly, and so would pin nothing.
 
 Run from `sim/`:  python3 -m unittest sfpp.test_mesh -v
 """
@@ -257,11 +257,11 @@ class QueueOrder(unittest.TestCase):
         self.assertFalse(mesh._replace_lower_priority(radio, newcomer))
 
     def test_the_backoff_cap_exists_only_under_legacy(self):
-        """The pre-fold-in defect, restored so `legacy` carries the rule it was named for.
+        """The firmware has no backoff cap - setTransmitDelay reschedules indefinitely - so no
+        release series carries one, and only `legacy` does.
 
-        The firmware has no such cap - setTransmitDelay reschedules indefinitely - so 2.8 must not
-        have one. Reproducing the *rate* at which it fired before the fold-in is a different
-        matter: see test_the_cap_alone_does_not_reproduce_pre_fold_in_drops.
+        The rate at which it fired is a separate question: see
+        test_the_cap_alone_does_not_reproduce_pre_fold_in_drops.
         """
         self.assertIsNone(M.Profile("2.8").max_backoffs)
         self.assertEqual(M.Profile("legacy").max_backoffs, 400)
