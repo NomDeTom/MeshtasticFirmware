@@ -120,6 +120,11 @@ ROUTE_HEALTH_MAX = 32
 # PacketHistory keeps up to three relayers per record; next-hop learning reads them.
 MAX_RELAYERS = 3
 
+# NodeDB.h LastByteResolution. Callers must treat anything but UNIQUE as untrustworthy.
+RESOLUTION_NONE = "none"
+RESOLUTION_UNIQUE = "unique"
+RESOLUTION_AMBIGUOUS = "ambiguous"
+
 # mesh-pb-constants.h. The hot store is platform-dependent, and everything routing knows is bounded
 # by it: a node cannot resolve, route to, or count a peer it has evicted. A real mesh is a mix of
 # these, so scaling questions have one answer per platform rather than one overall.
@@ -719,15 +724,19 @@ class NodeRecord:
     cannot be resolved from a relay byte, cannot hold a next hop, and does not count as online.
     """
 
-    __slots__ = ("last_heard", "hops_away", "next_hop", "is_favourite")
+    __slots__ = ("last_heard", "hops_away", "next_hop", "is_favourite", "is_ignored")
 
-    def __init__(self, last_heard, hops_away=None, is_favourite=False):
+    def __init__(self, last_heard, hops_away=None, is_favourite=False, is_ignored=False):
         self.last_heard = last_heard
         # None until we have heard a packet from this node with a usable hop count - `has_hops_away`
         # in the firmware. Zero means a direct neighbour, which is what next-hop resolution wants.
         self.hops_away = hops_away
         self.next_hop = NO_NEXT_HOP_PREFERENCE
+        # Both live in the packed bitfield that replaced the separate booleans in NodeInfoLite.
         self.is_favourite = is_favourite
+        # An ignored node is not a resolution candidate at all, so it can neither be routed through
+        # nor collide with anyone else's last byte.
+        self.is_ignored = is_ignored
 
     @property
     def is_protected(self):
@@ -860,8 +869,13 @@ class Node:
 
     @property
     def relay_byte(self):
-        """The last byte of our node number - all that fits in the packet's relay_node field."""
-        return self.node_num & 0xFF
+        """NodeDB::getLastByteOfNodeNum - all of our number that fits in `relay_node`.
+
+        A low byte of zero is sent as 0xFF, because 0 is the NO_RELAY_NODE sentinel. So one node
+        number in 256 is not identified by its own last byte, and 0xFF answers for twice as many
+        nodes as any other value.
+        """
+        return (self.node_num & 0xFF) or 0xFF
 
     def position(self):
         return (self.x, self.y)
@@ -1168,6 +1182,8 @@ class Mesh:
             "next_hop_unicast": 0,
             "next_hop_learned": 0,
             "next_hop_ambiguous": 0,
+            # No candidate at all, as against two of them: a byte this node has not learned.
+            "next_hop_unresolved": 0,
             "next_hop_fallbacks": 0,
             "route_expired_ttl": 0,
             "route_expired_failures": 0,
@@ -1952,32 +1968,40 @@ class Mesh:
 
     # ---- last-byte resolution (NodeDB::resolveLastByte) --------------------------------
 
-    def resolve_unique_last_byte(self, rx, relay_byte, require_direct_neighbour=False):
-        """NodeDB::resolveLastByte. Which node is this relay byte? Exactly one, several, or none.
+    def resolve_last_byte(self, rx, relay_byte, require_direct_neighbour=False):
+        """NodeDB::resolveLastByte. Returns (status, peer) - UNIQUE, AMBIGUOUS or NONE.
 
         `relay_node` and `next_hop` are one byte of a 32-bit node number, so on a mesh of any size
-        they collide. An ambiguous byte returns None, and every caller treats that as the safe
-        branch: decrement the hop limit, flood instead of unicasting, learn nothing.
+        they collide. Callers treat anything but UNIQUE as the safe branch: decrement the hop limit,
+        flood instead of unicasting, learn nothing. The two failures are kept apart because they say
+        different things - AMBIGUOUS is a dense mesh, NONE is a mesh this node has not learned.
 
         Two gates decide the candidate set, and both shrink it well below "every node with this
-        byte". The candidate gate is the hot store: an evicted or never-heard peer is not a
-        candidate. The relevance gate asks whether the peer is a plausible relay for this question -
-        on the send path a direct neighbour heard within two hours, otherwise a direct neighbour, a
-        favourite or a router-like node.
+        byte". The candidate gate is the hot store, minus ourselves and any ignored node: an evicted
+        or never-heard peer is not a candidate. The relevance gate asks whether the peer is a
+        plausible relay for this question - on the send path a direct neighbour heard within two
+        hours, otherwise a direct neighbour, a favourite or a router-like node.
 
         So a smaller store makes the byte less ambiguous rather than more, which is the opposite of
         a birthday bound taken over the whole mesh. A large mesh costs knowledge, not resolution.
 
-        Only this tree checks for a second candidate. Under 2.6 and 2.7 the lookup takes the first
-        node it matches and the caller is never told it guessed.
+        Only this tree scans for a second candidate. Under 2.6 and 2.7 the lookup takes the first
+        node it matches and the caller is never told it guessed, which is modelled by returning
+        UNIQUE on that first match.
+
+        One fidelity gap: the firmware reads the role recorded in its own `NodeInfoLite`, learned
+        from a NodeInfo exchange this model does not run, so the role gate here reads the peer's
+        true role and is better informed than the firmware's.
         """
         if not relay_byte:
-            return None
+            return RESOLUTION_NONE, None
         me = self.nodes[rx]
         cutoff = self.now - NEXTHOP_NEIGHBOR_FRESH_MSEC
         match = None
         for peer, record in me.nodedb.items():
-            if peer == rx or self.nodes[peer].relay_byte != relay_byte:
+            if peer == rx or record.is_ignored:
+                continue
+            if self.nodes[peer].relay_byte != relay_byte:
                 continue
             if require_direct_neighbour:
                 relevant = record.hops_away == 0 and record.last_heard >= cutoff
@@ -1990,13 +2014,21 @@ class Mesh:
             if not relevant:
                 continue
             if not me.profile.resolve_ambiguity:
-                return peer
+                return RESOLUTION_UNIQUE, peer
             if match is not None:
                 # A second relevant candidate shares the byte. Nothing later can resolve that.
                 self.stats["next_hop_ambiguous"] += 1
-                return None
+                return RESOLUTION_AMBIGUOUS, None
             match = peer
-        return match
+        if match is None:
+            self.stats["next_hop_unresolved"] += 1
+            return RESOLUTION_NONE, None
+        return RESOLUTION_UNIQUE, match
+
+    def resolve_unique_last_byte(self, rx, relay_byte, require_direct_neighbour=False):
+        """NodeDB::resolveUniqueLastByte - the peer when exactly one answers to the byte, else None."""
+        status, peer = self.resolve_last_byte(rx, relay_byte, require_direct_neighbour)
+        return peer if status == RESOLUTION_UNIQUE else None
 
     # ---- routers (FloodingRouter.cpp, NextHopRouter.cpp) -------------------------------
 
