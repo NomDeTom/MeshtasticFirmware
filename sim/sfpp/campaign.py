@@ -410,7 +410,14 @@ class Campaign:
         if packet.kind == "text":
             self._on_text(node, packet)
         elif packet.kind == "sr:item_provide" and packet.payload is not None:
-            self._on_overheard_replay(node, packet)
+            # A replayed object is useful to whoever hears it, not only to whoever asked. A server
+            # files it in its store; any other node records it for its own history. Both paths run -
+            # intercepting here and returning was a bug that stopped servers ingesting broadcast
+            # replays at all, and it cost a third of their holdings.
+            if node.index in self.servers:
+                self._on_sr(node, packet)
+            else:
+                self._on_overheard_replay(node, packet)
         elif packet.kind and packet.kind.startswith("sr:"):
             self._on_sr(node, packet)
 
@@ -628,7 +635,14 @@ class Campaign:
         server = self.servers.get(node.index)
         if server is None or payload is None:
             return
-        if payload.get("dst") is not None and payload["dst"] != node.index:
+        if (
+            payload.get("dst") is not None
+            and payload["dst"] != node.index
+            and kind != "sr:item_provide"
+        ):
+            # Everything except a replayed object is a two-party conversation. A replay is not: a
+            # server that overhears one addressed to a different peer should keep it, which is most
+            # of the argument for broadcasting them at all.
             return
         if payload["src"] == node.index:
             return
@@ -912,10 +926,14 @@ class Campaign:
 
     def _recv_item_provide(self, server, payload):
         message_hash = payload["hash"]
-        if message_hash in server.held:
-            return
+        # Record the replay's account of when this was first heard *before* deciding whether to store
+        # the object. A server that already holds the message is exactly the case worth keeping both
+        # for: its own receive time and a peer's claim about the same message are what make drift
+        # between archives measurable, and what would expose a peer lying about heard_ago.
         claimed_ms = self.mesh.now - payload.get("heard_ago_s", 0) * 1000.0
         server.note_replay(message_hash, claimed_ms)
+        if message_hash in server.held:
+            return
 
         counter, bucket, _ = self._assign(server, message_hash)
         if counter is None:

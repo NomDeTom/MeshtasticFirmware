@@ -38,6 +38,10 @@ BASE = [
     # fourteenth of the airtime, so every later block measures the design as it should be run.
     "--trigger",
     "bucket",
+    # Round two runs the numbering the firmware actually does. Round one used a shared counter that
+    # cannot exist, so nothing from it about bucket agreement carried over.
+    "--bucket-mode",
+    "local",
     "--resolve",
     "hybrid",
 ]
@@ -87,6 +91,20 @@ BLOCKS = {
     # Adverts only other archives can act on; replays every node in earshot can use.
     "L-advert": ("advert-transport", ["broadcast", "dm"], []),
     "L-provide": ("provide-transport", ["dm", "broadcast"], []),
+    # Filing a replay by its heard_ago rather than at the receiving tip. The bucket it came from can
+    # only converge with the peer's if the object lands where it belongs.
+    "M-replayorder": ("replay-ordering", ["tip", "heard"], []),
+    # The same, with replays broadcast so bystanders can file them too - the combination the replay
+    # header exists for.
+    "M-combined": (
+        "replay-ordering",
+        ["tip", "heard"],
+        ["--provide-transport", "broadcast"],
+    ),
+    # D3 needs re-testing: the synchronisation it found required the shared counter, and under local
+    # numbering each server seals its own bucket whenever its own 32nd message lands.
+    "M-jitter": ("advert-jitter-s", [1, 30, 120, 600], []),
+    "M-capacity": ("capacity", [4, 8, 16, 32, 50], []),
     # All six routers as servers, against three of them, against three nodes beside them. Same
     # mesh, same traffic; only who is holding the archive changes.
     "G-allrouters": ("servers", [3, 6], ["--place", "routers"]),
