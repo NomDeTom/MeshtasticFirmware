@@ -225,6 +225,7 @@ class Mesh:
             "rebroadcasts_cancelled": 0,
             "receptions": 0,
             "lost_to_collision": 0,
+            "lost_to_half_duplex": 0,
             "lost_to_phy": 0,
             "bytes_on_air": 0,
         }
@@ -421,9 +422,18 @@ class Mesh:
         interferers = self._overlapping(tx)
         self._prune()
 
+        # A radio cannot hear while it is keying up. This matters more than it sounds: a router
+        # relays everything it hears, so it spends a large share of the time deaf, and the node
+        # beside it - which hears the same traffic and relays less - is a better listener than the
+        # router itself. Any conclusion about where an archive belongs depends on modelling it.
+        transmitting = {o.tx_node for o in interferers}
+
         for rx in self.neighbours[tx.tx_node]:
             rssi = self.rssi[tx.tx_node][rx]
             if rssi < sensitivity:
+                continue
+            if rx in transmitting:
+                self.stats["lost_to_half_duplex"] += 1
                 continue
             if not self._survives_capture(tx, rx, rssi, interferers, sensitivity):
                 self.stats["lost_to_collision"] += 1
