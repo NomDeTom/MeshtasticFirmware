@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 
+from . import chain as CH
 from . import mesh as M
 from . import traffic as T
 from .sketchindex import BUCKET_OBJECTS, bucket_of, checksum_contribution, short_id
@@ -208,6 +209,9 @@ class Counters:
         "bystander_pickups",
         "replays_backfiled",
         "adverts_deferred",
+        "chain_round_trips",
+        "chain_walks_completed",
+        "chain_walks_abandoned",
     )
 
     def __init__(self):
@@ -386,7 +390,11 @@ class Campaign:
         # only record what an ordinary node in the middle of the mesh actually ends up with, split by
         # how it got there. Without this the bystander benefit of a broadcast replay is invisible.
         self.observers = {}
-        if not opts.baseline:
+        # `none` is the paired baseline: same seed, same topology, same traffic schedule, no archive.
+        # Making it a cell of the protocol arm rather than a separate run turns every other cell into
+        # a difference instead of a comparison.
+        self.chain = CH.ChainProtocol(self) if opts.protocol == "chain" else None
+        if not opts.baseline and opts.protocol != "none":
             self._place_servers()
             self._place_observers()
         self.mesh.on_receive = self._on_receive
@@ -398,9 +406,10 @@ class Campaign:
         indexes = strategy(self.mesh, self.opts.servers, self.rng, self.opts.hops_apart)
         for i in indexes:
             self.mesh.nodes[i].is_server = True
-            self.servers[i] = Server(
-                i, SfppStore(os.path.join(self.db_dir, f"s{i}.db"), i), self.opts
-            )
+            store = SfppStore(os.path.join(self.db_dir, f"s{i}.db"), i)
+            self.servers[i] = Server(i, store, self.opts)
+            if self.chain is not None:
+                self.chain.attach(i, store)
 
     def _place_observers(self):
         """Pick ordinary nodes spread through the mesh, preferring the middle over the fringe."""
@@ -449,6 +458,9 @@ class Campaign:
                 self._on_sr(node, packet)
             else:
                 self._on_overheard_replay(node, packet)
+        elif packet.kind and packet.kind.startswith("chain:"):
+            if node.index in self.servers:
+                self._on_sr(node, packet)
         elif packet.kind and packet.kind.startswith("sr:"):
             self._on_sr(node, packet)
 
@@ -518,6 +530,11 @@ class Campaign:
             watch["direct"].add(message_hash)
         server = self.servers.get(node.index)
         if server is None:
+            return
+        if self.chain is not None:
+            cs = self.chain.servers[node.index]
+            self.chain.on_text(cs, message_hash)
+            server.held = cs.held
             return
         counter, bucket, sealed = self._assign(server, message_hash)
         if counter is None:
@@ -676,6 +693,14 @@ class Campaign:
             # of the argument for broadcasting them at all.
             return
         if payload["src"] == node.index:
+            return
+        if kind.startswith("chain:"):
+            cs = self.chain.servers[node.index]
+            {
+                "chain:announce": self.chain.on_announce,
+                "chain:link_request": self.chain.on_link_request,
+                "chain:link_provide": self.chain.on_link_provide,
+            }[kind](cs, payload)
             return
         handler = {
             "sr:advert": self._recv_advert,
@@ -1112,6 +1137,17 @@ class Campaign:
 
     # ---- interval and AIMD triggers ---------------------------------------------------
 
+    def _chain_tick(self, server):
+        """The chain has no bucket to seal, so its cadence is a timer. A tip is ~28 bytes."""
+        if self.mesh.now > self.duration_ms:
+            return
+        if self._in_catch_up_window():
+            self.chain.announce(self.chain.servers[server.index])
+        else:
+            self.counters.adverts_deferred += 1
+        delay = server.interval_ms * self.rng.uniform(0.8, 1.2)
+        self.mesh.at(self.mesh.now + delay, lambda: self._chain_tick(server))
+
     def _tick(self, server):
         """Fixed-interval or AIMD advertising: pick a bucket and state it."""
         if self.mesh.now > self.duration_ms:
@@ -1156,7 +1192,11 @@ class Campaign:
     def run(self):
         started = time.time()
         self.generator.schedule(self.duration_ms)
-        if not self.opts.baseline and self.opts.trigger in (
+        if self.chain is not None:
+            for server in self.servers.values():
+                start = self.rng.uniform(0, server.interval_ms)
+                self.mesh.at(start, lambda s=server: self._chain_tick(s))
+        elif not self.opts.baseline and self.opts.trigger in (
             "interval",
             "aimd",
             "bucket+interval",
@@ -1290,7 +1330,7 @@ class Campaign:
                     sum(
                         v
                         for k, v in self.mesh.airtime_by_kind.items()
-                        if str(k).startswith("sr:")
+                        if str(k).startswith(("sr:", "chain:"))
                     ),
                     1,
                 ),
@@ -1298,7 +1338,7 @@ class Campaign:
                     sum(
                         v
                         for k, v in self.mesh.airtime_by_kind.items()
-                        if str(k).startswith("sr:")
+                        if str(k).startswith(("sr:", "chain:"))
                     )
                     / max(1.0, self.mesh.stats["airtime_ms"]),
                     4,
@@ -1445,6 +1485,18 @@ def build_parser():
         help="length of one deafness window; only bites a bucket when it approaches the fill time",
     )
 
+    ap.add_argument(
+        "--protocol",
+        default="sr",
+        choices=("none", "chain", "sr"),
+        help="none is the paired baseline; chain is today's SF++ announce-and-walk; sr is the sketch",
+    )
+    ap.add_argument(
+        "--chain-walk-cap",
+        type=float,
+        default=4.0,
+        help="abandon a walk after this many round trips per object, so a runaway is visible",
+    )
     ap.add_argument("--baseline", action="store_true", help="no SF++ servers at all")
     ap.add_argument("--servers", type=int, default=3)
     ap.add_argument("--place", default="spread", choices=sorted(Placement.BY_NAME))
