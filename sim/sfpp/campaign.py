@@ -260,6 +260,7 @@ class Campaign:
             router_fraction=opts.router_fraction,
             extra_loss=opts.extra_loss,
             burst_loss=opts.burst_loss,
+            burst_ms=opts.burst_ms,
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(self.mesh, self.rng, self.root_hash, mix=MIX)
@@ -894,7 +895,13 @@ def build_parser():
         "--burst-loss",
         type=float,
         default=0.0,
-        help="chance a node is deaf for a whole 60 s window, instead of losing packets evenly",
+        help="chance a node is deaf for a whole burst window, instead of losing packets evenly",
+    )
+    ap.add_argument(
+        "--burst-ms",
+        type=float,
+        default=60000.0,
+        help="length of one deafness window; only bites a bucket when it approaches the fill time",
     )
 
     ap.add_argument("--baseline", action="store_true", help="no SF++ servers at all")

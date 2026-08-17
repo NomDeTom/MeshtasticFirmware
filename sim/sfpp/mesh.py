@@ -557,6 +557,7 @@ def build(
     router_fraction=0.0,
     extra_loss=0.0,
     burst_loss=0.0,
+    burst_ms=60000.0,
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -573,6 +574,7 @@ def build(
         area=area,
         extra_loss=extra_loss,
         burst_loss=burst_loss,
+        burst_ms=burst_ms,
     )
 
     if router_fraction > 0:

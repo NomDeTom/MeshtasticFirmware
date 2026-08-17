@@ -57,6 +57,9 @@ BLOCKS = {
     # A sketch cares about the difference: flat loss spreads divergence across every bucket, a
     # burst puts a whole bucket's worth into one and can push it past the capacity in a single go.
     "F-burst": ("burst-loss", [0.0, 0.1, 0.2, 0.3], []),
+    # A 60-second burst is nothing to a bucket that takes an hour to fill. This is the outage that
+    # actually matters to an archive: a node away for half an hour, which is most of a bucket.
+    "F-outage": ("burst-loss", [0.0, 0.1, 0.2, 0.3], ["--burst-ms", "1800000"]),
     "G-place": (
         "place",
         [
@@ -188,8 +191,12 @@ def main(argv=None):
         "--seed-base", type=int, help="omit to draw random seeds and record them"
     )
     ap.add_argument("--out", default=".")
+    # A single quoted string, not nargs: argparse would read the leading "--" of the extra flags
+    # as options of this parser rather than payload.
     ap.add_argument(
-        "--grid", nargs="*", default=None, help="extra argv appended to every cell"
+        "--grid",
+        default=None,
+        help='extra flags for every cell, quoted: --grid "--capacity 8"',
     )
     opts = ap.parse_args(argv)
 
@@ -205,7 +212,7 @@ def main(argv=None):
     print(f"seeds {seeds}")
 
     for name in opts.block:
-        run_block(name, seeds, opts.out, grid=opts.grid)
+        run_block(name, seeds, opts.out, grid=opts.grid.split() if opts.grid else None)
     return 0
 
 
