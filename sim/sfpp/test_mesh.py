@@ -967,6 +967,187 @@ class ForkExtras(unittest.TestCase):
         self.assertEqual(mesh.nodes[0].queue[0].packet.hop_limit, 2)
 
 
+class FirmwareVersions(unittest.TestCase):
+    """Pins each release series' rules to the tags in this repository.
+
+    A series profile is that series' final release: 2.4 = v2.4.3, 2.5 = v2.5.23, 2.6 = v2.6.13,
+    2.7 = v2.7.21, 2.8 = this tree. Every expectation below was read off the named file at that tag.
+    """
+
+    def test_contention_window_constants_per_series(self):
+        """RadioInterface.h CWmin/CWmax, and the SNR range getCWsize maps onto them."""
+        expected = {
+            "2.4": (2, 8, 15.0),
+            "2.5": (2, 7, 15.0),
+            "2.6": (3, 8, 10.0),
+            "2.7": (3, 8, 10.0),
+            "2.8": (3, 8, 10.0),
+        }
+        for version, (cw_min, cw_max, snr_max) in expected.items():
+            profile = M.Profile(version)
+            self.assertEqual((profile.cw_min, profile.cw_max), (cw_min, cw_max), version)
+            self.assertEqual(profile.snr_min, -20.0, version)
+            self.assertEqual(profile.snr_max, snr_max, version)
+
+    def test_cw_size_at_zero_snr_differs_by_series(self):
+        """getCWsize(0) under each series' own map() arguments, worked through by hand.
+
+        2.4: (0+20)*(8-2)//(15+20) + 2 = 120//35 + 2 = 5.
+        2.5: (0+20)*(7-2)//(15+20) + 2 = 100//35 + 2 = 4.
+        2.6+: (0+20)*(8-3)//(10+20) + 3 = 100//30 + 3 = 6.
+        """
+        for version, expected in (("2.4", 5), ("2.5", 4), ("2.6", 6), ("2.8", 6)):
+            mesh = small_mesh(profile=version)
+            self.assertEqual(mesh.cw_size(0, 0.0), expected, version)
+
+    def test_the_router_offset_is_in_every_series(self):
+        """The 2 * CWmax * slot a non-early rebroadcaster waits is in 2.4 already.
+
+        It was attributed to 2.8 when the fold-in landed. getTxDelayMsecWeighted has carried it since
+        before 2.4, so only `legacy` - this transport's own earlier model - is missing it.
+        """
+        for version in M.VERSIONS:
+            mesh = small_mesh(profile=version)
+            mesh.nodes[0].role = M.CLIENT
+            floor = 2 * mesh.nodes[0].profile.cw_max * mesh.slot_time_ms()
+            for _ in range(20):
+                self.assertGreaterEqual(mesh.tx_delay_weighted(0, 0.0), floor, version)
+        self.assertFalse(M.Profile("legacy").router_offset)
+
+    def test_repeater_rebroadcasts_early_until_2_8(self):
+        """shouldRebroadcastEarlyLikeRouter dropped REPEATER; up to 2.7 the test admitted it."""
+        for version, early in (("2.4", True), ("2.6", True), ("2.7", True), ("2.8", False)):
+            mesh = small_mesh(profile=version)
+            mesh.nodes[0].role = M.REPEATER
+            self.assertEqual(mesh._rebroadcasts_early(0), early, version)
+
+    def test_client_base_rebroadcasts_early_only_in_2_7_and_only_for_favourites(self):
+        """v2.7.9's CLIENT_BASE branch returns nodeDB->isFromOrToFavoritedNode(p)."""
+        mesh = small_mesh(profile="2.7", nodes=6)
+        mesh.nodes[0].role = M.CLIENT_BASE
+        mine = M.Packet(1, 2, 1, 40, hop_limit=3)
+        self.assertFalse(mesh._rebroadcasts_early(0, mine))
+        mesh.nodes[0].favourites = {2}
+        self.assertTrue(mesh._rebroadcasts_early(0, mine))
+        # 2.8 took the branch out, so a CLIENT_BASE waits behind the offset whoever sent it.
+        modern = small_mesh(profile="2.8", nodes=6)
+        modern.nodes[0].role = M.CLIENT_BASE
+        modern.nodes[0].favourites = {2}
+        self.assertFalse(modern._rebroadcasts_early(0, mine))
+
+    def test_roles_fall_back_when_the_series_lacks_them(self):
+        """ROUTER_LATE arrived in v2.5.18 and CLIENT_BASE in v2.7.9."""
+        for version, late, base in (
+            ("2.4", False, False),
+            ("2.5", True, False),
+            ("2.6", True, False),
+            ("2.7", True, True),
+            ("2.8", True, True),
+        ):
+            profile = M.Profile(version)
+            self.assertEqual(profile.router_late_role, late, version)
+            self.assertEqual(profile.client_base_role, base, version)
+            mesh = small_mesh(
+                profile=version,
+                nodes=10,
+                router_late_fraction=0.2,
+                client_base_fraction=0.2,
+            )
+            roles = {n.role for n in mesh.nodes}
+            self.assertEqual(M.ROUTER_LATE in roles, late, version)
+            self.assertEqual(M.CLIENT_BASE in roles, base, version)
+
+    def test_queue_orders_by_priority_and_id_before_2_5(self):
+        """2.4's CompareMeshPacketFunc: priority alone, ties to the lower id, no late group."""
+        mesh = small_mesh(profile="2.4", nodes=4)
+        radio = mesh.nodes[0]
+        for packet_id, priority in ((5, M.PRIORITY_DEFAULT), (3, M.PRIORITY_DEFAULT)):
+            packet = M.Packet(packet_id, 1, 1, 40, hop_limit=3)
+            packet.priority = priority
+            mesh._enqueue(radio, M.QueueEntry(packet))
+        self.assertEqual([e.packet.id for e in radio.queue], [3, 5])
+
+    def test_a_relayed_packet_outranks_our_own_from_2_5(self):
+        """2.5's tie-break at equal priority: !isFromUs(p1) && isFromUs(p2)."""
+        mesh = small_mesh(profile="2.5", nodes=4)
+        radio = mesh.nodes[0]
+        ours = M.Packet(1, 0, 1, 40, hop_limit=3)
+        relayed = M.Packet(2, 3, 1, 40, hop_limit=3)
+        mesh._enqueue(radio, M.QueueEntry(ours))
+        mesh._enqueue(radio, M.QueueEntry(relayed))
+        self.assertEqual([e.packet.id for e in radio.queue], [2, 1])
+        # 2.4 has no such rule, so the second packet simply queues behind the first.
+        old = small_mesh(profile="2.4", nodes=4)
+        mesh._enqueue(old.nodes[0], M.QueueEntry(M.Packet(1, 0, 1, 40, hop_limit=3)))
+        mesh._enqueue(old.nodes[0], M.QueueEntry(M.Packet(2, 3, 1, 40, hop_limit=3)))
+        self.assertEqual([e.packet.id for e in old.nodes[0].queue], [1, 2])
+
+    def test_hop_preservation_starts_at_2_7_and_gains_ambiguity_checking_in_2_8(self):
+        """Router::shouldDecrementHopLimit arrived in v2.7.11 and resolves uniquely only here.
+
+        2.7 walks its store for favourited router-like nodes and preserves the hop on the first
+        matching last byte. This tree resolves the byte first and charges the hop when a second node
+        answers to it.
+        """
+        for version in ("2.4", "2.5", "2.6"):
+            self.assertFalse(M.Profile(version).preserve_hops, version)
+
+        for version, preserved in (("2.7", True), ("2.8", False)):
+            mesh = small_mesh(profile=version, nodes=6)
+            # Two favourited routers sharing a last byte: the relay byte cannot say which relayed.
+            mesh.nodes[1].node_num = 0x0000AA11
+            mesh.nodes[2].node_num = 0x0000BB11
+            for peer in (1, 2):
+                mesh.nodes[peer].role = M.ROUTER
+                heard(mesh, 0, peer)
+            mesh.nodes[0].role = M.ROUTER
+            mesh.nodes[0].favourites = {1, 2}
+            packet = M.Packet(9, 3, 1, 40, hop_limit=2)
+            packet.hop_start = 3  # one hop taken already, so the first-hop rule does not apply
+            packet.relay_node = 0x11
+            self.assertEqual(
+                mesh.should_decrement_hop_limit(0, packet), not preserved, version
+            )
+
+    def test_unicast_gets_five_attempts_only_in_this_tree(self):
+        """NUM_RELIABLE_UNICAST_ATTEMPTS is new; before it a DM had the broadcast count of 3."""
+        for version in ("2.4", "2.5", "2.6", "2.7"):
+            self.assertEqual(M.Profile(version).unicast_attempts, 3, version)
+        self.assertEqual(M.Profile("2.8").unicast_attempts, 5)
+
+    def test_next_hop_routing_starts_at_2_6(self):
+        """NextHopRouter is v2.6.0; learning a route from relay_node is v2.7.13."""
+        expected = {
+            "2.4": (False, False),
+            "2.5": (False, False),
+            "2.6": (True, False),
+            "2.7": (True, True),
+            "2.8": (True, True),
+        }
+        for version, (routing, learning) in expected.items():
+            profile = M.Profile(version)
+            self.assertEqual(profile.next_hop_routing, routing, version)
+            self.assertEqual(profile.next_hop_learning, learning, version)
+
+    def test_hot_store_size_per_series(self):
+        """mesh-pb-constants.h: a flat 100 until 2.6, nRF52 at 80 in 2.6 and 2.7, 120 here."""
+        expected = {"2.4": 100, "2.5": 100, "2.6": 80, "2.7": 80, "2.8": 120}
+        for version, slots in expected.items():
+            table = M.PLATFORM_HOT_STORE_BY_VERSION[M.Profile(version).hot_store_model]
+            self.assertEqual(table["nrf52840"], slots, version)
+            self.assertEqual(table["stm32wl"], 100 if version in ("2.4", "2.5") else 10)
+
+    def test_legacy_is_not_a_firmware_version(self):
+        profile = M.Profile("legacy")
+        self.assertIsNone(profile.version)
+        for version in M.VERSIONS:
+            self.assertFalse(profile.at_least(version), version)
+        self.assertTrue(M.Profile("2.7").at_least("2.6"))
+        self.assertFalse(M.Profile("2.6").at_least("2.7"))
+        with self.assertRaises(ValueError):
+            M.Profile("2.9")
+
+
 class EndToEnd(unittest.TestCase):
     def test_a_flood_reaches_the_mesh_and_the_counters_add_up(self):
         mesh = small_mesh(nodes=25, seed=7)
@@ -976,17 +1157,26 @@ class EndToEnd(unittest.TestCase):
         stats = mesh.stats
         self.assertGreater(stats["receptions"], 0)
         self.assertGreater(stats["transmissions"], 5)
-        # Every relay that reached the air was queued first, and everything queued either flew,
-        # was cancelled, was dropped, or is still sitting there.
+        # Every relay that reached the air was queued first, and everything queued either flew, was
+        # cancelled, was swapped out by a hop-limit upgrade, or is still sitting there. The upgrade
+        # term is the one that is easy to miss: perhapsHandleUpgradedPacket pops a queued copy that
+        # neither flew nor was cancelled, then queues the better copy in its place.
+        #
+        # This accounting is only exact while nothing overflows, because a queue-full drop counts
+        # the refused newcomer and the evicted incumbent under one counter.
         self.assertLessEqual(stats["rebroadcasts"], stats["rebroadcasts_queued"])
+        self.assertEqual(stats["queue_drops"], 0)
         still_queued = sum(len(n.queue) for n in mesh.nodes)
         self.assertEqual(
             stats["rebroadcasts_queued"],
-            stats["rebroadcasts"] + stats["rebroadcasts_cancelled"] + still_queued,
+            stats["rebroadcasts"]
+            + stats["rebroadcasts_cancelled"]
+            + stats["hop_upgrades"]
+            + still_queued,
         )
 
-    def test_both_profiles_run(self):
-        for name in ("2.8", "legacy"):
+    def test_every_profile_runs(self):
+        for name in M.VERSIONS + ("legacy",):
             mesh = small_mesh(nodes=20, seed=3, profile=name, router_fraction=0.15)
             for _ in range(4):
                 mesh.originate(0, 70, 40, kind="advert")

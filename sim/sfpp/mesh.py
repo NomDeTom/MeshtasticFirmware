@@ -66,9 +66,50 @@ REBROADCAST_CORE_PORTNUMS_ONLY = "CORE_PORTNUMS_ONLY"
 CORE_PORTNUMS = frozenset({1, 3, 4, 5, 67, 70})
 
 # From RadioInterface.h: the contention window is sized from SNR so that distant nodes - the ones
-# whose rebroadcast actually extends coverage - transmit first.
+# whose rebroadcast actually extends coverage - transmit first. These are this tree's values; see
+# CW_BOUNDS and SNR_BOUNDS for the earlier series.
 CW_MIN, CW_MAX = 3, 8
 SNR_MIN_DB, SNR_MAX_DB = -20.0, 10.0
+
+# The release series a Profile can be named for, oldest first. A series profile carries the rules of
+# that series' *final* release - 2.4 = v2.4.3, 2.5 = v2.5.23, 2.6 = v2.6.13, 2.7 = v2.7.21, 2.8 =
+# this tree - so a mechanism that arrived mid-series is present in that series' profile. FEATURE_TAG
+# records the release each one actually shipped in.
+VERSIONS = ("2.4", "2.5", "2.6", "2.7", "2.8")
+
+# RadioInterface.h CWmin/CWmax per series, and the SNR range getCWsize maps onto them. Both moved:
+# 2.5 lowered CWmax to 7, 2.6 raised CWmin to 3 and put it back, and 2.6 also narrowed the top of
+# the SNR range from 15 dB to 10, which shifts every rebroadcast delay on a strong link.
+CW_BOUNDS = {"2.4": (2, 8), "2.5": (2, 7), "2.6": (3, 8), "2.7": (3, 8), "2.8": (3, 8)}
+SNR_BOUNDS = {
+    "2.4": (-20.0, 15.0),
+    "2.5": (-20.0, 15.0),
+    "2.6": (-20.0, 10.0),
+    "2.7": (-20.0, 10.0),
+    "2.8": (-20.0, 10.0),
+}
+
+# The earliest series whose profile carries each mechanism, and the release it shipped in. Read off
+# the tags in this repository rather than remembered; a value of None means it is only in this tree.
+FEATURE_TAG = {
+    "core_portnums_mode": ("2.5", "v2.5.8"),
+    "queue_late_first": ("2.5", "v2.5.18"),
+    "late_window": ("2.5", "v2.5.18"),
+    "router_late_role": ("2.5", "v2.5.18"),
+    "next_hop_routing": ("2.6", "v2.6.0"),
+    "client_base_role": ("2.7", "v2.7.9"),
+    "role_aware_cancel": ("2.7", "v2.7.10"),
+    "preserve_hops": ("2.7", "v2.7.11"),
+    "hop_upgrade": ("2.7", "v2.7.13"),
+    "next_hop_learning": ("2.7", "v2.7.13"),
+    "resolve_ambiguity": ("2.8", None),
+    "route_health": ("2.8", None),
+    "warm_store": ("2.8", None),
+    "signing": ("2.8", None),
+    "hop_scaling": ("2.8", None),
+    "opaque_relay": ("2.8", None),
+    "congestion_clamp": ("2.8", None),
+}
 
 # RadioInterface::getRetransmissionMsec - time to construct, process and reconstruct a packet.
 PROCESSING_TIME_MSEC = 4500.0
@@ -100,6 +141,26 @@ PLATFORM_HOT_STORE = {
     "esp32s3_16mb": 250,  # flash >= 15 MB
 }
 MAX_NUM_NODES = PLATFORM_HOT_STORE["nrf52840"]
+
+# The same table for the earlier series, keyed by Profile.hot_store_model. Up to 2.5 the cap was a
+# flat 100 for every board; 2.6 introduced the platform split with nRF52 at 80 and the ESP32-S3 flash
+# tiers; this tree raised the compile-time default to 120 and dropped the separate nRF52 branch.
+#
+# One conflation to know about: the `nrf52840` key stands for "nRF52840 and generic ESP32", which
+# 2.6 and 2.7 do not treat alike - ARCH_NRF52 takes 80 there and a generic ESP32 falls through to
+# 100. The nRF52 value is used, since that is what the key names.
+PLATFORM_HOT_STORE_BY_VERSION = {
+    "flat100": dict.fromkeys(PLATFORM_HOT_STORE, 100),
+    "2.6": {
+        "stm32wl": 10,
+        "esp32s3_4mb": 100,
+        "nrf52840": 80,
+        "esp32s3_8mb": 200,
+        "esp32s3_16mb": 250,
+    },
+    "2.8": PLATFORM_HOT_STORE,
+}
+PLATFORM_HOT_STORE_BY_VERSION["2.7"] = PLATFORM_HOT_STORE_BY_VERSION["2.6"]
 
 # Which board every declared hardware model actually is, as a hot-store size. Generated from this
 # tree's own variants - each variant's platformio.ini declares custom_meshtastic_hw_model_slug,
@@ -327,83 +388,204 @@ PRIORITY_ACK = 120
 class Profile:
     """Which firmware's rules to obey.
 
-    `2.8` is this tree. `legacy` restores the rules the transport carried before the fold-in, so a
-    result can be attributed to a rule change rather than to the rewrite around it. It is not
-    bit-identical to the pre-fold-in code: the TX queue replaced a recursive retry closure, so the
-    RNG is consumed in a different order and a seed does not reproduce the old run packet for
-    packet. Distributions are the thing it preserves, not streams.
+    Named for a release series - `2.4` through `2.8` - and carrying that series' rules as of its
+    final release. `2.8` is this tree. Nodes may each run a different profile, which is how a mixed
+    mesh is modelled.
 
-    The flags are separate rather than one version string because the interesting sweeps turn them
-    one at a time - the router offset alone moves relay counts more than everything else together.
+    `legacy` is not a firmware version. It restores the rules this transport itself carried before
+    the 2.8 fold-in, so a result measured then can be attributed to a rule change rather than to the
+    rewrite around it. Four of its deviations were never any firmware's behaviour - no router
+    offset, a continuous slot draw, a clamped contention window, and a 400-backoff discard - so
+    `legacy` must not be read as "2.7 and earlier". It is also not bit-identical to the pre-fold-in
+    code: the TX queue replaced a recursive retry closure, so the RNG is consumed in a different
+    order and a seed does not reproduce the old run packet for packet. It preserves distributions,
+    not streams.
+
+    Individual flags stay overridable, because the interesting sweeps turn one rule at a time rather
+    than stepping a whole series.
     """
 
     __slots__ = (
         "name",
+        "version",
         "cw_min",
         "cw_max",
         "snr_min",
         "snr_max",
+        "early_rebroadcast",
         "router_offset",
         "router_cw_floor",
         "max_backoffs",
         "quantised_slots",
         "clamp_cw",
         "util_backoff",
+        "queue_late_first",
+        "queue_prefers_relayed",
         "role_aware_cancel",
+        "router_late_role",
+        "client_base_role",
+        "core_portnums_mode",
         "late_window",
         "preserve_hops",
         "hop_upgrade",
         "next_hop_routing",
+        "next_hop_learning",
+        "resolve_ambiguity",
+        "route_health",
         "reliable_retx",
+        "broadcast_attempts",
+        "unicast_attempts",
+        "hot_store_model",
+        "warm_store",
+        "congestion_model",
+        "congestion_clamp",
+        "signing",
+        "hop_scaling",
         "exhaust_hops",
         "event_relay_hop_limit",
         "opaque_relay",
     )
 
     def __init__(self, name="2.8", **overrides):
-        if name not in ("2.8", "legacy"):
-            raise ValueError(f"unknown profile {name!r}")
-        modern = name == "2.8"
+        if name in VERSIONS:
+            self._firmware(name)
+        elif name == "legacy":
+            self._legacy()
+        else:
+            known = ", ".join(VERSIONS + ("legacy",))
+            raise ValueError(f"unknown profile {name!r}; expected one of {known}")
         self.name = name
-        self.cw_min = CW_MIN if modern else 2
-        self.cw_max = CW_MAX
-        self.snr_min = SNR_MIN_DB
-        self.snr_max = SNR_MAX_DB if modern else 15.0
-        # The 2 * CWmax * slotTime every non-router waits before it may rebroadcast. Without it a
-        # well-placed client beats every router to the relay, which is the opposite of the design.
-        self.router_offset = modern
-        # The old model pinned a router to the bottom of the window and drew from 2^CWmin. 2.8
-        # keeps a router's window SNR-derived and only halves the exponent to a doubling.
-        self.router_cw_floor = not modern
-        # The pre-fold-in CSMA loop discarded a packet that could not find a clear channel within
-        # 400 backoffs, counting it as a queue drop. The firmware has no such cap - setTransmitDelay
-        # reschedules indefinitely - so this is a defect, not a rule, and 2.8 does not have it.
-        #
-        # It is restored here anyway, because `legacy` is only useful if it reproduces the runs it
-        # is named for, and every SF++ result up to round three was measured with this cap live and
-        # throwing away about two thirds of all rebroadcast attempts. A legacy profile that quietly
-        # fixed the bug could not re-derive those numbers or say what the bug cost.
-        self.max_backoffs = None if modern else 400
-        # random(0, N) is integer and half-open; a continuous draw cannot produce a slot collision.
-        self.quantised_slots = modern
-        # getCWsize() runs Arduino map() and does not constrain the result.
-        self.clamp_cw = not modern
-        self.util_backoff = modern
-        self.role_aware_cancel = modern
-        self.late_window = modern
-        self.preserve_hops = modern
-        self.hop_upgrade = modern
-        self.next_hop_routing = modern
-        self.reliable_retx = modern
-        # Fork-only, and off in the firmware unless the module or the build flag is on.
-        self.exhaust_hops = False
-        self.event_relay_hop_limit = None
-        self.opaque_relay = modern
 
         for key, value in overrides.items():
-            if key not in Profile.__slots__ or key == "name":
+            if key not in Profile.__slots__ or key in ("name", "version"):
                 raise ValueError(f"unknown profile flag {key!r}")
             setattr(self, key, value)
+
+    def at_least(self, version):
+        """Is this profile's series `version` or newer? `legacy` is older than all of them."""
+        if self.version is None:
+            return False
+        return VERSIONS.index(self.version) >= VERSIONS.index(version)
+
+    def _firmware(self, version):
+        self.version = version
+        self.cw_min, self.cw_max = CW_BOUNDS[version]
+        self.snr_min, self.snr_max = SNR_BOUNDS[version]
+
+        # RadioInterface::shouldRebroadcastEarlyLikeRouter, and the inline role test that preceded
+        # it. Who skips the router offset and draws from the bottom of the window: ROUTER and
+        # REPEATER up to 2.6, plus CLIENT_BASE on favourite traffic in 2.7, and ROUTER alone in 2.8
+        # once REPEATER and CLIENT_BASE were taken back out.
+        if version == "2.7":
+            self.early_rebroadcast = "router_repeater_favourite_base"
+        elif version == "2.8":
+            self.early_rebroadcast = "router"
+        else:
+            self.early_rebroadcast = "router_repeater"
+
+        # The 2 * CWmax * slotTime a non-early rebroadcaster waits first. Present in every series
+        # here; only `legacy` lacks it.
+        self.router_offset = True
+        self.router_cw_floor = False
+        self.max_backoffs = None
+        self.quantised_slots = True
+        self.clamp_cw = False
+        self.util_backoff = True
+
+        # MeshPacketQueue::CompareMeshPacketFunc. 2.4 orders a max-heap by priority alone, ties to
+        # the lower id. 2.5 replaced it with a sorted insert that puts the late-transmit group last
+        # and, at equal priority, prefers a packet already on the mesh over one of ours.
+        self.queue_late_first = self.at_least("2.5")
+        self.queue_prefers_relayed = self.at_least("2.5")
+
+        self.router_late_role = self.at_least("2.5")
+        self.client_base_role = self.at_least("2.7")
+        self.core_portnums_mode = self.at_least("2.5")
+        self.late_window = self.at_least("2.5")
+        self.role_aware_cancel = self.at_least("2.7")
+        self.preserve_hops = self.at_least("2.7")
+        self.hop_upgrade = self.at_least("2.7")
+        self.next_hop_routing = self.at_least("2.6")
+        self.next_hop_learning = self.at_least("2.7")
+
+        # NodeDB::resolveUniqueLastByte. Before this tree a last-byte lookup took the first node it
+        # matched; nothing asked whether a second node shared the byte. So hop preservation and
+        # next-hop emission were ambiguity-blind, and got it wrong silently on a dense mesh.
+        self.resolve_ambiguity = self.at_least("2.8")
+        self.route_health = self.at_least("2.8")
+
+        self.reliable_retx = True
+        self.broadcast_attempts = NUM_RELIABLE_RETX
+        self.unicast_attempts = (
+            NUM_RELIABLE_UNICAST_ATTEMPTS if self.at_least("2.8") else NUM_RELIABLE_RETX
+        )
+
+        # mesh-pb-constants.h. 2.4 and 2.5 give every board 100 slots; 2.6 introduced the platform
+        # split; this tree raised the default to 120 and sizes ESP32-S3 by flash.
+        self.hot_store_model = "flat100" if not self.at_least("2.6") else version
+        self.warm_store = self.at_least("2.8")
+
+        # Default.h congestionScalingCoefficient. A flat 0.075 per node over 40 in 2.4; a
+        # per-preset table in 2.5 and 2.6, which switches the throttle off entirely on the two
+        # shortest presets; 2^SF / (BW_kHz * divisor) from 2.7.
+        if not self.at_least("2.5"):
+            self.congestion_model = "flat"
+        elif not self.at_least("2.7"):
+            self.congestion_model = "preset"
+        else:
+            self.congestion_model = "sf_bw"
+        self.congestion_clamp = self.at_least("2.8")
+
+        self.signing = self.at_least("2.8")
+        self.hop_scaling = self.at_least("2.8")
+
+        # Off unless the module or the build flag is on.
+        self.exhaust_hops = False
+        self.event_relay_hop_limit = None
+        self.opaque_relay = self.at_least("2.8")
+
+    def _legacy(self):
+        self.version = None
+        self.cw_min, self.cw_max = 2, 8
+        self.snr_min, self.snr_max = -20.0, 15.0
+        self.early_rebroadcast = "router"
+        self.router_offset = False
+        # Pinned a router to the bottom of the window and drew from 2^CWmin, where the firmware
+        # keeps a router's window SNR-derived and halves the exponent to a doubling.
+        self.router_cw_floor = True
+        # The pre-fold-in CSMA loop discarded a packet that could not find a clear channel within
+        # 400 backoffs. No firmware does this - setTransmitDelay reschedules indefinitely - but every
+        # SF++ result up to round three was measured with the cap live, so it stays here to
+        # reproduce them.
+        self.max_backoffs = 400
+        self.quantised_slots = False
+        self.clamp_cw = True
+        self.util_backoff = False
+        self.queue_late_first = False
+        self.queue_prefers_relayed = False
+        self.router_late_role = False
+        self.client_base_role = False
+        self.core_portnums_mode = False
+        self.late_window = False
+        self.role_aware_cancel = False
+        self.preserve_hops = False
+        self.hop_upgrade = False
+        self.next_hop_routing = False
+        self.next_hop_learning = False
+        self.resolve_ambiguity = False
+        self.route_health = False
+        self.reliable_retx = False
+        self.broadcast_attempts = NUM_RELIABLE_RETX
+        self.unicast_attempts = NUM_RELIABLE_RETX
+        self.hot_store_model = "2.8"
+        self.warm_store = False
+        self.congestion_model = "sf_bw"
+        self.congestion_clamp = False
+        self.signing = False
+        self.hop_scaling = False
+        self.exhaust_hops = False
+        self.event_relay_hop_limit = None
+        self.opaque_relay = False
 
 
 def arduino_map(value, in_min, in_max, out_min, out_max):
@@ -1041,6 +1223,8 @@ class Mesh:
             "links_severed": 0,
             "sends_while_offline": 0,
             "dropped_to_backoff_cap": 0,
+            # A role the node's own firmware series does not have, so it runs as CLIENT instead.
+            "role_unavailable_in_version": 0,
         }
         self.airtime_by_kind = {}
         # Filled by build() when per-node hop limits are in play; None means everyone uses the same.
@@ -1158,8 +1342,14 @@ class Mesh:
         return max(2.25, 2 + 0.5) * symbol_ms + 7.6
 
     def _wide_lora(self):
-        """The 2.4 GHz regions. Preset bandwidth above 500 kHz only happens there."""
-        return self.conf.current_preset["bw"] > 500
+        """`myRegion->wideLora` - a property of the configured region, not of the bandwidth.
+
+        The region table already carries it, so this asks the same question the firmware does. It
+        used to compare the preset bandwidth against 500, but `bw` is in Hz here, so the test was
+        true for every region and every sub-GHz run took the 2.4 GHz CAD term. On LONG_FAST that put
+        the slot at 40.4 ms instead of 28.1, inflating every contention window by 44%.
+        """
+        return bool(self.conf.REGION.get("wide_lora", False))
 
     # ---- contention window (RadioInterface.cpp:779-855) --------------------------------
 
@@ -1198,21 +1388,36 @@ class Mesh:
         cw = arduino_map(util, 0, 100, profile.cw_min, profile.cw_max)
         return self._draw_slots(node, 2**cw) * self.slot_time_ms()
 
-    def _rebroadcasts_early(self, node):
-        """RadioInterface::shouldRebroadcastEarlyLikeRouter - ROUTER, and only ROUTER."""
-        return self.nodes[node].role == ROUTER
+    def _rebroadcasts_early(self, node, packet=None):
+        """RadioInterface::shouldRebroadcastEarlyLikeRouter - who skips the router offset.
 
-    def tx_delay_weighted(self, node, snr):
+        This tree says ROUTER and nothing else. Up to 2.6 the test was inline in
+        getTxDelayMsecWeighted and admitted REPEATER as well; 2.7 added CLIENT_BASE for traffic to or
+        from one of its favourites, then 2.8 removed both again.
+        """
+        me = self.nodes[node]
+        mode = me.profile.early_rebroadcast
+        if me.role == ROUTER:
+            return True
+        if mode == "router":
+            return False
+        if me.role == REPEATER:
+            return True
+        if mode == "router_repeater_favourite_base" and me.role == CLIENT_BASE:
+            return packet is not None and self._favourite_traffic(node, packet)
+        return False
+
+    def tx_delay_weighted(self, node, snr, packet=None):
         """RadioInterface::getTxDelayMsecWeighted - the delay for relaying someone else's packet.
 
         High SNR means a large window, because a node that heard the packet loudly is close to the
-        sender and its relay adds least. The router offset is the part that was missing: everyone
-        who is not a ROUTER waits out the whole router window first, so routers always go first.
+        sender and its relay adds least. Everyone who is not an early rebroadcaster waits out the
+        whole router window first, so routers go first.
         """
         profile = self.nodes[node].profile
         cw = self.cw_size(node, snr)
         slot = self.slot_time_ms()
-        if self._rebroadcasts_early(node):
+        if self._rebroadcasts_early(node, packet):
             if profile.router_cw_floor:
                 return self._draw_slots(node, 2**profile.cw_min) * slot
             return self._draw_slots(node, 2 * cw) * slot
@@ -1357,12 +1562,32 @@ class Mesh:
 
     @staticmethod
     def _enqueue(radio, entry):
-        """MeshPacketQueue::enqueue. Deferred packets sort behind ready ones, always.
+        """MeshPacketQueue::enqueue.
 
-        Within the ready group it is priority order, newest last among equals; within the deferred
-        group it is deadline order. Keeping the two groups apart is what makes the late-rebroadcast
-        window work - a clamped packet goes to the back and stays there until its time comes.
+        From 2.5 this is an upper_bound insert into a sorted list: the deferred group sorts behind
+        the ready one always, the ready group is priority order, and at equal priority a packet
+        already on the mesh sorts ahead of one we originated. Within the deferred group it is
+        deadline order. Keeping the two groups apart is what makes the late-rebroadcast window work -
+        a clamped packet goes to the back and stays there until its time comes.
+
+        2.4 has no late group and no relayed-first tie-break: it holds a max-heap ordered by
+        priority alone, ties to the lower packet id. Pop order under that comparator is a total
+        order, so a sorted insert reproduces the sequence the heap dequeues.
         """
+        profile = radio.profile
+        if not profile.queue_late_first:
+            position = 0
+            while position < len(radio.queue):
+                other = radio.queue[position].packet
+                if other.priority < entry.packet.priority or (
+                    other.priority == entry.packet.priority
+                    and other.id > entry.packet.id
+                ):
+                    break
+                position += 1
+            radio.queue.insert(position, entry)
+            return
+
         if entry.tx_after:
             position = len(radio.queue)
             while position > 0:
@@ -1371,10 +1596,18 @@ class Mesh:
                     break
                 position -= 1
         else:
+            ours = entry.packet.origin == radio.index
             position = 0
             while position < len(radio.queue):
                 other = radio.queue[position]
                 if other.tx_after or other.packet.priority < entry.packet.priority:
+                    break
+                if (
+                    profile.queue_prefers_relayed
+                    and not ours
+                    and other.packet.priority == entry.packet.priority
+                    and other.packet.origin == radio.index
+                ):
                     break
                 position += 1
         radio.queue.insert(position, entry)
@@ -1393,7 +1626,7 @@ class Mesh:
         packet = entry.packet
         if entry.tx_after:
             add = (
-                self.tx_delay_weighted(node, packet.rx_snr)
+                self.tx_delay_weighted(node, packet.rx_snr, packet)
                 if packet.rx_rssi
                 else self.tx_delay_msec(node)
             )
@@ -1405,7 +1638,7 @@ class Mesh:
         elif packet.rx_snr == 0 and packet.rx_rssi == 0:
             self._arm(node, self.now + self.tx_delay_msec(node))
         else:
-            self._arm(node, self.now + self.tx_delay_weighted(node, packet.rx_snr))
+            self._arm(node, self.now + self.tx_delay_weighted(node, packet.rx_snr, packet))
 
     def _arm(self, node, when):
         """One transmit timer per radio, overwritten on each call (txTimerOverwrite)."""
@@ -1790,6 +2023,10 @@ class Mesh:
         The consequence is worth stating, because it is the opposite of what a birthday-problem
         table over the whole mesh suggests: **the small store makes the byte less ambiguous, not
         more.** What a large mesh costs is knowledge, not resolution.
+
+        Only this tree checks for a second candidate. Under 2.6 and 2.7 the lookup takes the first
+        node it matches, so a colliding byte resolves to whichever peer the store happens to yield
+        first and the caller is never told it guessed.
         """
         if not relay_byte:
             return None
@@ -1809,6 +2046,8 @@ class Mesh:
                 )
             if not relevant:
                 continue
+            if not me.profile.resolve_ambiguity:
+                return peer
             if match is not None:
                 # A second relevant candidate shares the byte. Nothing later can resolve that.
                 self.stats["next_hop_ambiguous"] += 1
@@ -1826,6 +2065,7 @@ class Mesh:
         if (
             packet is not None
             and node.rebroadcast_mode == REBROADCAST_CORE_PORTNUMS_ONLY
+            and node.profile.core_portnums_mode
         ):
             if packet.portnum not in CORE_PORTNUMS:
                 self.stats["rebroadcast_suppressed_by_mode"] += 1
@@ -1865,22 +2105,37 @@ class Mesh:
         """Router::shouldDecrementHopLimit - when a relay is free.
 
         A hop between two favourited routers costs nothing, so a spine of them does not eat the
-        sender's hop budget. The first hop always pays, and an ambiguous relay byte always pays,
-        because preserving hops for the wrong node is worse than charging one too many.
+        sender's hop budget. The first hop always pays.
+
+        The two implementations differ in how the previous relay is identified, and it matters. This
+        tree resolves the relay byte and preserves the hop only when exactly one node answers to it,
+        so ambiguity charges the hop. 2.7 instead walks its own store for favourited router-like
+        nodes and preserves on the first byte match, which on a dense mesh hands a free hop to a node
+        that merely shares a byte with a favourite.
         """
-        if not self.nodes[rx].profile.preserve_hops:
+        node = self.nodes[rx]
+        if not node.profile.preserve_hops:
             return True
         if packet.hops_taken() == 0:
             return True
-        node = self.nodes[rx]
         if not node.is_router_like():
             return True
-        resolved = self.resolve_unique_last_byte(rx, packet.relay_node)
-        if resolved is None:
+        if node.profile.resolve_ambiguity:
+            resolved = self.resolve_unique_last_byte(rx, packet.relay_node)
+            if resolved is None:
+                return True
+            if resolved in node.favourites and self.nodes[resolved].is_router_like():
+                self.stats["hop_limit_preserved"] += 1
+                return False
             return True
-        if resolved in node.favourites and self.nodes[resolved].is_router_like():
-            self.stats["hop_limit_preserved"] += 1
-            return False
+        for peer in node.favourites:
+            if peer not in node.nodedb or peer == rx:
+                continue
+            if not self.nodes[peer].is_router_like():
+                continue
+            if self.nodes[peer].relay_byte == packet.relay_node:
+                self.stats["hop_limit_preserved"] += 1
+                return False
         return True
 
     def get_next_hop(self, rx, destination, relay_byte):
@@ -2280,9 +2535,9 @@ class Mesh:
                 node,
                 packet,
                 (
-                    NUM_RELIABLE_RETX
+                    radio.profile.broadcast_attempts
                     if destination == BROADCAST
-                    else NUM_RELIABLE_UNICAST_ATTEMPTS
+                    else radio.profile.unicast_attempts
                 ),
             )
         self.send(node, packet)
@@ -2321,6 +2576,7 @@ def build(
     topology="uniform",
     profile="2.8",
     legacy_fraction=0.0,
+    old_profile="legacy",
     router_late_fraction=0.0,
     client_base_fraction=0.0,
     role_mix=None,
@@ -2347,27 +2603,34 @@ def build(
     # has nothing to do with how well sited it is, and assuming otherwise would quietly decide the
     # answer to "do the old nodes hold the mesh back" before the sweep ran.
     default_profile = profile if isinstance(profile, Profile) else Profile(profile)
-    legacy_profile = Profile("legacy")
+    # `legacy_fraction` of the nodes run `old_profile` instead - any release series, or `legacy`.
+    older_profile = (
+        old_profile if isinstance(old_profile, Profile) else Profile(old_profile)
+    )
     stale = set()
     if legacy_fraction > 0:
         want = max(1, int(round(node_count * legacy_fraction)))
         stale = set(rng.sample(range(node_count), min(want, node_count)))
-    nodes = [
-        Node(
-            i,
-            x,
-            y,
-            node_num=node_nums[i],
-            platform=platforms[i],
-            profile=legacy_profile if i in stale else default_profile,
-            max_num_nodes=(
-                max_num_nodes
-                if max_num_nodes is not None
-                else PLATFORM_HOT_STORE[platforms[i]]
-            ),
+    nodes = []
+    for i, (x, y) in enumerate(points):
+        node_profile = older_profile if i in stale else default_profile
+        nodes.append(
+            Node(
+                i,
+                x,
+                y,
+                node_num=node_nums[i],
+                platform=platforms[i],
+                profile=node_profile,
+                max_num_nodes=(
+                    max_num_nodes
+                    if max_num_nodes is not None
+                    else PLATFORM_HOT_STORE_BY_VERSION[node_profile.hot_store_model][
+                        platforms[i]
+                    ]
+                ),
+            )
         )
-        for i, (x, y) in enumerate(points)
-    ]
     for node in nodes:
         node.rebroadcast_mode = rebroadcast_mode
     mesh = Mesh(
@@ -2438,6 +2701,17 @@ def build(
             for i in by_degree[taken : taken + want]:
                 nodes[i].role = role
             taken += want
+
+    # A role only exists from the release that introduced it, so a node running an older profile
+    # cannot be configured into one: ROUTER_LATE arrived in v2.5.18 and CLIENT_BASE in v2.7.9. Those
+    # nodes fall back to CLIENT rather than silently behaving like a role their firmware lacks.
+    for node in nodes:
+        if node.role == ROUTER_LATE and not node.profile.router_late_role:
+            node.role = CLIENT
+            mesh.stats["role_unavailable_in_version"] += 1
+        elif node.role == CLIENT_BASE and not node.profile.client_base_role:
+            node.role = CLIENT
+            mesh.stats["role_unavailable_in_version"] += 1
 
     if favourite_routers:
         # Hop preservation only fires between nodes that have favourited each other, which in the
