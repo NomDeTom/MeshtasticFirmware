@@ -86,6 +86,50 @@ ROUTE_HEALTH_MAX = 32
 # PacketHistory keeps up to three relayers per record; next-hop learning reads them.
 MAX_RELAYERS = 3
 
+# mesh-pb-constants.h. The hot store is small and platform-dependent, and everything routing knows
+# is bounded by it. A node cannot resolve, route to, or count a peer it has evicted.
+#
+# The spread is the interesting part: a real mesh is a mix of these, so "how well does next-hop
+# routing work at this scale" has no single answer - it has one answer per platform, and the STM32WL
+# in the corner is having a completely different experience from the 16 MB S3 on the hill.
+PLATFORM_HOT_STORE = {
+    "stm32wl": 10,  # ARCH_STM32WL
+    "esp32s3_4mb": 100,  # CONFIG_IDF_TARGET_ESP32S3, flash < 7 MB
+    "nrf52840": 120,  # nRF52840 and generic ESP32, the compile-time default
+    "esp32s3_8mb": 200,  # flash 7-15 MB
+    "esp32s3_16mb": 250,  # flash >= 15 MB
+}
+MAX_NUM_NODES = PLATFORM_HOT_STORE["nrf52840"]
+
+# Rough field mixes. `uniform` is every node on the default cap - not realistic, but it is what the
+# transport did before platforms existed, so it keeps an old comparison honest. `realistic` is a
+# guess at a deployed regional mesh and is labelled as one: nobody has census data for this, and a
+# result that turns on the exact proportions should say which mix produced it.
+PLATFORM_MIXES = {
+    "uniform": {"nrf52840": 1.0},
+    "realistic": {
+        "nrf52840": 0.45,
+        "esp32s3_4mb": 0.25,
+        "esp32s3_8mb": 0.15,
+        "esp32s3_16mb": 0.10,
+        "stm32wl": 0.05,
+    },
+    # Every node on the smallest store there is. Not a deployment - a stress test for what routing
+    # does when almost nothing fits, which is the same regime a very large mesh puts a 120 in.
+    "constrained": {"stm32wl": 1.0},
+}
+
+
+def packet_history_max(max_num_nodes):
+    """PACKETHISTORY_MAX - twice the hot store, floored at 100."""
+    return max(max_num_nodes * 2, 100)
+
+
+# NodeDB.cpp:3330 and MeshTypes.h:51. Both two hours, and both narrow what can be resolved: a peer
+# not heard inside the window is neither online for congestion scaling nor a usable next hop.
+NUM_ONLINE_SECS = 60 * 60 * 2
+NEXTHOP_NEIGHBOR_FRESH_MSEC = 60 * 60 * 2 * 1000.0
+
 # Same-SF LoRa capture: a packet survives an overlap if it is this much stronger than the
 # interferer, or loses if the interferer locked the preamble first and is not this much weaker.
 CAPTURE_DB = 6.0
@@ -338,6 +382,31 @@ class SeenRecord:
         return bool(relay_byte) and relay_byte in self.relayed_by
 
 
+class NodeRecord:
+    """One `NodeInfoLite` in the hot store: what this node knows about a peer, and when it heard it.
+
+    Everything routing can do is bounded by this record existing. A peer evicted from the hot store
+    is not a peer the device routes to badly - it is a peer the device cannot resolve a relay byte
+    to, cannot hold a next hop for, and does not count as online. The store is small (10 on
+    STM32WL) and the mesh may not be, which is the whole point of modelling it.
+    """
+
+    __slots__ = ("last_heard", "hops_away", "next_hop", "is_favourite")
+
+    def __init__(self, last_heard, hops_away=None, is_favourite=False):
+        self.last_heard = last_heard
+        # None until we have heard a packet from this node with a usable hop count - `has_hops_away`
+        # in the firmware. Zero means a direct neighbour, which is what next-hop resolution wants.
+        self.hops_away = hops_away
+        self.next_hop = NO_NEXT_HOP_PREFERENCE
+        self.is_favourite = is_favourite
+
+    @property
+    def is_protected(self):
+        """Protected records outrank recency when the store has to give something up."""
+        return self.is_favourite
+
+
 class RouteHealth:
     """How fresh a learned next hop is, and how many directed deliveries to it have failed.
 
@@ -387,16 +456,27 @@ class Node:
         "history",
         "queue",
         "tx_token",
-        "routes",
+        "nodedb",
+        "max_num_nodes",
+        "history_max",
+        "platform",
         "route_health",
         "reliable",
-        "known_origins",
         "util_ring",
         "util_index",
         "util_epoch",
     )
 
-    def __init__(self, index, x, y, role=CLIENT, node_num=None):
+    def __init__(
+        self,
+        index,
+        x,
+        y,
+        role=CLIENT,
+        node_num=None,
+        max_num_nodes=MAX_NUM_NODES,
+        platform="nrf52840",
+    ):
         self.index = index
         self.x = x
         self.y = y
@@ -416,19 +496,22 @@ class Node:
         self.node_num = node_num if node_num is not None else (index + 1)
         self.rebroadcast_mode = REBROADCAST_ALL
         self.favourites = set()  # node indices this operator marked favourite
-        self.history = {}  # packet id -> SeenRecord (PacketHistory)
+        self.history = (
+            {}
+        )  # packet id -> SeenRecord (PacketHistory), bounded, oldest evicted
         self.queue = []  # QueueEntry, MeshPacketQueue order
         self.tx_token = (
             None  # the single pending transmit timer, overwritten like the firmware's
         )
-        self.routes = (
-            {}
-        )  # destination index -> next-hop last byte (NodeInfoLite.next_hop)
+        # The hot store: node index -> NodeRecord. Bounded, and the bound is load-bearing - it caps
+        # what can be resolved, routed to, or counted as online.
+        self.nodedb = {}
+        # Which board this is, and therefore how much of the mesh it can hold in RAM.
+        self.platform = platform
+        self.max_num_nodes = max_num_nodes
+        self.history_max = packet_history_max(max_num_nodes)
         self.route_health = {}  # destination index -> RouteHealth
         self.reliable = {}  # packet id -> pending retransmission record
-        # Stand-in for NodeDB membership: the originators we have actually heard. KNOWN_ONLY and
-        # LOCAL_ONLY both refuse to relay for a node that is not in the database.
-        self.known_origins = set()
 
         # AirTime's 6 x 10 s ring of channel-busy milliseconds. Counts our own transmissions and
         # every packet we could hear, which is what channelUtilizationPercent() reports.
@@ -446,6 +529,73 @@ class Node:
 
     def is_router_like(self):
         return self.role in ROUTER_LIKE
+
+    # ---- NodeDB (hot store) ------------------------------------------------------------
+
+    def update_from(self, peer, now, hops_away=None):
+        """NodeDB::updateFrom - note that we heard a peer, and how far away it is.
+
+        `hops_away` stays None until a packet arrives with a usable hop count, matching
+        `has_hops_away`: "we have never established this" is a different answer from "zero hops",
+        and next-hop resolution turns on the difference.
+        """
+        record = self.nodedb.get(peer)
+        if record is None:
+            record = NodeRecord(now, hops_away, is_favourite=peer in self.favourites)
+            self.nodedb[peer] = record
+        else:
+            record.last_heard = now
+            if hops_away is not None:
+                record.hops_away = hops_away
+        return record
+
+    def trim_nodedb(self):
+        """Demote the stalest unprotected record when the store overflows.
+
+        `demoteOldestHotNodesToWarm`: protection outranks recency, and within a class the
+        most-recently-heard survives. There is no warm tier here - a demoted node is simply
+        forgotten, which is what the hot store's callers experience either way.
+
+        Returns the records dropped, because losing one is how a learned route dies **without any
+        expiry being involved** - see the four separate lifetimes in Mesh.get_next_hop.
+        """
+        dropped = []
+        while len(self.nodedb) > self.max_num_nodes:
+            victim = min(
+                self.nodedb,
+                key=lambda peer: (
+                    self.nodedb[peer].is_protected,
+                    self.nodedb[peer].last_heard,
+                ),
+            )
+            dropped.append(self.nodedb.pop(victim))
+        return dropped
+
+    def knows(self, peer):
+        """Is this peer in the hot store at all? KNOWN_ONLY and LOCAL_ONLY ask exactly this."""
+        return peer in self.nodedb
+
+    def num_online(self, now):
+        """NodeDB::getNumOnlineMeshNodes - bounded by the store *and* by a two-hour window.
+
+        Not read by the transport, but it is the input to the congestion coefficient, and the
+        reason that coefficient cannot run away on a large mesh.
+        """
+        cutoff = now - NUM_ONLINE_SECS * 1000.0
+        return sum(1 for r in self.nodedb.values() if r.last_heard >= cutoff)
+
+    # ---- PacketHistory ----------------------------------------------------------------
+
+    def remember(self, packet_id, record):
+        """Insert a history record, evicting the oldest when the ring is full."""
+        self.history[packet_id] = record
+        self.seen[packet_id] = record.rx_time
+        while len(self.history) > self.history_max:
+            oldest = min(self.history, key=lambda pid: self.history[pid].rx_time)
+            del self.history[oldest]
+            # `seen` is the campaign-facing view of the same ring; letting it outlive the record
+            # would restore the suppression the eviction just gave up.
+            self.seen.pop(oldest, None)
 
     def log_airtime(self, now, ms):
         """Add busy milliseconds to the current 10 s bucket, rolling the ring as time passes."""
@@ -637,10 +787,6 @@ class Mesh:
         self.hop_limit = hop_limit
         self.area = area
         self.profile = profile if isinstance(profile, Profile) else Profile(profile)
-        # Last byte -> the node indices carrying it. Built once; nothing moves between meshes.
-        self._by_relay_byte = {}
-        for node in nodes:
-            self._by_relay_byte.setdefault(node.relay_byte, []).append(node.index)
         # A hook the traffic-management arm sets: fn(packet) -> bool, forcing one relay at
         # hop_limit 0 (TrafficManagementModule::shouldExhaustHops).
         self.should_exhaust_hops = None
@@ -683,7 +829,10 @@ class Mesh:
             "next_hop_learned": 0,
             "next_hop_ambiguous": 0,
             "next_hop_fallbacks": 0,
-            "route_health_expiries": 0,
+            "route_expired_ttl": 0,
+            "route_expired_failures": 0,
+            "routes_lost_to_eviction": 0,
+            "nodedb_evictions": 0,
             "reliable_retx": 0,
             "reliable_failures": 0,
             "opaque_relays": 0,
@@ -1207,26 +1356,64 @@ class Mesh:
             self.conf, rssi, self.conf.current_preset["cr"], length, self.rng.random()
         )
 
+    def note_heard(self, rx, peer, hops_away=None):
+        """Record a peer in rx's hot store, trimming it if that pushed it over the cap.
+
+        Counted here rather than on the Node so the loss is visible: a route dropped by eviction
+        never expires, never fails, and never shows up as a fallback - it simply stops existing,
+        which is the least legible of the four ways a next hop can die.
+        """
+        node = self.nodes[rx]
+        record = node.update_from(peer, self.now, hops_away=hops_away)
+        for dropped in node.trim_nodedb():
+            self.stats["nodedb_evictions"] += 1
+            if dropped.next_hop != NO_NEXT_HOP_PREFERENCE:
+                self.stats["routes_lost_to_eviction"] += 1
+        return record
+
     # ---- last-byte resolution (NodeDB::resolveLastByte) --------------------------------
 
     def resolve_unique_last_byte(self, rx, relay_byte, require_direct_neighbour=False):
-        """Which node is this relay byte? Exactly one, several, or none.
+        """NodeDB::resolveLastByte. Which node is this relay byte? Exactly one, several, or none.
 
         `relay_node` and `next_hop` are one byte of a 32-bit node number, so on a mesh of any size
         they collide. 2.8 never guesses: an ambiguous byte means take the safe branch - decrement
         the hop limit, flood instead of unicasting, learn nothing. Returning None is that answer.
+
+        Two gates decide the candidate set, and both shrink it well below "every node with this
+        byte". The **candidate** gate is the hot store: a peer we have evicted or never heard is not
+        a candidate at all. The **relevance** gate then asks whether the peer is a plausible relay
+        for this question - on the send path, a direct neighbour heard in the last two hours;
+        otherwise a direct neighbour, a favourite, or a router-like node.
+
+        The consequence is worth stating, because it is the opposite of what a birthday-problem
+        table over the whole mesh suggests: **the small store makes the byte less ambiguous, not
+        more.** What a large mesh costs is knowledge, not resolution.
         """
         if not relay_byte:
             return None
-        candidates = self._by_relay_byte.get(relay_byte, ())
-        if require_direct_neighbour:
-            reachable = self.neighbours[rx]
-            candidates = [c for c in candidates if c in reachable]
-        if len(candidates) != 1:
-            if len(candidates) > 1:
+        me = self.nodes[rx]
+        cutoff = self.now - NEXTHOP_NEIGHBOR_FRESH_MSEC
+        match = None
+        for peer, record in me.nodedb.items():
+            if peer == rx or self.nodes[peer].relay_byte != relay_byte:
+                continue
+            if require_direct_neighbour:
+                relevant = record.hops_away == 0 and record.last_heard >= cutoff
+            else:
+                relevant = (
+                    record.hops_away == 0
+                    or record.is_favourite
+                    or self.nodes[peer].is_router_like()
+                )
+            if not relevant:
+                continue
+            if match is not None:
+                # A second relevant candidate shares the byte. Nothing later can resolve that.
                 self.stats["next_hop_ambiguous"] += 1
-            return None
-        return candidates[0]
+                return None
+            match = peer
+        return match
 
     # ---- routers (FloodingRouter.cpp, NextHopRouter.cpp) -------------------------------
 
@@ -1246,8 +1433,9 @@ class Mesh:
             REBROADCAST_KNOWN_ONLY,
             REBROADCAST_LOCAL_ONLY,
         ):
-            # Both modes need the originator in our NodeDB; the sim's stand-in is having heard it.
-            if packet.origin not in node.known_origins:
+            # Both modes need the originator in our NodeDB - now literally that, and so subject to
+            # eviction: forgetting a node stops us relaying for it until we hear it again.
+            if not node.knows(packet.origin):
                 self.stats["rebroadcast_suppressed_by_mode"] += 1
                 return False
         return True
@@ -1301,23 +1489,30 @@ class Mesh:
         a row, and it is cleared rather than trusted for one more DM. We also never hand a packet
         back to the node that just relayed it, and never emit a byte that no longer resolves to a
         single reachable neighbour.
+
+        The route lives in the destination's own hot-store record, exactly as `NodeInfoLite.next_hop`
+        does, so **evicting a peer forgets the way to it**. That is the cost of a small store on a
+        large mesh, and it is a different cost from the ambiguity the relay byte causes.
         """
         if destination == BROADCAST or not self.profile.next_hop_routing:
             return None
         node = self.nodes[rx]
-        stored = node.routes.get(destination)
+        record = node.nodedb.get(destination)
+        stored = record.next_hop if record is not None else NO_NEXT_HOP_PREFERENCE
         if not stored:
             return None
         health = node.route_health.get(destination)
         if health is not None and health.last_next_hop == stored:
-            stale = (
-                health.consecutive_failures >= ROUTE_FAILURE_THRESHOLD
-                or (self.now - health.learned_at) >= ROUTE_TTL_MSEC
-            )
-            if stale:
-                node.routes.pop(destination, None)
+            failed = health.consecutive_failures >= ROUTE_FAILURE_THRESHOLD
+            aged = (self.now - health.learned_at) >= ROUTE_TTL_MSEC
+            if failed or aged:
+                record.next_hop = NO_NEXT_HOP_PREFERENCE
                 node.route_health.pop(destination, None)
-                self.stats["route_health_expiries"] += 1
+                # Split, because they answer different questions: TTL says the route went unused
+                # or unconfirmed, failures say it was tried and did not work.
+                self.stats[
+                    "route_expired_failures" if failed else "route_expired_ttl"
+                ] += 1
                 return None
         if stored == relay_byte:
             return None
@@ -1372,7 +1567,7 @@ class Mesh:
             record = SeenRecord(
                 packet.origin, packet.hop_limit, packet.next_hop, node.seen[packet.id]
             )
-            node.history[packet.id] = record
+            node.remember(packet.id, record)
 
         if record is not None:
             # wasSeenRecently, the update half: the record tracks the best hop limit anyone has
@@ -1389,12 +1584,12 @@ class Mesh:
             self._handle_dupe(rx, heard, we_were_next_hop)
             return
 
-        node.seen[packet.id] = self.now
-        node.known_origins.add(packet.origin)
-        node.history[packet.id] = SeenRecord(
-            packet.origin, packet.hop_limit, packet.next_hop, self.now
-        )
-        node.history[packet.id].note_relayer(packet.relay_node)
+        # NodeDB::updateFrom. getHopsAway is hop_start - hop_limit, so a packet that has not been
+        # relayed yet is what tells us a peer is a direct neighbour.
+        self.note_heard(rx, packet.origin, hops_away=packet.hops_taken())
+        fresh = SeenRecord(packet.origin, packet.hop_limit, packet.next_hop, self.now)
+        fresh.note_relayer(packet.relay_node)
+        node.remember(packet.id, fresh)
 
         self._sniff_ack_or_reply(rx, heard)
         if self.on_receive is not None:
@@ -1556,7 +1751,7 @@ class Mesh:
             ):
                 resolved = self.resolve_unique_last_byte(rx, packet.relay_node)
                 if resolved is not None:
-                    node.routes[packet.origin] = packet.relay_node
+                    self.note_heard(rx, packet.origin).next_hop = packet.relay_node
                     self.note_route_learned(rx, packet.origin, packet.relay_node)
                     self.stats["next_hop_learned"] += 1
 
@@ -1601,7 +1796,9 @@ class Mesh:
             # Last directed try. The route has not worked; record the failure, clear it, and let
             # this attempt flood, which is the only thing left that can still deliver.
             self.note_route_failure(node, packet.destination)
-            radio.routes.pop(packet.destination, None)
+            dest_record = radio.nodedb.get(packet.destination)
+            if dest_record is not None:
+                dest_record.next_hop = NO_NEXT_HOP_PREFERENCE
             retry.next_hop = NO_NEXT_HOP_PREFERENCE
             self.stats["next_hop_fallbacks"] += 1
         record["left"] -= 1
@@ -1666,11 +1863,9 @@ class Mesh:
         )
         if packet.next_hop != NO_NEXT_HOP_PREFERENCE:
             self.stats["next_hop_unicast"] += 1
-        radio.seen[packet.id] = self.now
-        radio.history[packet.id] = SeenRecord(
-            node, packet.hop_limit, packet.next_hop, self.now
-        )
-        radio.history[packet.id].note_relayer(radio.relay_byte)
+        own = SeenRecord(node, packet.hop_limit, packet.next_hop, self.now)
+        own.note_relayer(radio.relay_byte)
+        radio.remember(packet.id, own)
         if want_ack:
             self._start_retransmission(
                 node,
@@ -1683,6 +1878,22 @@ class Mesh:
             )
         self.send(node, packet)
         return packet
+
+
+def assign_platforms(node_count, platform_mix, rng):
+    """Draw a board for every node from a named mix.
+
+    Drawn rather than striped, so the small-store nodes are not evenly spaced by construction - a
+    mesh where the one STM32WL happens to sit on the only bridge is a mesh worth simulating, and
+    striping would never produce it.
+    """
+    if platform_mix in PLATFORM_HOT_STORE:
+        return [platform_mix] * node_count  # a single-board mesh, named directly
+    if platform_mix not in PLATFORM_MIXES:
+        raise ValueError(f"unknown platform mix {platform_mix!r}")
+    weights = PLATFORM_MIXES[platform_mix]
+    names = sorted(weights)
+    return rng.choices(names, weights=[weights[n] for n in names], k=node_count)
 
 
 def build(
@@ -1704,6 +1915,8 @@ def build(
     client_base_fraction=0.0,
     favourite_routers=False,
     rebroadcast_mode=REBROADCAST_ALL,
+    max_num_nodes=None,
+    platform_mix="uniform",
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -1715,7 +1928,25 @@ def build(
     # Real node numbers, so two nodes can share a last byte the way they do on a real mesh. 2.8
     # detects that collision and takes the conservative branch; sequential ids would hide the path.
     node_nums = [rng.randrange(1, 1 << 32) for _ in range(node_count)]
-    nodes = [Node(i, x, y, node_num=node_nums[i]) for i, (x, y) in enumerate(points)]
+    # Hand out boards before positions matter: a node's hot store is a property of what it is, not
+    # of where it sits. `max_num_nodes` overrides the mix outright, so a sweep can hold the store
+    # fixed and vary something else.
+    platforms = assign_platforms(node_count, platform_mix, rng)
+    nodes = [
+        Node(
+            i,
+            x,
+            y,
+            node_num=node_nums[i],
+            platform=platforms[i],
+            max_num_nodes=(
+                max_num_nodes
+                if max_num_nodes is not None
+                else PLATFORM_HOT_STORE[platforms[i]]
+            ),
+        )
+        for i, (x, y) in enumerate(points)
+    ]
     for node in nodes:
         node.rebroadcast_mode = rebroadcast_mode
     mesh = Mesh(

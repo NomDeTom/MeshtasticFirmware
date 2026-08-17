@@ -364,6 +364,8 @@ class Campaign:
             client_base_fraction=getattr(opts, "client_base_fraction", 0.0),
             favourite_routers=getattr(opts, "favourite_routers", False),
             rebroadcast_mode=getattr(opts, "rebroadcast_mode", M.REBROADCAST_ALL),
+            max_num_nodes=_hot_store_size(opts),
+            platform_mix=getattr(opts, "platform_mix", "uniform"),
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(
@@ -1496,6 +1498,18 @@ class Campaign:
         shutil.rmtree(self.db_dir, ignore_errors=True)
 
 
+def _hot_store_size(opts):
+    """The hot-store cap to hand every node, or None to let the platform mix decide.
+
+    --max-num-nodes and MAX_NUM_NODES are the same constant, so one flag drives both the congestion
+    input and the store. A platform mix overrides it, because then the whole point is that nodes
+    differ; asking for both is asking for two different things and the mix wins.
+    """
+    if getattr(opts, "platform_mix", "uniform") != "uniform":
+        return None
+    return getattr(opts, "max_num_nodes", None)
+
+
 def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=72.0)
@@ -1555,7 +1569,16 @@ def build_parser():
         "--max-num-nodes",
         type=int,
         default=120,
-        help="modelled hot-store cap; bounds the congestion input, as getNumOnlineMeshNodes does",
+        help="MAX_NUM_NODES. Bounds the congestion input as getNumOnlineMeshNodes does, and "
+        "sizes every node's NodeDB and packet-history ring unless --platform-mix gives them "
+        "boards of their own. 10 = STM32WL, 120 = nRF52840, 250 = 16MB ESP32-S3",
+    )
+    ap.add_argument(
+        "--platform-mix",
+        default="uniform",
+        choices=sorted(set(M.PLATFORM_MIXES) | set(M.PLATFORM_HOT_STORE)),
+        help="board mix, which sets each node's hot store: a named mix, or one board for all. "
+        "uniform = every node at the 120-entry default, as before platforms were modelled",
     )
     ap.add_argument("--position-throttle", type=int, default=1)
     ap.add_argument("--telemetry-throttle", type=int, default=1)
