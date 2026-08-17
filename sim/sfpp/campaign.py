@@ -360,6 +360,8 @@ class Campaign:
             hop_assign=opts.hop_assign,
             topology=opts.topology,
             profile=getattr(opts, "profile", "2.8"),
+            old_profile=getattr(opts, "old_profile", "legacy"),
+            legacy_fraction=getattr(opts, "legacy_fraction", 0.0),
             role_mix=getattr(opts, "role_mix", None) or None,
             router_late_fraction=getattr(opts, "router_late_fraction", 0.0),
             client_base_fraction=getattr(opts, "client_base_fraction", 0.0),
@@ -1540,8 +1542,22 @@ def build_parser():
     ap.add_argument(
         "--profile",
         default="2.8",
-        choices=("2.8", "legacy"),
-        help="which firmware's MAC and routing rules to obey; legacy is the pre-fold-in model",
+        choices=M.VERSIONS + ("legacy",),
+        help="which firmware release series' MAC and routing rules to obey, each taken at the "
+        "final release of that series; legacy is this transport's own pre-fold-in model, not a "
+        "firmware version",
+    )
+    ap.add_argument(
+        "--old-profile",
+        default="legacy",
+        choices=M.VERSIONS + ("legacy",),
+        help="the rules the --legacy-fraction share of nodes runs instead of --profile",
+    )
+    ap.add_argument(
+        "--legacy-fraction",
+        type=float,
+        default=0.0,
+        help="share of nodes running --old-profile rather than --profile, for a mixed-version mesh",
     )
     ap.add_argument(
         "--diurnal",

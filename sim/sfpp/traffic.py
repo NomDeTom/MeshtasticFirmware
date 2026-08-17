@@ -121,18 +121,53 @@ def diurnal_weight(shape, hour_of_day):
     return weights[int(hour_of_day) % 24] / (sum(weights) / 24.0)
 
 
-def congestion_coefficient(node_count, sf, bw_hz, event_mode=False):
-    """The firmware's own broadcast-interval scaling, from Default.h:106.
+# Default.h congestionScalingCoefficient, 2.5 and 2.6: the per-node throttle depends on the modem
+# preset, and the two shortest presets switch it off entirely rather than throttling at all.
+PRESET_THROTTLING_FACTOR = {
+    "MEDIUM_SLOW": 0.04,
+    "MEDIUM_FAST": 0.02,
+    "SHORT_SLOW": 0.01,
+    "SHORT_FAST": None,
+    "SHORT_TURBO": None,
+}
+PRESET_THROTTLING_DEFAULT = 0.075
 
-    At or below 40 nodes it is 1.0. Above that, every extra node lengthens device-originated
-    broadcast intervals by 2^SF / (BW_kHz * 100) - which on LONG_FAST is 0.08192 per node, so a
-    150-node mesh stretches its intervals by a factor of ten. A size sweep that ignores this models
-    a mesh nobody running 2.8 would actually have.
+# 2.5 through v2.7.16 shorten intervals on a small mesh instead of leaving them alone. Removed in
+# v2.7.17, so the 2.7 profile - which is v2.7.21 - does not have it.
+SMALL_MESH_SPEEDUP = ((10, 0.6), (20, 0.7), (30, 0.8))
+
+
+def congestion_coefficient(
+    node_count, sf, bw_hz, event_mode=False, model="sf_bw", preset="LONG_FAST"
+):
+    """The firmware's own broadcast-interval scaling, Default.h congestionScalingCoefficient.
+
+    A multiplier on every periodic broadcast interval. Three models, one per era:
+
+    - `flat` (2.4): 1.0 to 40 nodes, then 0.075 per extra node whatever the preset.
+    - `preset` (2.5, 2.6): a per-preset factor, no throttle at all on SHORT_FAST or SHORT_TURBO, and
+      a coefficient *below* 1.0 up to 30 nodes - a small mesh is deliberately made chattier.
+    - `sf_bw` (2.7, 2.8): 2^SF / (BW_kHz * divisor), which on LONG_FAST is 0.08192 per node, so a
+      150-node mesh stretches its intervals by a factor of ten. The divisor is 100, or 25 in event
+      mode.
     """
+    if model == "preset":
+        for bound, coefficient in SMALL_MESH_SPEEDUP:
+            if node_count <= bound:
+                return coefficient
     if node_count <= 40:
         return 1.0
-    divisor = 25.0 if event_mode else 100.0
-    throttling_factor = (2.0**sf) / ((bw_hz / 1000.0) * divisor)
+    if model == "flat":
+        throttling_factor = PRESET_THROTTLING_DEFAULT
+    elif model == "preset":
+        throttling_factor = PRESET_THROTTLING_FACTOR.get(
+            preset, PRESET_THROTTLING_DEFAULT
+        )
+        if throttling_factor is None:
+            return 1.0
+    else:
+        divisor = 25.0 if event_mode else 100.0
+        throttling_factor = (2.0**sf) / ((bw_hz / 1000.0) * divisor)
     return 1.0 + (node_count - 40) * throttling_factor
 
 
@@ -167,11 +202,18 @@ class Generator:
         preset = mesh.conf.current_preset
         # Device-originated broadcasts stretch with mesh size; user-typed text does not, because
         # nothing in the firmware throttles a person deciding to send a message.
+        # Which era's throttle to apply. Taken from the mesh's own default profile, so a 2.5 mesh
+        # gets the per-preset table and its small-mesh speedup rather than 2.8's SF/BW curve.
+        profile = mesh.nodes[0].profile if mesh.nodes else None
         self.congestion = (
             # getNumOnlineMeshNodes() iterates the hot store, so a node cannot count mesh members it
             # has evicted. The coefficient is bounded by MAX_NUM_NODES, not by mesh size.
             congestion_coefficient(
-                min(len(mesh.nodes), online_cap), preset["sf"], preset["bw"]
+                min(len(mesh.nodes), online_cap),
+                preset["sf"],
+                preset["bw"],
+                model=profile.congestion_model if profile is not None else "sf_bw",
+                preset=getattr(mesh.conf, "MODEM_PRESET", "LONG_FAST"),
             )
             if congestion_scaling
             else 1.0

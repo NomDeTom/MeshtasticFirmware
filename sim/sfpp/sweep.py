@@ -165,6 +165,18 @@ BLOCKS = {
     # this is the block that says whether any of them need restating - same seed, same mesh, same
     # traffic, only the firmware's MAC and routing rules change.
     "R-firmware": ("profile", ["legacy", "2.8"], []),
+    # The release series in order, each at its final release. Steps the whole rule set at once -
+    # contention window, roles, queue order, hop preservation, next-hop, store size and the
+    # congestion throttle - so it says what a mesh gained or lost per upgrade rather than what one
+    # rule is worth.
+    "R-versions": ("profile", ["2.4", "2.5", "2.6", "2.7", "2.8"], []),
+    # A mesh that has not finished upgrading. The share below runs 2.6 while the rest run 2.8, which
+    # is the case the release notes never describe.
+    "R-mixed": (
+        "legacy-fraction",
+        [0.0, 0.25, 0.5, 0.75],
+        ["--old-profile", "2.6"],
+    ),
     # The roles 2.8 added. ROUTER_LATE only speaks when the mesh still needs it, so promoting the
     # spine to it should cut relay airtime without costing reach - which is the claim to test.
     "R-routerlate": ("router-late-fraction", [0.0, 0.05, 0.1, 0.2], []),
