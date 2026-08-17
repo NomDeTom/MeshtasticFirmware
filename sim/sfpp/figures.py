@@ -190,50 +190,71 @@ def fig_loss(runs_dir, out_dir):
     save(fig, out_dir, "capacity-vs-loss")
 
 
+def recovery(reports):
+    """Of everything an ordinary node missed, the share the archive holds. The payoff metric."""
+    rec = mean(reports, ("baseline", "text_reception_mean"))
+    one = mean(reports, ("sfpp", "held_fraction_mean"))
+    allof = mean(reports, ("sfpp", "union_fraction"))
+    return (one - rec) / (1 - rec), (allof - rec) / (1 - rec)
+
+
 def fig_topology(runs_dir, out_dir):
     place = load(runs_dir, "G-place")
     hops = load(runs_dir, "G-hops")
     if not place and not hops:
         return
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.4), facecolor=BG)
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.6), facecolor=BG)
     for ax in axes:
         ax.set_facecolor(BG)
 
     if place:
         grouped = cells(place)
         labels = list(grouped)
-        held = [mean(v, ("sfpp", "held_fraction_mean")) for v in grouped.values()]
-        union = [mean(v, ("sfpp", "union_fraction")) for v in grouped.values()]
+        one = [recovery(v)[0] for v in grouped.values()]
+        allof = [recovery(v)[1] for v in grouped.values()]
         x = range(len(labels))
-        axes[0].bar([i - 0.19 for i in x], held, 0.38, color=COOL, label="per server")
-        axes[0].bar([i + 0.19 for i in x], union, 0.38, color=ACCENT, label="union")
+        axes[0].bar(
+            [i - 0.19 for i in x], one, 0.38, color=COOL, label="from one server"
+        )
+        axes[0].bar(
+            [i + 0.19 for i in x], allof, 0.38, color=ACCENT, label="from all three"
+        )
+        axes[0].axhline(0, color=MUTED, linewidth=0.8)
         axes[0].set_xticks(list(x))
         axes[0].set_xticklabels(labels, fontsize=8, rotation=20, ha="right")
-        style(axes[0], "Where the servers go", "", "fraction of chain held")
-        axes[0].set_ylim(0, 1)
+        style(
+            axes[0], "Where the servers go", "", "of what a node missed, archive holds"
+        )
         axes[0].legend(frameon=False, fontsize=9)
 
     if hops:
         grouped = cells(hops)
-        separations = sorted(grouped)
-        held = [mean(grouped[h], ("sfpp", "held_fraction_mean")) for h in separations]
-        air = [
-            100 * mean(grouped[h], ("sfpp", "sr_airtime_share")) for h in separations
-        ]
-        axes[1].plot(separations, held, "o-", color=COOL, linewidth=2, label="held")
-        twin = axes[1].twinx()
-        twin.plot(
-            separations, air, "s--", color=ACCENT, linewidth=1.6, label="SR airtime %"
+        seps = sorted(grouped)
+        one = [recovery(grouped[h])[0] for h in seps]
+        allof = [recovery(grouped[h])[1] for h in seps]
+        axes[1].plot(seps, one, "o-", color=COOL, linewidth=2, label="from one server")
+        axes[1].plot(
+            seps, allof, "s-", color=ACCENT, linewidth=2, label="from all three"
         )
-        twin.tick_params(colors=MUTED, labelsize=9)
-        twin.spines["top"].set_visible(False)
+        axes[1].axvline(
+            3, color=MUTED, linestyle=":", linewidth=1.2
+        )  # the mesh's hop limit
+        axes[1].annotate(
+            "hop limit",
+            xy=(3, 0.05),
+            fontsize=9,
+            color=MUTED,
+            ha="center",
+            xytext=(3, 0.02),
+        )
         style(
             axes[1],
-            "Server separation, in hops",
-            "hops apart",
-            "fraction of chain held",
+            "Separation is the dominant variable",
+            "hops between servers",
+            "of what a node missed, archive holds",
         )
-        axes[1].set_ylim(0, 1)
+        axes[1].set_xticks(seps)
+        axes[1].legend(frameon=False, fontsize=9)
     fig.tight_layout()
     save(fig, out_dir, "topology")
 
