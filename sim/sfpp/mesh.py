@@ -1001,6 +1001,37 @@ def place(topology, count, area, rng, min_dist=300.0):
     return TOPOLOGIES[topology](count, area, rng, min_dist), topology
 
 
+# Where a node actually is, as a gain offset in dB on every link it takes part in. These are the
+# deployments people describe having, and the spread between them is larger than most parameters this
+# simulator sweeps: a roof node and a basement node differ by 26 dB, which is more than the whole span
+# from SHORT_FAST to VERY_LONG_SLOW sensitivity.
+#
+# Values are deliberately round rather than measured - they are a stated assumption, not data. A roof
+# node clears local clutter and gets height; a desk node is indoors with a window; a pocket node pays
+# body loss and no height; a basement node is below grade, which is the worst case people actually run.
+#
+# NOT FROM THE FIRMWARE, AND NOT MEASURED. The firmware has no concept of siting - it knows tx_power
+# and a GPS position, and grep for antenna_gain across src/ and the protobufs returns nothing. Even the
+# simulator's own antenna gain is a single global Config.GL, not per node. These four numbers are a
+# modelling assumption of mine, and the 26 dB between roof and basement is wide enough to move results,
+# so they want replacing with measurements rather than defending.
+SITINGS = {
+    "roof": 6.0,
+    "desk": 0.0,
+    "pocket": -10.0,
+    "basement": -20.0,
+}
+
+# Named mixes of the above. `local-typical` is the small deployment a hobbyist actually has; `event`
+# is a field of people carrying nodes; `backbone` is a line of roof-mounted routers.
+SITING_MIXES = {
+    "uniform": {"desk": 1.0},
+    "local-typical": {"roof": 0.15, "desk": 0.45, "pocket": 0.3, "basement": 0.1},
+    "event": {"roof": 0.05, "desk": 0.15, "pocket": 0.8},
+    "backbone": {"roof": 0.8, "desk": 0.2},
+}
+
+
 def make_config(preset="LONG_FAST", model=5, phy_loss=True):
     from lib.config import Config
 
@@ -1062,6 +1093,8 @@ class Mesh:
         # across buckets, a burst puts a whole bucket's worth into one.
         self.burst_loss = burst_loss
         self.burst_ms = burst_ms
+        # Filled by build(); a flat zero offset unless a siting mix is chosen.
+        self.siting_gain = [0.0] * len(nodes)
         self._deaf_until = [0.0] * len(nodes)
         self._deaf_checked = [0.0] * len(nodes)
         self.now = 0.0
@@ -1135,6 +1168,7 @@ class Mesh:
                 base = conf.PTX + 2 * conf.GL - loss
                 # Real links are not reciprocal - antennas, height, local clutter. One draw per
                 # pair, applied with opposite sign, so the asymmetry is a property of the link.
+                siting = self.siting_gain[i] + self.siting_gain[j]
                 skew = (
                     self.rng.gauss(
                         conf.MODEL_ASYMMETRIC_LINKS_MEAN,
@@ -1143,8 +1177,8 @@ class Mesh:
                     if conf.MODEL_ASYMMETRIC_LINKS
                     else 0.0
                 )
-                self.rssi[i][j] = base + skew
-                self.rssi[j][i] = base - skew
+                self.rssi[i][j] = base + siting + skew
+                self.rssi[j][i] = base + siting - skew
 
         for i in range(n):
             for j in range(n):

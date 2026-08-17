@@ -400,6 +400,11 @@ class Campaign:
         # of an unmeasured denominator.
         self.heard_by_class = {}
         self.hop_stats = {}
+        # Per node, how many hops each text it received had actually travelled. The firmware keeps the
+        # same quantity per peer as NodeInfoLite.hops_away, so this is the simulator's view of the field
+        # rather than an invented metric - and a histogram rather than a mean, because the interesting
+        # nodes are the ones whose traffic all arrives at 4+ hops.
+        self.hops_away_hist = {i: {} for i in range(opts.nodes)}
         self.servers = {}
         self.db_dir = tempfile.mkdtemp(prefix="sfpp-campaign-")
         self.bucket_closed_at = {}
@@ -493,7 +498,11 @@ class Campaign:
         )
         stats["nodes"].add(node.index)
         stats["received"] += 1
-        stats["hops"].append(packet.hops_taken())
+        hops = packet.hops_taken()
+        stats["hops"].append(hops)
+        if packet.kind == "text":
+            h = self.hops_away_hist[node.index]
+            h[hops] = h.get(hops, 0) + 1
 
     def _on_receive(self, node, packet, rssi, snr):
         self._note_class_reception(node, packet)
@@ -1302,6 +1311,7 @@ class Campaign:
             },
             "by_class": self._class_report(),
             "by_hop_limit": self._hop_report(),
+            "hops_away": self._hops_away_report(),
             "traffic": {
                 "originated": dict(self.generator.originated),
                 "congestion_coefficient": round(self.generator.congestion, 3),
@@ -1613,6 +1623,53 @@ class Campaign:
                 "archived": name == "text",
             }
         return out
+
+    def _hops_away_report(self):
+        """Per-node histogram of how far the text it received had travelled, plus the topology's own.
+
+        Two distinct things, and conflating them is easy:
+
+          observed  - hops actually traversed by text this node received. What NodeInfoLite.hops_away
+                      records, and what a client would display.
+          topology  - shortest-path distance to every other node, whether or not anything arrived.
+                      The bound the observed histogram is drawn from.
+
+        A node whose observed histogram is empty above 2 hops while its topological one runs to 6 is
+        not well connected - it is deaf beyond 2 hops, and that is the node an archive is for.
+        """
+        observed, topo = {}, {}
+        for i in range(self.opts.nodes):
+            h = self.hops_away_hist.get(i) or {}
+            if h:
+                total = sum(h.values())
+                observed[str(i)] = {
+                    "counts": {str(k): v for k, v in sorted(h.items())},
+                    "mean_hops": round(sum(k * v for k, v in h.items()) / total, 2),
+                    "max_hops": max(h),
+                }
+            depth = self.mesh.hops_from([i])
+            d = {}
+            for target, hops in depth.items():
+                if hops > 0:
+                    d[hops] = d.get(hops, 0) + 1
+            if d:
+                topo[str(i)] = {str(k): v for k, v in sorted(d.items())}
+
+        # Mesh-wide rollups, so a sweep has something scalar to compare without unpacking 60 nodes.
+        agg = {}
+        for h in self.hops_away_hist.values():
+            for k, v in h.items():
+                agg[k] = agg.get(k, 0) + v
+        total = sum(agg.values()) or 1
+        return {
+            "observed_per_node": observed,
+            "topology_per_node": topo,
+            "mesh_observed_counts": {str(k): v for k, v in sorted(agg.items())},
+            "mesh_observed_share": {
+                str(k): round(v / total, 4) for k, v in sorted(agg.items())
+            },
+            "mesh_mean_hops": round(sum(k * v for k, v in agg.items()) / total, 2),
+        }
 
     def _hop_report(self):
         """Reception and traversal split by the node's own configured hop limit."""
