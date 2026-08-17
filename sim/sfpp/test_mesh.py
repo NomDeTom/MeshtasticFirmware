@@ -256,6 +256,32 @@ class QueueOrder(unittest.TestCase):
         newcomer = M.QueueEntry(M.Packet(99, 0, 70, 40), tx_after=60000.0)
         self.assertFalse(mesh._replace_lower_priority(radio, newcomer))
 
+    def test_the_backoff_cap_exists_only_under_legacy(self):
+        """The pre-fold-in defect, restored so `legacy` carries the rule it was named for.
+
+        The firmware has no such cap - setTransmitDelay reschedules indefinitely - so 2.8 must not
+        have one. Reproducing the *rate* at which it fired before the fold-in is a different
+        matter: see test_the_cap_alone_does_not_reproduce_pre_fold_in_drops.
+        """
+        self.assertIsNone(M.Profile("2.8").max_backoffs)
+        self.assertEqual(M.Profile("legacy").max_backoffs, 400)
+
+    def test_legacy_gives_up_on_a_packet_the_channel_never_clears_for(self):
+        mesh = small_mesh(nodes=6, profile="legacy")
+        mesh.nodes[0].busy_until = 1e9  # never clears
+        mesh.send(0, M.Packet(1, 0, 70, 40))
+        mesh.run(6_000_000.0)
+        self.assertEqual(mesh.stats["dropped_to_backoff_cap"], 1)
+        self.assertEqual(len(mesh.nodes[0].queue), 0)
+
+    def test_the_modern_profile_waits_forever_instead(self):
+        mesh = small_mesh(nodes=6, profile="2.8")
+        mesh.nodes[0].busy_until = 1e9
+        mesh.send(0, M.Packet(1, 0, 70, 40))
+        mesh.run(6_000_000.0)
+        self.assertEqual(mesh.stats["dropped_to_backoff_cap"], 0)
+        self.assertEqual(len(mesh.nodes[0].queue), 1)
+
     def test_overflow_is_the_only_drop(self):
         """RadioLibInterface::send drops on a full queue and nowhere else.
 
