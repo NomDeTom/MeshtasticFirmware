@@ -259,6 +259,8 @@ class Generator:
                 packet = self.mesh.originate(
                     node, cls.portnum, size, kind=cls.name, payload=None
                 )
+                if packet is None:
+                    return  # the node is offline; nothing was composed, so nothing is archived
                 obj = self._make_object(node, packet.id, size)
                 packet.payload = obj.message_hash
                 self.objects[obj.message_hash] = obj
