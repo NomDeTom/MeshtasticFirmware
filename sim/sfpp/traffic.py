@@ -216,7 +216,15 @@ class Generator:
             if cls.archived:
                 rate = cls.per_hour * self.text_scale
             else:
-                rate = cls.per_hour / self.congestion / self.throttle.get(cls.name, 1)
+                # One operator-set interval for every device class when given, otherwise the per-class
+                # mix. Congestion scaling and the region throttle apply on top either way, so this
+                # measures the operator's choice rather than replacing the firmware's own scaling.
+                base = (
+                    3600.0 / self.broadcast_interval_s
+                    if self.broadcast_interval_s
+                    else cls.per_hour
+                )
+                rate = base / self.congestion / self.throttle.get(cls.name, 1)
             if rate <= 0:
                 continue
             diurnal = self.diurnal != "flat" and cls.name in self.diurnal_classes
