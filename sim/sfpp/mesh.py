@@ -94,10 +94,11 @@ CAPTURE_DB = 6.0
 # an overlap. LONG_SLOW at a full payload is about 6 s; the margin is deliberate.
 MAX_AIRTIME_MS = 20000.0
 
-# The firmware's TX queue is finite and CAD does not retry forever. Overflow is a real drop and is
-# counted as one; it is the honest way for congestion to show up.
+# The firmware's TX queue is finite, and overflow is its only drop: setTransmitDelay reschedules a
+# blocked packet indefinitely rather than giving up on it, so congestion shows up as a full queue
+# and as latency, never as a packet that quietly evaporates. The old model also dropped after 400
+# backoffs; that cap has no counterpart in the firmware and is gone.
 QUEUE_DEPTH = 16
-MAX_BACKOFFS = 400
 
 # meshtastic_MeshPacket_Priority, only the values the queue order actually distinguishes.
 PRIORITY_BACKGROUND = 10

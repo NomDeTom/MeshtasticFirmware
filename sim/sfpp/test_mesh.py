@@ -176,6 +176,29 @@ class QueueOrder(unittest.TestCase):
         self.assertIs(self.radio.queue[0], ready)
         self.assertIs(self.radio.queue[1], late)
 
+    def test_overflow_is_the_only_drop(self):
+        """RadioLibInterface::send drops on a full queue and nowhere else.
+
+        A blocked packet is rescheduled indefinitely by setTransmitDelay - there is no backoff cap
+        in the firmware, so congestion has to surface as a full queue and as latency rather than as
+        packets that quietly evaporate.
+        """
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].busy_until = 1e9  # the radio never frees up
+        for packet_id in range(M.QUEUE_DEPTH + 4):
+            mesh.send(0, M.Packet(packet_id, 0, 70, 40))
+        self.assertEqual(len(mesh.nodes[0].queue), M.QUEUE_DEPTH)
+        self.assertEqual(mesh.stats["queue_drops"], 4)
+
+    def test_a_blocked_packet_is_never_abandoned(self):
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].busy_until = 120000.0
+        mesh.send(0, M.Packet(1, 0, 70, 40))
+        mesh.run(60000.0)
+        self.assertEqual(len(mesh.nodes[0].queue), 1, "still waiting, not dropped")
+        self.assertEqual(mesh.stats["queue_drops"], 0)
+        self.assertGreater(mesh.stats["deferrals"], 0)
+
     def test_deferred_packets_sort_by_deadline(self):
         later = self._add(M.PRIORITY_DEFAULT, tx_after=9000.0, packet_id=1)
         sooner = self._add(M.PRIORITY_DEFAULT, tx_after=4000.0, packet_id=2)
