@@ -197,6 +197,7 @@ class Counters:
         "adverts_lost",
         "window_checksum_closed",
         "bystander_pickups",
+        "replays_backfiled",
     )
 
     def __init__(self):
@@ -241,6 +242,14 @@ class Server:
         self.matched = set()
         self.poisoned = set()
         self.sealed = set()  # buckets this server considers closed
+        # (rx_time_ms, bucket) for objects heard directly, in time order. A replay carrying
+        # `heard_ago` can be binary-searched into this to land in the bucket it would have been in
+        # had it arrived on time, rather than in whatever bucket is current now.
+        self.timeline = []
+        # message_hash -> (first_heard_ms, [claimed original ms from each replay]). Holding both the
+        # directly-heard copy and every replay's claim is what makes drift measurable and what would
+        # catch a peer lying about heard_ago.
+        self.provenance = {}
 
     def members(self, bucket):
         return {h for h, b in self.bucket.items() if b == bucket}
@@ -266,6 +275,26 @@ class Server:
                 checksum_contribution(message_hash),
             )
         return s if s.count > 0 else None
+
+    def note_direct(self, message_hash, when_ms, bucket):
+        self.timeline.append((when_ms, bucket))
+        self.provenance.setdefault(message_hash, [when_ms, []])
+
+    def note_replay(self, message_hash, claimed_ms):
+        record = self.provenance.setdefault(message_hash, [None, []])
+        record[1].append(claimed_ms)
+
+    def bucket_at(self, when_ms):
+        """The bucket this server was filling at that moment, or None if it has no record there."""
+        import bisect
+
+        if not self.timeline:
+            return None
+        times = [t for t, _ in self.timeline]
+        i = bisect.bisect_left(times, when_ms)
+        if i >= len(self.timeline):
+            return self.timeline[-1][1]
+        return self.timeline[i][1]
 
     def holds(self, message_hash):
         """Membership in the whole store, not just the window.
@@ -322,8 +351,13 @@ class Campaign:
         self.bucket_closed_at = {}
         self.width = opts.short_id_bits
 
+        # Intermediate nodes wired for telemetry. They run no archive and change no behaviour; they
+        # only record what an ordinary node in the middle of the mesh actually ends up with, split by
+        # how it got there. Without this the bystander benefit of a broadcast replay is invisible.
+        self.observers = {}
         if not opts.baseline:
             self._place_servers()
+            self._place_observers()
         self.mesh.on_receive = self._on_receive
 
     # ---- setup ------------------------------------------------------------------------
@@ -336,6 +370,28 @@ class Campaign:
             self.servers[i] = Server(
                 i, SfppStore(os.path.join(self.db_dir, f"s{i}.db"), i), self.opts
             )
+
+    def _place_observers(self):
+        """Pick ordinary nodes spread through the mesh, preferring the middle over the fringe."""
+        candidates = [
+            i
+            for i in range(self.opts.nodes)
+            if i not in self.servers and self.mesh.neighbours[i]
+        ]
+        if not candidates or self.opts.observers <= 0:
+            return
+        depth = self.mesh.hops_from(sorted(self.servers)) if self.servers else {}
+        candidates.sort(key=lambda i: (depth.get(i, 99), -len(self.mesh.neighbours[i])))
+        step = max(1, len(candidates) // self.opts.observers)
+        for i in candidates[::step][: self.opts.observers]:
+            self.observers[i] = {
+                "direct": set(),
+                "overheard": set(),
+                "placement_error_s": [],
+                "hops_to_server": depth.get(i, -1),
+                "hop_limit": self.mesh.hop_limit_for(i),
+                "degree": len(self.mesh.neighbours[i]),
+            }
 
     def server_separation(self):
         """Pairwise hop distances between servers - the topology arm's independent variable."""
@@ -419,6 +475,9 @@ class Campaign:
     def _on_text(self, node, packet):
         message_hash = packet.payload
         self.heard_text[node.index].add(message_hash)
+        watch = self.observers.get(node.index)
+        if watch is not None:
+            watch["direct"].add(message_hash)
         server = self.servers.get(node.index)
         if server is None:
             return
@@ -429,6 +488,7 @@ class Campaign:
         if server.store.insert(obj, counter):
             server.held[message_hash] = counter
             server.bucket[message_hash] = bucket
+            server.note_direct(message_hash, self.mesh.now, bucket)
             if sealed is not None and self.opts.trigger in (
                 "bucket",
                 "bucket+interval",
@@ -454,9 +514,18 @@ class Campaign:
         message_hash = packet.payload.get("hash")
         if message_hash is None:
             return
+        watch = self.observers.get(node.index)
         if message_hash not in self.heard_text[node.index]:
             self.heard_text[node.index].add(message_hash)
             self.counters.bystander_pickups += 1
+            if watch is not None:
+                watch["overheard"].add(message_hash)
+                # How far out is the replay header's account of when this was first heard? The
+                # claim is the archive's receive time, not the originator's, so some error is
+                # expected; this is whether it is small enough to file the message correctly.
+                claimed = self.mesh.now - packet.payload.get("heard_ago_s", 0) * 1000.0
+                true_ms = self.generator.objects[message_hash].rx_time
+                watch["placement_error_s"].append(abs(claimed - true_ms) / 1000.0)
 
     def _maybe_advertise_on_close(self, server, bucket):
         """A bucket this server considers sealed is worth stating once."""
@@ -845,12 +914,20 @@ class Campaign:
         message_hash = payload["hash"]
         if message_hash in server.held:
             return
-        # A transferred object is numbered by the receiver, the same way one heard off the air is.
-        # Under local numbering that means an object can sit in a different bucket at each server
-        # even after it has been successfully replicated - which is the point of the arm.
+        claimed_ms = self.mesh.now - payload.get("heard_ago_s", 0) * 1000.0
+        server.note_replay(message_hash, claimed_ms)
+
         counter, bucket, _ = self._assign(server, message_hash)
         if counter is None:
             return
+        if self.opts.replay_ordering == "heard":
+            # File the replay where it belongs in this server's own stream rather than at the tip.
+            # This is what lets an old bucket converge: numbered at the tip, a transferred object
+            # lands in the newest bucket and the bucket it came from can never agree with the peer's.
+            placed = server.bucket_at(claimed_ms)
+            if placed is not None:
+                bucket = placed
+                self.counters.replays_backfiled += 1
         if server.store.insert(self.generator.objects[message_hash], counter):
             server.held[message_hash] = counter
             server.bucket[message_hash] = bucket
@@ -1081,6 +1158,34 @@ class Campaign:
             },
         }
 
+        if self.observers:
+            rows = []
+            for index, w in sorted(self.observers.items()):
+                direct = len(w["direct"])
+                extra = len(w["overheard"] - w["direct"])
+                errors = w["placement_error_s"]
+                rows.append(
+                    {
+                        "node": index,
+                        "degree": w["degree"],
+                        "hop_limit": w["hop_limit"],
+                        "hops_to_nearest_server": w["hops_to_server"],
+                        "direct": direct,
+                        "overheard_new": extra,
+                        "direct_fraction": round(direct / total, 4) if total else 0,
+                        "with_overheard_fraction": (
+                            round((direct + extra) / total, 4) if total else 0
+                        ),
+                        "median_placement_error_s": (
+                            round(statistics.median(errors), 1) if errors else None
+                        ),
+                        "max_placement_error_s": (
+                            round(max(errors), 1) if errors else None
+                        ),
+                    }
+                )
+            report["observers"] = rows
+
         if not self.opts.baseline:
             union = set()
             for server in self.servers.values():
@@ -1116,8 +1221,38 @@ class Campaign:
                 ),
                 **self.counters.as_dict(),
                 "audit_checksum_agrees_sets_differ": self.final_audit_failures,
+                **self._drift_report(),
             }
         return report
+
+    def _drift_report(self):
+        """What holding both copies buys: how far apart two accounts of the same message are.
+
+        A server that keeps its own receive time *and* every replay's claim can measure the spread
+        between them. That spread is the useful telemetry - it is the drift between archives, and a
+        claim far outside it is the signature of a peer lying about heard_ago.
+        """
+        spreads = []
+        disagreements = 0
+        for server in self.servers.values():
+            for first_heard, claims in server.provenance.values():
+                if not claims:
+                    continue
+                if first_heard is not None:
+                    spreads.append(abs(min(claims) - first_heard) / 1000.0)
+                if len(set(int(c / 1000) for c in claims)) > 1:
+                    disagreements += 1
+        return {
+            "replay_claim_spread_median_s": (
+                round(statistics.median(spreads), 1) if spreads else None
+            ),
+            "replay_claim_spread_p90_s": (
+                round(sorted(spreads)[int(0.9 * (len(spreads) - 1))], 1)
+                if spreads
+                else None
+            ),
+            "replays_with_conflicting_claims": disagreements,
+        }
 
     def _reach_ceiling(self):
         """The best any node could do: the share of the mesh within the hop limit of it.
@@ -1150,6 +1285,18 @@ def build_parser():
         "--hop-spread",
         action="store_true",
         help="per-node hop limits 3-7 by centrality, instead of one value for everyone",
+    )
+    ap.add_argument(
+        "--replay-ordering",
+        default="tip",
+        choices=("tip", "heard"),
+        help="number a replayed object at the receiving tip, or file it by its heard_ago",
+    )
+    ap.add_argument(
+        "--observers",
+        type=int,
+        default=6,
+        help="ordinary nodes instrumented to report the bystander view",
     )
     ap.add_argument(
         "--provide-transport",
