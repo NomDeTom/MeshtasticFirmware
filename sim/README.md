@@ -300,3 +300,43 @@ Both of these are in the JSON and both were ignored for three rounds:
 
 And the standing one: **`silent_losses` must be zero.** A checksum that closes over two unequal sets
 would falsify the design. Across roughly 280 runs, two bucket regimes and both protocols, it never has.
+
+---
+
+## 9. Register: what this iteration is built from
+
+Four separate bodies of work, none of them ours alone. Recorded here so credit is attributable and a
+re-sync is a diff rather than an archaeology exercise.
+
+| Layer                                                              | Drawn from                                                               | Version / commit                                   |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------ | -------------------------------------------------- |
+| Radio physics, topology, collision model                           | **Meshtasticator**, upstream `master`                                    | `17ceb82`                                          |
+| Terrain, clutter, capture-aware RF, dynamic CR/TX-power            | **Komzpa**, `codex/pr33-remaining-optimizations` (Meshtasticator PR #77) | `ec0a51e`                                          |
+| Firmware-preset sync (stacked under the above)                     | **powersjcb**, Meshtasticator PR #33                                     | in `ec0a51e`                                       |
+| MAC and routing rules, per-node NodeDB, board/role census          | this repo's 2.8 fold-in                                                  | `95c387bc6`, `95b7651b9`, `8c2b17145`, `6de4495d4` |
+| SF++ set reconciliation, the chain incumbent, sweeps and reporting | `sim/sfpp/`, written here                                                | `7dcae53d5` onward                                 |
+
+**Komzpa's stack is the reason there is a credible radio model at all.** Upstream `master` still carries
+2.1-era physics; the SRTM terrain, OSM land-cover clutter, capture-aware physics with a real collision
+model, and the dynamic coding-rate and TX-power policies are all PR #77, which itself stacks powersjcb's
+preset sync from PR #33. None of it is merged upstream, so vendoring it was a fork-and-own decision - see
+`sim/meshtasticator/UPSTREAM` for the exact merge, the one conflict resolved (`batchSim.py`, upstream #83's
+keyword-argument form kept), and the re-sync recipe. PR #78's Burning Man scenario is **not** included.
+
+`sim/sfpp/analytic/` is a fifth, independent line: a closed-form model kept deliberately separate as a
+cross-check on the event simulator rather than folded into it.
+
+### 9.1 Firmware versions the transport can imitate
+
+`--profile` selects which firmware's rules to obey. These are **rule sets, not releases**:
+
+| Profile       | Means                                                                                                                                                                                                    |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `2.8`         | this tree - next-hop routing, the late window, utilisation backoff, role-aware cancellation                                                                                                              |
+| `2.5-approx`  | a **floor, not a reconstruction**: the rules certainly newer than 2.5 are switched off and everything else stays at 2.8. The name says approx because it is absence of evidence, not evidence of absence |
+| `pre-fold-in` | the transport's own rules before the 2.8 fold-in, so a result can be attributed to the fold-in rather than to the mesh                                                                                   |
+| `legacy`      | accepted alias for `pre-fold-in`; the old name misdescribed it                                                                                                                                           |
+
+There is no 2.1 or 2.2 profile. The vendored Meshtasticator's own 2.1-era physics remains reachable in
+`sim/meshtasticator/` for comparison, but the SF++ transport does not model behaviour older than the
+`2.5-approx` floor.
