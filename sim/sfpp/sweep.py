@@ -38,8 +38,8 @@ BASE = [
     # fourteenth of the airtime, so every later block measures the design as it should be run.
     "--trigger",
     "bucket",
-    # Round two runs the numbering the firmware actually does. Round one used a shared counter that
-    # cannot exist, so nothing from it about bucket agreement carried over.
+    # The numbering the firmware actually does. A shared counter cannot exist, so no result about
+    # bucket agreement is meaningful without this.
     "--bucket-mode",
     "local",
     "--resolve",
@@ -78,7 +78,6 @@ BLOCKS = {
     ),
     "G-hops": ("hops-apart", [1, 2, 3, 4], ["--place", "hops-apart"]),
     "G-servers": ("servers", [2, 3, 5, 8], []),
-    # --- the second round, after the bucket-agreement review ---
     # There is no canonical counter, so `local` is what the firmware does and `global` is a fiction
     # kept only as an upper bound. `time` and `window` are the two candidates needing no agreement.
     "J-bucketmode": ("bucket-mode", ["global", "local", "time", "window"], []),
@@ -107,12 +106,11 @@ BLOCKS = {
         ["tip", "heard"],
         ["--provide-transport", "broadcast"],
     ),
-    # D3 needs re-testing: the synchronisation it found required the shared counter, and under local
-    # numbering each server seals its own bucket whenever its own 32nd message lands.
+    # Spreading adverts in time. Under local numbering each server seals its own bucket whenever its
+    # own 32nd message lands, so the synchronisation jitter would break is largely absent.
     "M-jitter": ("advert-jitter-s", [1, 30, 120, 600], []),
     "M-capacity": ("capacity", [4, 8, 16, 32, 50], []),
-    # Topology re-run under real numbering and per-node hop limits. Round one's placement findings
-    # were the strongest of the campaign and were measured on the shared-counter fiction.
+    # Placement under real numbering and per-node hop limits.
     "N-place": (
         "place",
         [
@@ -143,12 +141,11 @@ BLOCKS = {
     "P-preset": ("preset", ["SHORT_FAST", "LONG_FAST", "LONG_SLOW"], []),
     # Congestion scaling on against off, to size what the firmware's own throttling is worth.
     "P-congestion": ("no-congestion-scaling", [False, True], ["--nodes", "120"]),
-    # Round three. Mesh shape as its own variable - round one and two only ever ran uniform points.
-    # The headline: nothing, the incumbent chain walk, and the sketch - all at one seed, so `none`
+    # Nothing, the incumbent chain walk, and the sketch - all at one seed, so `none`
     # is a paired baseline and every other cell is a difference rather than a comparison.
     "Q-protocol": ("protocol", ["none", "chain", "sr"], []),
-    # The denominator. Every SF++ airtime share quoted so far is a share of a mesh broadcasting
-    # hourly, which is a property of the mesh and not of SF++.
+    # The denominator: an SF++ airtime share is a share of whatever the mesh broadcasts anyway, so
+    # the device interval decides it as much as the protocol does.
     "Q-interval": ("broadcast-interval-s", [900, 3600, 10800, 43200], []),
     # centrality is what operators do; random is the control that separates the hop limit's own
     # effect from the siting of the nodes that happen to have raised it.
@@ -161,9 +158,8 @@ BLOCKS = {
     # All six routers as servers, against three of them, against three nodes beside them. Same
     # mesh, same traffic; only who is holding the archive changes.
     "G-allrouters": ("servers", [3, 6], ["--place", "routers"]),
-    # What the 2.8 fold-in is worth. Every SF++ number before it was measured under `legacy`, so
-    # this is the block that says whether any of them need restating - same seed, same mesh, same
-    # traffic, only the firmware's MAC and routing rules change.
+    # What the 2.8 fold-in is worth against the pre-fold-in transport: same seed, same mesh, same
+    # traffic, only the MAC and routing rules change.
     "R-firmware": ("profile", ["legacy", "2.8"], []),
     # The release series in order, each at its final release. Steps the whole rule set at once -
     # contention window, roles, queue order, hop preservation, next-hop, store size and the
@@ -198,9 +194,8 @@ BLOCKS = {
         [10, 100, 120, 250],
         ["--favourite-routers", "--router-fraction", "0.2"],
     ),
-    # Role shares as measured against the shares the simulator assumed. The old default was 10%
-    # ROUTER and nothing else; the census is 4% ROUTER, 3% ROUTER_LATE, 16% CLIENT_BASE and 18%
-    # CLIENT_MUTE. Run with and without favourites, because that assumption decides the sign.
+    # Measured role shares - 4% ROUTER, 3% ROUTER_LATE, 16% CLIENT_BASE, 18% CLIENT_MUTE - against
+    # the 10%-ROUTER default. Run with and without favourites, which decides the sign of the effect.
     "R-roles": (
         "role-mix",
         ["legacy-default", "baymesh-2026-08"],

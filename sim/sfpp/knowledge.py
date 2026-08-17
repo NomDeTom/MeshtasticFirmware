@@ -20,26 +20,26 @@ import json
 import math
 
 # A stored route dies three ways, on three different clocks, and only the first is the 30-minute
-# TTL people quote. Naming them here because the distinction is the entire point of the instrument.
+# TTL people quote.
 ROUTE_DEATHS = (
     ("route_expired_ttl", "TTL, 30 min unconfirmed"),
     ("route_expired_failures", "3 failed directed deliveries"),
     ("routes_lost_to_eviction", "destination evicted from NodeDB"),
 )
 
-# Not a death - a refusal. An ambiguous relay byte does not delete anything; it makes this one
-# decision fall back to the safe branch, and the next decision may resolve cleanly. Counted apart
-# from the deaths because conflating the two would make a healthy dense mesh look like a broken one.
+# Not a death but a refusal: an ambiguous relay byte deletes nothing, it makes one decision fall
+# back to the safe branch, and the next may resolve cleanly. Counted apart from the deaths so a
+# healthy dense mesh does not read as a broken one.
 RESOLUTION_FAILURES = (("next_hop_ambiguous", "relay byte shared by two known nodes"),)
 
 
 def node_knowledge(mesh, index):
     """What one node holds right now, split into what is still true and what is not.
 
-    Coverage is measured against what this node can reach *now*, and counts only records for nodes
-    it can still reach. Records for anything else are counted separately as `stale_records`: after a
-    partition a node keeps everything it learned about the far side, and a denominator that ignored
-    that would report coverage above 100% - which is how the split was found to be a no-op.
+    Coverage is measured against what this node can reach now, counting only records for nodes it
+    can still reach. Anything else is counted separately as `stale_records`: after a partition a
+    node keeps what it learned about the far side, and a denominator ignoring that would report
+    coverage above 100%.
     """
     node = mesh.nodes[index]
     # Reachable over the live graph, so a partition or a downed node shrinks it as it should.

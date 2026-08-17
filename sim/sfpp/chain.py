@@ -1,10 +1,8 @@
 """Today's SF++: a broadcast chain tip, and a serialised walk backwards to catch up.
 
-This is the incumbent, and until now it was never measured. Round two concluded "keep the sketch" by
-comparing sketch-as-request against explicit enumeration - two variants of the new design - and never
-against the thing the new design exists to replace. That made the central claim untested: set
-reconciliation resolves a difference of `d` objects in one exchange where the chain needs `d` round
-trips, and nobody had put a number on what those round trips cost.
+The incumbent, and the thing set reconciliation exists to replace: a difference of `d` objects takes
+`d` round trips here against one exchange for a sketch. This module exists so that comparison has a
+measured cost on both sides.
 
 The protocol, as StoreForwardPlusPlus.cpp implements it:
 
