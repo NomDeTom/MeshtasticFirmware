@@ -120,6 +120,46 @@ ROUTE_HEALTH_MAX = 32
 # PacketHistory keeps up to three relayers per record; next-hop learning reads them.
 MAX_RELAYERS = 3
 
+# WarmNodeStore.h: the low WARM_META_BITS of `last_heard` carry role, protected category and the
+# XEdDSA-signed flag, so the timestamp left in the high bits has a 128-second resolution.
+WARM_META_BITS = 7
+WARM_TIME_QUANTUM_MS = (1 << WARM_META_BITS) * 1000.0
+
+
+def warm_quantise(last_heard_ms):
+    """Drop the bits the warm tier's metadata occupies, as warmTimeOf() does."""
+    return (last_heard_ms // WARM_TIME_QUANTUM_MS) * WARM_TIME_QUANTUM_MS
+
+
+# WARM_NODE_COUNT, which keys on memory class rather than on flash. The platform names here are
+# flash-derived, so the two do not line up exactly: STM32WL is MEM_CLASS_TINY and has no warm tier
+# at all, nRF52840 is a named case at 100, and a non-PSRAM ESP32-S3 takes the 150 of MEM_CLASS_
+# MEDIUM. The 16 MB tier is taken as the PSRAM-equipped S3 that MEM_CLASS_LARGE describes, which is
+# an assumption about the boards in that tier rather than something the flash size determines -
+# `warm_num_nodes` overrides it outright when a sweep wants to price it the other way.
+PLATFORM_WARM_STORE = {
+    "stm32wl": 0,
+    "esp32s3_4mb": 150,
+    "nrf52840": 100,
+    "esp32s3_8mb": 150,
+    "esp32s3_16mb": 2000,
+}
+
+# TRAFFIC_MANAGEMENT_CACHE_SIZE, the cold tier. A key seen on the wire is cached here and can answer
+# the inbound-decrypt path, but it is never authoritative: nothing routes, resolves or attributes
+# identity from it. Keyed on memory class in the same way the warm tier is.
+PLATFORM_COLD_CACHE = {
+    "stm32wl": 0,
+    "esp32s3_4mb": 500,
+    "nrf52840": 250,
+    "esp32s3_8mb": 500,
+    "esp32s3_16mb": 2048,
+}
+
+# mesh.proto portnums the transport itself reads. NodeInfo is the one that carries a public key, so
+# it is where a node learns whom it can encrypt to.
+NODEINFO_PORTNUM = 4
+
 # NodeDB.h LastByteResolution. Callers must treat anything but UNIQUE as untrustworthy.
 RESOLUTION_NONE = "none"
 RESOLUTION_UNIQUE = "unique"
@@ -724,9 +764,25 @@ class NodeRecord:
     cannot be resolved from a relay byte, cannot hold a next hop, and does not count as online.
     """
 
-    __slots__ = ("last_heard", "hops_away", "next_hop", "is_favourite", "is_ignored")
+    __slots__ = (
+        "last_heard",
+        "hops_away",
+        "next_hop",
+        "is_favourite",
+        "is_ignored",
+        "has_key",
+        "xeddsa_signed",
+    )
 
-    def __init__(self, last_heard, hops_away=None, is_favourite=False, is_ignored=False):
+    def __init__(
+        self,
+        last_heard,
+        hops_away=None,
+        is_favourite=False,
+        is_ignored=False,
+        has_key=False,
+        xeddsa_signed=False,
+    ):
         self.last_heard = last_heard
         # None until we have heard a packet from this node with a usable hop count - `has_hops_away`
         # in the firmware. Zero means a direct neighbour, which is what next-hop resolution wants.
@@ -737,11 +793,38 @@ class NodeRecord:
         # An ignored node is not a resolution candidate at all, so it can neither be routed through
         # nor collide with anyone else's last byte.
         self.is_ignored = is_ignored
+        # The Curve25519 public key, as a fact rather than as bytes: without it a PKI DM to this
+        # peer cannot be encrypted, and it is the one field the warm tier exists to preserve.
+        self.has_key = has_key
+        # Learned from verified traffic rather than from NodeInfo, so it survives a round trip
+        # through the warm tier instead of being relearned from zero.
+        self.xeddsa_signed = xeddsa_signed
 
     @property
     def is_protected(self):
         """Protected records outrank recency when the store has to give something up."""
         return self.is_favourite
+
+
+class WarmEntry:
+    """One 40-byte `WarmNodeEntry`: node number, last_heard, and a Curve25519 public key.
+
+    The role, a protected category and an XEdDSA-signed flag are packed into the low seven bits of
+    `last_heard`, which is why warm recency is quantised to 128 seconds. That coarseness is
+    load-bearing rather than cosmetic: the tier is LRU-ordered by this field, so two nodes heard
+    within the same 128-second window are indistinguishable to eviction.
+    """
+
+    __slots__ = ("last_heard", "has_key", "role", "xeddsa_signed", "is_protected")
+
+    def __init__(
+        self, last_heard, has_key=False, role=CLIENT, xeddsa_signed=False, is_protected=False
+    ):
+        self.last_heard = warm_quantise(last_heard)
+        self.has_key = has_key
+        self.role = role
+        self.xeddsa_signed = xeddsa_signed
+        self.is_protected = is_protected
 
 
 class RouteHealth:
@@ -796,7 +879,11 @@ class Node:
         "queue",
         "tx_token",
         "nodedb",
+        "warm",
+        "cold_keys",
         "max_num_nodes",
+        "warm_num_nodes",
+        "cold_cache_size",
         "history_max",
         "platform",
         "profile",
@@ -816,6 +903,8 @@ class Node:
         role=CLIENT,
         node_num=None,
         max_num_nodes=MAX_NUM_NODES,
+        warm_num_nodes=0,
+        cold_cache_size=0,
         platform="nrf52840",
         profile=None,
     ):
@@ -857,6 +946,14 @@ class Node:
         # and its NodeDB goes stale in everyone else's store rather than being deleted from it.
         self.online = True
         self.max_num_nodes = max_num_nodes
+        # The warm tier: node index -> WarmEntry, for peers evicted from the hot store. A node is
+        # in one or the other, never both. Zero slots means the platform has no warm tier.
+        self.warm = {}
+        self.warm_num_nodes = warm_num_nodes
+        # The cold tier: keys seen on the wire, usable on the inbound-decrypt path and never
+        # authoritative, so nothing routes or resolves from it.
+        self.cold_keys = set()
+        self.cold_cache_size = cold_cache_size
         self.history_max = packet_history_max(max_num_nodes)
         self.route_health = {}  # destination index -> RouteHealth
         self.reliable = {}  # packet id -> pending retransmission record
@@ -891,10 +988,21 @@ class Node:
         `hops_away` stays None until a packet arrives with a usable hop count, matching
         `has_hops_away`: "we have never established this" is a different answer from "zero hops",
         and next-hop resolution turns on the difference.
+
+        Admitting a node the warm tier holds empties that slot and restores what it kept - the key
+        and the XEdDSA-signed bit. `next_hop` and `hops_away` were never in the warm record, so a
+        re-admitted node is routed to by flooding until its route is learned again.
         """
         record = self.nodedb.get(peer)
         if record is None:
-            record = NodeRecord(now, hops_away, is_favourite=peer in self.favourites)
+            warm = self.warm_take(peer)
+            record = NodeRecord(
+                now,
+                hops_away,
+                is_favourite=peer in self.favourites,
+                has_key=warm.has_key if warm else False,
+                xeddsa_signed=warm.xeddsa_signed if warm else False,
+            )
             self.nodedb[peer] = record
         else:
             record.last_heard = now
@@ -906,10 +1014,11 @@ class Node:
         """Demote the stalest unprotected record when the store overflows.
 
         `demoteOldestHotNodesToWarm`: protection outranks recency, and within a class the
-        most-recently-heard survives. There is no warm tier here - a demoted node is forgotten.
+        most-recently-heard survives. The evicted record is offered to the warm tier, which keeps
+        the identity and the key but not the routing - so this is still how a learned route dies
+        without any expiry being involved. See the four lifetimes in Mesh.get_next_hop.
 
-        Returns the records dropped: losing one is how a learned route dies without any expiry being
-        involved. See the four separate lifetimes in Mesh.get_next_hop.
+        Returns (record, warm outcome) for each record dropped from the hot store.
         """
         dropped = []
         while len(self.nodedb) > self.max_num_nodes:
@@ -920,8 +1029,75 @@ class Node:
                     self.nodedb[peer].last_heard,
                 ),
             )
-            dropped.append(self.nodedb.pop(victim))
+            record = self.nodedb.pop(victim)
+            dropped.append((record, self.warm_absorb(victim, record)))
         return dropped
+
+    # ---- warm tier (WarmNodeStore) ----------------------------------------------------
+
+    def warm_absorb(self, peer, record):
+        """WarmNodeStore::absorb - keep an evicted node's identity, key and role.
+
+        40 bytes: node number, last_heard, and a Curve25519 public key. The key is what the tier
+        exists for - expensive to re-learn, where the rest rebuilds from traffic in seconds - so a
+        keyless candidate never displaces a keyed entry, and eviction takes the oldest keyless
+        entry before it takes any keyed one.
+
+        What is not carried over is the routing: `next_hop` and `hops_away` are hot-store fields
+        and do not survive demotion.
+        """
+        if not self.warm_num_nodes:
+            return "no_tier"
+        entry = WarmEntry(
+            last_heard=record.last_heard,
+            has_key=record.has_key,
+            role=self.role,
+            xeddsa_signed=record.xeddsa_signed,
+            is_protected=record.is_protected,
+        )
+        if peer in self.warm:
+            self.warm[peer] = entry
+            return "stored"
+        outcome = "stored"
+        if len(self.warm) >= self.warm_num_nodes:
+            keyless = [p for p, e in self.warm.items() if not e.has_key]
+            if not keyless and not entry.has_key:
+                # A keyless candidate cannot displace a keyed entry, so it is simply not kept.
+                return "refused"
+            victim = min(
+                keyless or list(self.warm), key=lambda p: self.warm[p].last_heard
+            )
+            del self.warm[victim]
+            outcome = "replaced"
+        self.warm[peer] = entry
+        return outcome
+
+    def warm_take(self, peer):
+        """WarmNodeStore::take - re-admission to the hot store empties the warm slot.
+
+        A node lives in hot or warm, never both. What comes back is last_heard, the key, the role
+        and the XEdDSA-signed bit; `next_hop` and `hops_away` were never stored and start again at
+        nothing, so a re-admitted node is routed to by flooding until it is relearned.
+        """
+        return self.warm.pop(peer, None)
+
+    def warm_key(self, peer):
+        """`copyPublicKey`: hot first, then warm. Both are authoritative."""
+        record = self.nodedb.get(peer)
+        if record is not None and record.has_key:
+            return True
+        entry = self.warm.get(peer)
+        if entry is not None and entry.has_key:
+            return True
+        return False
+
+    def knows_key(self, peer):
+        """`copyPublicKeyForDecrypt`: the authoritative tiers, or a key-proven cold-cache entry.
+
+        The cold tier is a cache for the inbound-decrypt path and is never authoritative, so it can
+        answer this question and cannot be used to claim a node's identity.
+        """
+        return self.warm_key(peer) or peer in self.cold_keys
 
     def knows(self, peer):
         """Is this peer in the hot store at all? KNOWN_ONLY and LOCAL_ONLY ask exactly this."""
@@ -1189,6 +1365,12 @@ class Mesh:
             "route_expired_failures": 0,
             "routes_lost_to_eviction": 0,
             "nodedb_evictions": 0,
+            # Demoted to the warm tier rather than forgotten, and re-admitted from it.
+            "warm_demotions": 0,
+            "warm_promotions": 0,
+            "warm_evictions": 0,
+            # A PKI DM that could not be encrypted because no tier held the peer's key.
+            "dm_blocked_no_key": 0,
             "reliable_retx": 0,
             "reliable_failures": 0,
             "opaque_relays": 0,
@@ -1959,12 +2141,33 @@ class Mesh:
         never expires, never fails and never shows up as a fallback - it stops existing.
         """
         node = self.nodes[rx]
+        was_warm = peer in node.warm
         record = node.update_from(peer, self.now, hops_away=hops_away)
-        for dropped in node.trim_nodedb():
+        if was_warm:
+            self.stats["warm_promotions"] += 1
+        for dropped, warm_outcome in node.trim_nodedb():
             self.stats["nodedb_evictions"] += 1
             if dropped.next_hop != NO_NEXT_HOP_PREFERENCE:
                 self.stats["routes_lost_to_eviction"] += 1
+            if warm_outcome in ("stored", "replaced"):
+                self.stats["warm_demotions"] += 1
+            if warm_outcome == "replaced":
+                # The tier was full, so keeping this identity cost another one.
+                self.stats["warm_evictions"] += 1
         return record
+
+    def _cache_cold_key(self, rx, peer):
+        """The cold tier: a key seen on the wire, kept for the decrypt path only.
+
+        Bounded like the cache it stands for, and evicted at random rather than by recency, since
+        nothing here tracks the per-entry timestamps that would make an LRU meaningful.
+        """
+        node = self.nodes[rx]
+        if not node.cold_cache_size or peer == rx:
+            return
+        node.cold_keys.add(peer)
+        while len(node.cold_keys) > node.cold_cache_size:
+            node.cold_keys.pop()
 
     # ---- last-byte resolution (NodeDB::resolveLastByte) --------------------------------
 
@@ -2215,7 +2418,13 @@ class Mesh:
 
         # NodeDB::updateFrom. getHopsAway is hop_start - hop_limit, so a packet that has not been
         # relayed yet is what tells us a peer is a direct neighbour.
-        self.note_heard(rx, packet.origin, hops_away=packet.hops_taken())
+        record = self.note_heard(rx, packet.origin, hops_away=packet.hops_taken())
+        if packet.portnum == NODEINFO_PORTNUM:
+            # NodeInfo is what carries a peer's public key, so it is the only thing that makes a PKI
+            # DM to that peer possible. The cold cache keeps a copy for the decrypt path, bounded
+            # and non-authoritative, so a peer evicted from both other tiers can still be read.
+            record.has_key = True
+            self._cache_cold_key(rx, packet.origin)
         fresh = SeenRecord(packet.origin, packet.hop_limit, packet.next_hop, self.now)
         fresh.note_relayer(packet.relay_node)
         node.remember(packet.id, fresh)
@@ -2464,17 +2673,25 @@ class Mesh:
         request_id=0,
         reply_id=0,
         opaque=False,
+        pki=False,
     ):
         """Inject a packet from a node's application layer, as if it had composed it.
 
         Mirrors Router::send: we add our own packet to the history first, so the copies we hear
         coming back are recognised as our own, and set the next hop before it goes out.
+
+        `pki` marks a DM that has to be encrypted to the destination's public key. Without a key in
+        any tier the packet is never composed, which is what evicting a peer actually costs: not a
+        worse route to it, but no conversation with it until its NodeInfo is heard again.
         """
         radio = self.nodes[node]
         if not radio.online:
             # The radio is off, so nothing is composed. Returning a packet anyway would let the
             # caller register a message that never existed.
             self.stats["sends_while_offline"] += 1
+            return None
+        if pki and destination != BROADCAST and not radio.knows_key(destination):
+            self.stats["dm_blocked_no_key"] += 1
             return None
         packet = Packet(
             self.new_packet_id(),
@@ -2553,6 +2770,7 @@ def build(
     favourite_routers=False,
     rebroadcast_mode=REBROADCAST_ALL,
     max_num_nodes=None,
+    warm_num_nodes=None,
     platform_mix="uniform",
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
@@ -2596,6 +2814,20 @@ def build(
                     else PLATFORM_HOT_STORE_BY_VERSION[node_profile.hot_store_model][
                         platforms[i]
                     ]
+                ),
+                # No release before this tree has a warm tier at all, so an older node forgets an
+                # evicted peer outright where a 2.8 one keeps its key.
+                warm_num_nodes=(
+                    0
+                    if not node_profile.warm_store
+                    else (
+                        warm_num_nodes
+                        if warm_num_nodes is not None
+                        else PLATFORM_WARM_STORE[platforms[i]]
+                    )
+                ),
+                cold_cache_size=(
+                    PLATFORM_COLD_CACHE[platforms[i]] if node_profile.warm_store else 0
                 ),
             )
         )

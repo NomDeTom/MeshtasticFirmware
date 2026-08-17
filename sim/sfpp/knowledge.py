@@ -69,6 +69,19 @@ def node_knowledge(mesh, index):
         "neighbours_known": sum(1 for r in node.nodedb.values() if r.hops_away == 0),
         "routes_held": sum(1 for r in node.nodedb.values() if r.next_hop),
         "store_full": known >= node.max_num_nodes,
+        # The warm tier: identities demoted rather than forgotten, and how many of them still carry
+        # the key that is the reason the tier exists.
+        "warm_capacity": node.warm_num_nodes,
+        "warm_held": len(node.warm),
+        "warm_keyed": sum(1 for e in node.warm.values() if e.has_key),
+        "warm_full": bool(node.warm_num_nodes)
+        and len(node.warm) >= node.warm_num_nodes,
+        # Peers this node can encrypt a DM to, from any tier: hot, warm, or the cold key cache.
+        "keys_held": sum(
+            1
+            for peer in range(len(mesh.nodes))
+            if peer != index and node.knows_key(peer)
+        ),
         # Of everything this node could learn about right now, how much does it hold?
         "coverage": (known_reachable / len(reachable)) if reachable else 1.0,
         "history_used": len(node.history),
