@@ -38,6 +38,13 @@ SR_ENVELOPE = 18
 SR_CHECKSUM = 9
 SR_SIGNATURE = 66
 OBJECT_OVERHEAD = 14
+# Two fields on the outside of a replayed object, clear of the original encryption wrapper, so a node
+# that merely overhears the replay can file it in the right place in its own history rather than
+# showing it as having arrived now. `heard_ago` is seconds since the archive received it; `replayed`
+# marks it as a replay so a client can present it as such instead of as fresh traffic.
+REPLAY_HEARD_AGO = 4
+REPLAY_FLAG = 1
+REPLAY_HEADER = REPLAY_HEARD_AGO + REPLAY_FLAG
 MAX_PAYLOAD = 233
 STORE_FORWARD_PLUSPLUS_APP = 35
 
@@ -188,6 +195,8 @@ class Counters:
         "silent_losses",
         "adverts_heard",
         "adverts_lost",
+        "window_checksum_closed",
+        "bystander_pickups",
     )
 
     def __init__(self):
@@ -235,6 +244,36 @@ class Server:
 
     def members(self, bucket):
         return {h for h, b in self.bucket.items() if b == bucket}
+
+    def window(self, size):
+        """The N objects this server ingested most recently, by its own numbering.
+
+        A sliding window needs no agreement with anyone. Two servers' windows overlap because they
+        heard mostly the same recent traffic, not because they negotiated a boundary, which is the
+        whole point: the XOR of two sketches is the symmetric difference of whatever two sets they
+        were built over, agreed or not.
+        """
+        recent = sorted(self.held.items(), key=lambda kv: -kv[1])[:size]
+        return {h for h, _ in recent}
+
+    def window_summary(self, size, capacity, width):
+        from .sketchindex import BucketSummary
+
+        s = BucketSummary(capacity)
+        for message_hash in self.window(size):
+            s.add(
+                truncated_short_id(message_hash, width),
+                checksum_contribution(message_hash),
+            )
+        return s if s.count > 0 else None
+
+    def holds(self, message_hash):
+        """Membership in the whole store, not just the window.
+
+        Load-bearing for window mode: a short ID in the decoded difference may be something the peer
+        holds and has simply aged out of its window. Checking the window would request it back.
+        """
+        return message_hash in self.held
 
     def buckets(self):
         return set(self.bucket.values())
@@ -314,6 +353,8 @@ class Campaign:
     def _on_receive(self, node, packet, rssi, snr):
         if packet.kind == "text":
             self._on_text(node, packet)
+        elif packet.kind == "sr:item_provide" and packet.payload is not None:
+            self._on_overheard_replay(node, packet)
         elif packet.kind and packet.kind.startswith("sr:"):
             self._on_sr(node, packet)
 
@@ -360,6 +401,13 @@ class Campaign:
             sealed = bucket - 1 if bucket > 0 else None
             return counter, bucket, sealed
 
+        if mode == "window":
+            # No boundaries at all. The counter still numbers arrival order so the window knows what
+            # "most recent" means, and an advert is due every time the window has fully turned over.
+            server.next_counter += 1
+            due = server.next_counter % max(1, self.opts.window_size) == 0
+            return server.next_counter, 0, 0 if due else None
+
         # Time buckets: quantise the receive clock. Both servers heard the packet within a second or
         # two, so any window wider than that agrees except for objects near a boundary - which is a
         # bounded disagreement rather than a total one.
@@ -385,7 +433,30 @@ class Campaign:
                 "bucket",
                 "bucket+interval",
             ):
-                self._maybe_advertise_on_close(server, sealed)
+                if self.opts.bucket_mode == "window":
+                    # A window has no boundary to seal once; it turns over repeatedly, so this
+                    # schedules a fresh advert each time rather than deduplicating on bucket index.
+                    jitter = self.rng.uniform(0, self.opts.advert_jitter_s * 1000.0)
+                    self.mesh.at(
+                        self.mesh.now + jitter,
+                        lambda s=server: self._advertise_window(s),
+                    )
+                else:
+                    self._maybe_advertise_on_close(server, sealed)
+
+    def _on_overheard_replay(self, node, packet):
+        """A non-server node overhearing a replayed object gets to keep it.
+
+        This only works because the replay header sits outside the encryption wrapper: without
+        `heard_ago` the node could store the message but not place it, and without `replayed` it would
+        present an hour-old message as having just arrived.
+        """
+        message_hash = packet.payload.get("hash")
+        if message_hash is None:
+            return
+        if message_hash not in self.heard_text[node.index]:
+            self.heard_text[node.index].add(message_hash)
+            self.counters.bystander_pickups += 1
 
     def _maybe_advertise_on_close(self, server, bucket):
         """A bucket this server considers sealed is worth stating once."""
@@ -501,6 +572,96 @@ class Campaign:
         }[kind]
         handler(server, payload)
 
+    def _advertise_window(self, server):
+        """One sketch over this server's most recent N objects, addressed to nobody in particular."""
+        size = self.opts.window_size
+        summary = server.window_summary(size, self.opts.capacity, self.width)
+        if summary is None:
+            return
+        length = (
+            SR_ENVELOPE + SR_CHECKSUM + sketch_bytes(self.opts.capacity, self.width)
+        )
+        if self.opts.signed:
+            length += SR_SIGNATURE
+        payload = {
+            "src": server.index,
+            "dst": None,
+            "bucket": 0,
+            "window": True,
+            "sketch": summary,
+            "checksum": summary.checksum,
+            "count": summary.count,
+            "members": server.window(size),
+        }
+        if self.opts.advert_transport == "dm":
+            for peer in [i for i in self.servers if i != server.index]:
+                self.counters.adverts += 1
+                self.counters.advert_bytes += length
+                self._sr_send(
+                    server.index, "sr:advert", dict(payload, dst=peer), length, dst=peer
+                )
+            return
+        self.counters.adverts += 1
+        self.counters.advert_bytes += length
+        self._sr_send(server.index, "sr:advert", payload, length)
+
+    def _recv_advert_window(self, server, payload):
+        """XOR two windows that were never agreed, then split the difference by whole-store holdings."""
+        size = self.opts.window_size
+        local = server.window_summary(size, self.opts.capacity, self.width)
+        self.counters.exchanges += 1
+        self.counters.adverts_heard += 1
+        if local is None:
+            return
+
+        if local.checksum == payload["checksum"]:
+            # Both windows are byte-identical. This is the only case the bucket design's safety
+            # mechanism can still fire on, and counting how often it happens is the point.
+            self.counters.window_checksum_closed += 1
+            if server.window(size) != payload["members"]:
+                self.counters.silent_losses += 1
+            return
+
+        difference = local.difference(payload["sketch"].sketch())
+        if difference is None:
+            self.counters.decode_failures += 1
+            self.counters.escalations += 1
+            return
+
+        peer = self.servers[payload["src"]]
+        moved = 0
+        wanted = []
+        for sid in difference:
+            mine = [h for h in server.held if truncated_short_id(h, self.width) == sid]
+            if mine:
+                for message_hash in mine:
+                    # Only send what the peer genuinely lacks. Without the whole-store check this
+                    # would ship back everything that had merely aged out of the peer's window.
+                    if not peer.holds(message_hash):
+                        self._send_object(server, payload["src"], message_hash)
+                        moved += 1
+            else:
+                wanted.append(sid)
+        if wanted:
+            length = SR_ENVELOPE + 4 * len(wanted)
+            self.counters.item_requests += 1
+            self.counters.item_request_bytes += length
+            self._sr_send(
+                server.index,
+                "sr:item_request",
+                {
+                    "src": server.index,
+                    "dst": payload["src"],
+                    "bucket": 0,
+                    "window": True,
+                    "ids": wanted,
+                },
+                length,
+                dst=payload["src"],
+            )
+        if difference and moved == 0 and not wanted:
+            self.counters.misdecodes += 1
+
     def _advertise(self, server, bucket):
         """Broadcast one bucket's summary. This is the only unsolicited message in the protocol."""
         capacity = self.opts.capacity
@@ -564,6 +725,9 @@ class Campaign:
         )
 
     def _recv_advert(self, server, payload):
+        if payload.get("window"):
+            self._recv_advert_window(server, payload)
+            return
         self.counters.adverts_heard += 1
         bucket = payload["bucket"]
         local = server.summary(self.root_hash, bucket, self.opts.capacity, self.width)
@@ -636,23 +800,41 @@ class Campaign:
         ]
 
     def _send_object(self, server, peer_index, message_hash):
+        """Replay one object to a peer, carrying the outside-the-wrapper replay header.
+
+        The header is what makes a broadcast replay useful to anyone other than the addressee: a node
+        overhearing it learns when the archive first heard the message and that this is a replay, so
+        it can file it in its own history in the right place instead of at the current time.
+        """
         obj = self.generator.objects[message_hash]
-        length = min(MAX_PAYLOAD, obj.wire_size + OBJECT_OVERHEAD)
+        length = min(MAX_PAYLOAD, obj.wire_size + OBJECT_OVERHEAD + REPLAY_HEADER)
         self.counters.provides += 1
         self.counters.provide_bytes += length
-        self._sr_send(
-            server.index,
-            "sr:item_provide",
-            {
-                "src": server.index,
-                "dst": peer_index,
-                "hash": message_hash,
-            },
-            length,
-            dst=peer_index,
-        )
+        payload = {
+            "src": server.index,
+            "dst": peer_index,
+            "hash": message_hash,
+            "heard_ago_s": int((self.mesh.now - obj.rx_time) / 1000.0),
+            "replayed": True,
+        }
+        if self.opts.provide_transport == "broadcast":
+            # Broadcast costs the neighbourhood a relay, and pays it back: every node in earshot that
+            # lacks the message can file it correctly off the replay header. Whether that trade is
+            # worth it is what the bystander counters measure.
+            self._sr_send(server.index, "sr:item_provide", payload, length)
+            return
+        self._sr_send(server.index, "sr:item_provide", payload, length, dst=peer_index)
 
     def _recv_item_request(self, server, payload):
+        if payload.get("window"):
+            peer = self.servers[payload["src"]]
+            for sid in payload["ids"]:
+                for message_hash in [
+                    h for h in server.held if truncated_short_id(h, self.width) == sid
+                ]:
+                    if not peer.holds(message_hash):
+                        self._send_object(server, payload["src"], message_hash)
+            return
         for sid in payload["ids"]:
             for message_hash in self._hashes_for(server, sid, payload["bucket"]):
                 peer = self.servers[payload["src"]]
@@ -748,6 +930,10 @@ class Campaign:
         state, where nothing is in flight and no snapshot is stale, so a disagreement here is
         unambiguous. It is the same claim the three-store simulator made, restated over a mesh.
         """
+        if self.opts.bucket_mode == "window":
+            # There is no shared bucket to audit: the windows were never agreed. The in-flight gate
+            # on identical windows is the only checksum test window mode admits, and it is counted.
+            return 0
         keys = sorted(self.servers)
         buckets = set()
         for server in self.servers.values():
@@ -776,6 +962,21 @@ class Campaign:
         """Fixed-interval or AIMD advertising: pick a bucket and state it."""
         if self.mesh.now > self.duration_ms:
             return
+        if self.opts.bucket_mode == "window":
+            before = self.counters.objects_moved
+            self._advertise_window(server)
+            if self.opts.trigger == "aimd":
+                if self.counters.objects_moved > before:
+                    server.interval_ms = self.opts.advert_interval_s * 1000.0
+                else:
+                    server.interval_ms = min(
+                        server.interval_ms * 1.5,
+                        self.opts.advert_max_interval_s * 1000.0,
+                    )
+            delay = server.interval_ms * self.rng.uniform(0.8, 1.2)
+            self.mesh.at(self.mesh.now + delay, lambda: self._tick(server))
+            return
+
         # Round-robin over the buckets this server actually has, whatever numbering produced them.
         own = sorted(server.buckets())
         if own:
@@ -951,6 +1152,12 @@ def build_parser():
         help="per-node hop limits 3-7 by centrality, instead of one value for everyone",
     )
     ap.add_argument(
+        "--provide-transport",
+        default="dm",
+        choices=("dm", "broadcast"),
+        help="replay objects to the requester only, or broadcast so bystanders can file them too",
+    )
+    ap.add_argument(
         "--advert-transport",
         default="broadcast",
         choices=("broadcast", "dm"),
@@ -985,8 +1192,14 @@ def build_parser():
     ap.add_argument(
         "--bucket-mode",
         default="local",
-        choices=("global", "local", "time"),
+        choices=("global", "local", "time", "window"),
         help="how a server numbers objects into buckets; `local` is the only real one",
+    )
+    ap.add_argument(
+        "--window-size",
+        type=int,
+        default=32,
+        help="objects in the sliding window for --bucket-mode window",
     )
     ap.add_argument(
         "--time-bucket-s",

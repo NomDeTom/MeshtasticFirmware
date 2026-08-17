@@ -74,6 +74,19 @@ BLOCKS = {
     ),
     "G-hops": ("hops-apart", [1, 2, 3, 4], ["--place", "hops-apart"]),
     "G-servers": ("servers", [2, 3, 5, 8], []),
+    # --- the second round, after the bucket-agreement review ---
+    # There is no canonical counter, so `local` is what the firmware does and `global` is a fiction
+    # kept only as an upper bound. `time` and `window` are the two candidates needing no agreement.
+    "J-bucketmode": ("bucket-mode", ["global", "local", "time", "window"], []),
+    "J-window": ("window-size", [8, 16, 32], ["--bucket-mode", "window"]),
+    "J-wincap": ("capacity", [8, 16, 32], ["--bucket-mode", "window"]),
+    "J-timewin": ("time-bucket-s", [600, 1800, 3600], ["--bucket-mode", "time"]),
+    # Mesh size, with per-node hop limits 3-7 by centrality rather than one value for everyone.
+    "K-size": ("nodes", [40, 60, 90, 120, 150], ["--hop-spread"]),
+    "K-hopspread": ("hop-limit", [3, 5, 7], []),
+    # Adverts only other archives can act on; replays every node in earshot can use.
+    "L-advert": ("advert-transport", ["broadcast", "dm"], []),
+    "L-provide": ("provide-transport", ["dm", "broadcast"], []),
     # All six routers as servers, against three of them, against three nodes beside them. Same
     # mesh, same traffic; only who is holding the archive changes.
     "G-allrouters": ("servers", [3, 6], ["--place", "routers"]),
