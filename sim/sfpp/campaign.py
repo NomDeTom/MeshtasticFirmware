@@ -355,7 +355,11 @@ class Campaign:
             hop_spread=opts.hop_spread,
             hop_assign=opts.hop_assign,
             topology=opts.topology,
-            profile=getattr(opts, "profile", "2.8"),
+            profile=(
+                M.Profile(getattr(opts, "profile", "2.8"), extra_repeats=True)
+                if getattr(opts, "extra_repeats", False)
+                else getattr(opts, "profile", "2.8")
+            ),
             old_profile=getattr(opts, "old_profile", "legacy"),
             legacy_fraction=getattr(opts, "legacy_fraction", 0.0),
             role_mix=getattr(opts, "role_mix", None) or None,
@@ -1542,6 +1546,12 @@ def build_parser():
         default="legacy",
         choices=M.VERSIONS + ("legacy",),
         help="the rules the --legacy-fraction share of nodes runs instead of --profile",
+    )
+    ap.add_argument(
+        "--extra-repeats",
+        action="store_true",
+        help="RepeatScalingModule: tolerate a second heard copy of a text before cancelling our "
+        "own queued rebroadcast, unless the mesh is busy (branch extra-repeats, no release has it)",
     )
     ap.add_argument(
         "--congestion-mode",

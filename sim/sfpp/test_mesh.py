@@ -1108,6 +1108,91 @@ class WarmTier(unittest.TestCase):
         self.assertFalse(M.Profile("2.7").warm_store)
 
 
+class ExtraRepeats(unittest.TestCase):
+    """RepeatScalingModule - tolerate a heard copy of a text before cancelling our own relay."""
+
+    def mesh(self, extra=True, nodes=6):
+        mesh = small_mesh(nodes=nodes, profile=M.Profile("2.8", extra_repeats=extra))
+        for node in mesh.nodes:
+            node.util_ring = [0.0] * len(node.util_ring)
+            node.tx_ring = [0.0] * len(node.tx_ring)
+        return mesh
+
+    def text(self, packet_id=5, portnum=1):
+        packet = M.Packet(packet_id, 3, portnum, 40, hop_limit=3)
+        packet.hop_start = 4
+        return packet
+
+    def test_text_tolerates_one_duplicate_and_cancels_on_the_second(self):
+        mesh = self.mesh()
+        packet = self.text()
+        self.assertFalse(mesh._should_cancel_dupe(0, packet))
+        self.assertEqual(mesh.stats["extra_repeats_tolerated"], 1)
+        self.assertTrue(mesh._should_cancel_dupe(0, packet))
+
+    def test_everything_else_cancels_on_the_first(self):
+        mesh = self.mesh()
+        for portnum in (3, 4, 67, 70):
+            self.assertTrue(mesh._should_cancel_dupe(0, self.text(portnum=portnum)))
+        self.assertEqual(mesh.stats["extra_repeats_tolerated"], 0)
+
+    def test_an_undecodable_packet_is_classified_by_its_header(self):
+        """Flooded traffic is treated as text-like; directed traffic is not."""
+        mesh = self.mesh()
+        flooded = self.text(portnum=99)
+        flooded.opaque = True
+        self.assertFalse(mesh._should_cancel_dupe(0, flooded))
+        directed = self.text(packet_id=6, portnum=99)
+        directed.opaque = True
+        directed.next_hop = 0x40
+        self.assertTrue(mesh._should_cancel_dupe(0, directed))
+
+    def test_without_the_module_the_first_duplicate_always_cancels(self):
+        mesh = self.mesh(extra=False)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
+        self.assertEqual(mesh.stats["extra_repeats_tolerated"], 0)
+
+    def test_the_ring_holds_only_eight_conversations(self):
+        """Eight entries, replaced round-robin, so a busy mesh forgets what it was tolerating."""
+        mesh = self.mesh()
+        self.assertEqual(M.REPEAT_TRACKER_SIZE, 8)
+        first = self.text(packet_id=100)
+        self.assertFalse(mesh._should_cancel_dupe(0, first))
+        for packet_id in range(200, 208):
+            mesh._should_cancel_dupe(0, self.text(packet_id=packet_id))
+        # The first packet's count has been evicted, so its next duplicate starts again at one.
+        self.assertFalse(mesh._should_cancel_dupe(0, first))
+
+    def test_a_busy_channel_forces_the_threshold_back_to_one(self):
+        mesh = self.mesh()
+        mesh.nodes[0].log_airtime(0.0, 0.11 * 60000.0)  # 11% of the 60 s window
+        self.assertGreater(mesh.nodes[0].channel_utilization_percent(0.0), 10.0)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
+        self.assertEqual(mesh.stats["extra_repeats_suppressed"], 1)
+
+    def test_our_own_transmit_share_forces_it_too(self):
+        """utilizationTXPercent is measured over an hour, not over the 60 s channel window."""
+        mesh = self.mesh()
+        mesh.nodes[0].log_tx_airtime(0.0, 0.05 * 3600_000.0)  # 5% of the hour
+        self.assertGreater(mesh.nodes[0].utilization_tx_percent(0.0), 4.0)
+        self.assertLess(mesh.nodes[0].channel_utilization_percent(0.0), 10.0)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
+
+    def test_a_dense_neighbourhood_forces_it_too(self):
+        mesh = self.mesh(nodes=20)
+        for peer in range(1, 12):
+            heard(mesh, 0, peer, hops_away=0)
+        self.assertGreater(mesh.nodes[0].direct_neighbours, 10)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
+        self.assertEqual(mesh.stats["extra_repeats_suppressed"], 1)
+
+    def test_a_router_still_never_cancels(self):
+        """The role gate runs first, so tolerating copies cannot make a router cancel one."""
+        mesh = self.mesh()
+        mesh.nodes[0].role = M.ROUTER
+        self.assertFalse(mesh.role_allows_canceling_dupe(0, self.text()))
+
+
 class PacketSigning(unittest.TestCase):
     """Router.cpp: a 64-byte XEdDSA signature, the size gate, and the three receive policies."""
 
