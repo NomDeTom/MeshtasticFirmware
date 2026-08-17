@@ -332,9 +332,16 @@ class Campaign:
                 self._maybe_advertise_on_close(server, counter)
 
     def _maybe_advertise_on_close(self, server, counter):
-        """A bucket that has just sealed is a permanent fact, and worth stating once."""
-        bucket = bucket_of(counter)
-        if len(server.members(bucket)) < BUCKET_OBJECTS:
+        """A bucket that has just sealed is a permanent fact, and worth stating once.
+
+        Sealing is a property of the chain counter, not of what this node happens to hold. A server
+        that heard half a bucket still knows the bucket is closed the moment it sees an object
+        numbered past the boundary - and that is exactly the server with something to gain from
+        saying so. Waiting until the local store holds all 32 would mean never advertising at all,
+        because a server that already held the whole bucket would have nothing to reconcile.
+        """
+        bucket = bucket_of(counter) - 1
+        if bucket < 0:
             return
         key = (server.index, bucket)
         if key in self.bucket_closed_at:
