@@ -183,12 +183,16 @@ class Mesh:
     on insertion order rather than on dict iteration.
     """
 
-    def __init__(self, conf, nodes, rng, hop_limit=3, area=8000.0):
+    def __init__(self, conf, nodes, rng, hop_limit=3, area=8000.0, extra_loss=0.0):
         self.conf = conf
         self.nodes = nodes
         self.rng = rng
         self.hop_limit = hop_limit
         self.area = area
+        # A flat loss floor on every reception, on top of the physics. It stands in for the things
+        # the model does not carry - interference from outside the mesh, fading, a receiver busy
+        # elsewhere - and is the knob the capacity-against-loss sweep turns.
+        self.extra_loss = extra_loss
         self.now = 0.0
         self._queue = []
         self._seq = 0
@@ -406,7 +410,9 @@ class Mesh:
             if not self._survives_capture(tx, rx, rssi, interferers, sensitivity):
                 self.stats["lost_to_collision"] += 1
                 continue
-            if self._lost_to_phy(rssi, packet.length):
+            if self._lost_to_phy(rssi, packet.length) or (
+                self.extra_loss and self.rng.random() < self.extra_loss
+            ):
                 self.stats["lost_to_phy"] += 1
                 continue
             self.stats["receptions"] += 1
@@ -511,7 +517,7 @@ def build(
     """
     points = place_nodes(node_count, area, rng, min_dist)
     nodes = [Node(i, x, y) for i, (x, y) in enumerate(points)]
-    mesh = Mesh(conf, nodes, rng, hop_limit=hop_limit, area=area)
+    mesh = Mesh(conf, nodes, rng, hop_limit=hop_limit, area=area, extra_loss=extra_loss)
 
     if router_fraction > 0:
         want = max(1, int(round(node_count * router_fraction)))

@@ -251,6 +251,7 @@ class Campaign:
             self.rng,
             hop_limit=opts.hop_limit,
             router_fraction=opts.router_fraction,
+            extra_loss=opts.extra_loss,
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(self.mesh, self.rng, self.root_hash, mix=MIX)
@@ -393,9 +394,8 @@ class Campaign:
         # Reception on this hop is the transport's own draw, applied here because an addressed
         # packet has one intended receiver rather than everyone in earshot.
         rssi = self.mesh.rssi[a][b]
-        lost = (
-            self.mesh._lost_to_phy(rssi, length)
-            or self.rng.random() < self.opts.extra_loss
+        lost = self.mesh._lost_to_phy(rssi, length) or (
+            self.mesh.extra_loss and self.rng.random() < self.mesh.extra_loss
         )
         delay = self.mesh.airtime_ms(length) + self.mesh.slot_time_ms() * 2
 
