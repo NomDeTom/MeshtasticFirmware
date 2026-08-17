@@ -42,9 +42,18 @@ OBJECT_OVERHEAD = 14
 # that merely overhears the replay can file it in the right place in its own history rather than
 # showing it as having arrived now. `heard_ago` is seconds since the archive received it; `replayed`
 # marks it as a replay so a client can present it as such instead of as fresh traffic.
-REPLAY_HEARD_AGO = 4
-REPLAY_FLAG = 1
-REPLAY_HEADER = REPLAY_HEARD_AGO + REPLAY_FLAG
+# One field, outside the encryption wrapper: heard_ago, in 64-second ticks, 2 bytes.
+#
+# No separate "replayed" flag is needed, because the field's *presence* is the flag. Fresh traffic
+# carries no heard_ago; a replay does. In protobuf terms that is an optional field, so absence costs
+# nothing and cannot be confused with a value of zero-seconds-ago.
+#
+# 64-second ticks because fine resolution is worthless here - the measured spread between two
+# archives' accounts of the same message is single-digit seconds - and a full 16 bits of ticks buys
+# 48 days of range, comfortably past any archive retention window.
+REPLAY_TICK_S = 64
+REPLAY_HEADER = 2
+REPLAY_MAX_TICKS = (1 << 16) - 1
 MAX_PAYLOAD = 233
 STORE_FORWARD_PLUSPLUS_APP = 35
 
@@ -326,10 +335,16 @@ class Campaign:
         self.seed = seed
         self.rng = random.Random(seed)
         self.conf = M.make_config(preset=opts.preset, phy_loss=not opts.no_phy_loss)
+        # 150 nodes in the same 8 x 8 km as 60 is two and a half times the density, so a size sweep
+        # that holds area fixed measures density and calls it size. Scaling the side by sqrt(n/60)
+        # keeps nodes per square kilometre constant and lets the two be separated.
+        self.area = (
+            opts.area * math.sqrt(opts.nodes / 60.0) if opts.scale_area else opts.area
+        )
         self.mesh = M.build(
             self.conf,
             opts.nodes,
-            opts.area,
+            self.area,
             self.rng,
             hop_limit=opts.hop_limit,
             router_fraction=opts.router_fraction,
@@ -897,7 +912,13 @@ class Campaign:
             "src": server.index,
             "dst": peer_index,
             "hash": message_hash,
-            "heard_ago_s": int((self.mesh.now - obj.rx_time) / 1000.0),
+            # Quantised on the way out, the way the wire field would be, so the simulator carries
+            # the coarseness rather than assuming it away.
+            "heard_ago_s": min(
+                REPLAY_MAX_TICKS,
+                int((self.mesh.now - obj.rx_time) / 1000.0 / REPLAY_TICK_S),
+            )
+            * REPLAY_TICK_S,
             "replayed": True,
         }
         if self.opts.provide_transport == "broadcast":
@@ -1135,7 +1156,8 @@ class Campaign:
             "mesh": {
                 **self.mesh.link_stats(),
                 "nodes": self.opts.nodes,
-                "area_km": self.opts.area / 1000.0,
+                "area_km": round(self.area / 1000.0, 2),
+                "nodes_per_km2": round(self.opts.nodes / (self.area / 1000.0) ** 2, 2),
                 "hop_limit": self.opts.hop_limit,
                 "routers": sum(1 for n in self.mesh.nodes if n.role == M.ROUTER),
             },
@@ -1299,6 +1321,11 @@ def build_parser():
     ap.add_argument("--area", type=float, default=8000.0)
     ap.add_argument("--hop-limit", type=int, default=3)
     ap.add_argument("--router-fraction", type=float, default=0.1)
+    ap.add_argument(
+        "--scale-area",
+        action="store_true",
+        help="grow the area with the node count so density is held constant, not conflated with size",
+    )
     ap.add_argument(
         "--hop-spread",
         action="store_true",

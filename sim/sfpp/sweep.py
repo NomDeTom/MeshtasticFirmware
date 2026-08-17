@@ -86,8 +86,14 @@ BLOCKS = {
     "J-wincap": ("capacity", [8, 16, 32], ["--bucket-mode", "window"]),
     "J-timewin": ("time-bucket-s", [600, 1800, 3600], ["--bucket-mode", "time"]),
     # Mesh size, with per-node hop limits 3-7 by centrality rather than one value for everyone.
-    "K-size": ("nodes", [40, 60, 90, 120, 150], ["--hop-spread"]),
+    # Size with density held constant - the area grows with the node count.
+    "K-size": ("nodes", [40, 60, 90, 120, 150], ["--hop-spread", "--scale-area"]),
+    # The same node counts in a fixed area, so this one is density rather than size. Running both is
+    # the only way to say which of the two any effect belongs to.
+    "K-density": ("nodes", [40, 60, 90, 120, 150], ["--hop-spread"]),
     "K-hopspread": ("hop-limit", [3, 5, 7], []),
+    # Uniform hop limit against per-node 3-7 by centrality, everything else fixed.
+    "K-spread": ("hop-spread", [False, True], []),
     # Adverts only other archives can act on; replays every node in earshot can use.
     "L-advert": ("advert-transport", ["broadcast", "dm"], []),
     "L-provide": ("provide-transport", ["dm", "broadcast"], []),
@@ -105,6 +111,26 @@ BLOCKS = {
     # numbering each server seals its own bucket whenever its own 32nd message lands.
     "M-jitter": ("advert-jitter-s", [1, 30, 120, 600], []),
     "M-capacity": ("capacity", [4, 8, 16, 32, 50], []),
+    # Topology re-run under real numbering and per-node hop limits. Round one's placement findings
+    # were the strongest of the campaign and were measured on the shared-counter fiction.
+    "N-place": (
+        "place",
+        [
+            "spread",
+            "routers",
+            "alternate-routers",
+            "beside-router",
+            "random-clients",
+            "hops-apart",
+        ],
+        ["--hop-spread"],
+    ),
+    "N-hops": (
+        "hops-apart",
+        [1, 2, 3, 4, 5],
+        ["--place", "hops-apart", "--hop-spread"],
+    ),
+    "N-servers": ("servers", [2, 3, 5, 8], ["--hop-spread"]),
     # All six routers as servers, against three of them, against three nodes beside them. Same
     # mesh, same traffic; only who is holding the archive changes.
     "G-allrouters": ("servers", [3, 6], ["--place", "routers"]),
@@ -113,9 +139,10 @@ BLOCKS = {
 
 def cell_argv(arm, value, extra):
     argv = list(BASE) + list(extra)
-    if arm == "signed":
+    if isinstance(value, bool):
+        # A flag arm: present or absent, no value.
         if value:
-            argv.append("--signed")
+            argv.append(f"--{arm}")
     else:
         argv += [f"--{arm}", str(value)]
     return argv
