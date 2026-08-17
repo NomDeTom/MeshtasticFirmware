@@ -46,19 +46,25 @@ def block_table(path):
     lines = [
         f"### {name} - arm `{arm}`, {len(next(iter(grouped.values())))} seeds per cell",
         "",
-        f"| {arm} | held | union | mesh reception | adverts | moved | SR bytes | SR airtime | "
-        "decode fail | misdecode | escalations | silent |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        f"| {arm} | held | union | mesh reception | recovered | adverts | moved | SR bytes | "
+        "SR airtime | decode fail | misdecode | escalations | silent |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for value, cells in grouped.items():
         silent = mean(cells, "sfpp", "silent_losses") + mean(
             cells, "sfpp", "audit_checksum_agrees_sets_differ"
         )
+        reception = mean(cells, "baseline", "text_reception_mean")
+        union = mean(cells, "sfpp", "union_fraction")
+        # The payoff, stated the way it matters to a client: of everything an ordinary node failed
+        # to hear, how much does the archive between them actually hold?
+        recovered = (union - reception) / max(1e-9, 1.0 - reception)
         lines.append(
             f"| {value} "
             f"| {mean(cells, 'sfpp', 'held_fraction_mean'):.3f} "
-            f"| {mean(cells, 'sfpp', 'union_fraction'):.3f} "
-            f"| {mean(cells, 'baseline', 'text_reception_mean'):.3f} "
+            f"| {union:.3f} "
+            f"| {reception:.3f} "
+            f"| {recovered:.1%} "
             f"| {mean(cells, 'sfpp', 'adverts'):.0f} "
             f"| {mean(cells, 'sfpp', 'objects_moved'):.0f} "
             f"| {mean(cells, 'sfpp', 'sr_bytes') / 1000:.1f} KB "
