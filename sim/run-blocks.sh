@@ -71,10 +71,10 @@ runner() {
 				echo "skip $blk (already present)"
 				continue
 			fi
-			echo "--- $blk $(date -Is) ---"
-			python3 -m sfpp.sweep --block "$blk" --seeds 3 --seed-base "$SEED_BASE" \
+			printf -- "--- %s %s ---\n" "$blk" "$(date -Is)"
+			python3 -u -m sfpp.sweep --block "$blk" --seeds 3 --seed-base "$SEED_BASE" \
 				--out "$OUT_ROOT" 2>&1
-			echo "--- $blk finished rc=$? $(date -Is) ---"
+			printf -- "--- %s finished rc=%s %s ---\n" "$blk" "$?" "$(date -Is)"
 		done
 		echo "all blocks attempted $(date -Is)"
 		python3 -m sfpp.tuning --runs "$OUT_ROOT" --markdown \
