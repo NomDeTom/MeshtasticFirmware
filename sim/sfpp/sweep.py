@@ -161,6 +161,20 @@ BLOCKS = {
     # What the 2.8 fold-in is worth against the pre-fold-in transport: same seed, same mesh, same
     # traffic, only the MAC and routing rules change.
     "R-firmware": ("profile", ["legacy", "2.8"], []),
+    # The retry budget from both ends: M4 spends a directed attempt to flood sooner, the coding-rate
+    # ladder spends airtime to make each attempt more likely to land. Swept together because they
+    # trade against the same budget.
+    "R-dmmode": (
+        "dm-mode",
+        ["flood-only", "directed-with-late-flood", "m4-early-flood"],
+        [],
+    ),
+    "R-crladder": ("coding-rate-ladder", [False, True], []),
+    "R-dmmode-cr": (
+        "dm-mode",
+        ["directed-with-late-flood", "m4-early-flood"],
+        ["--coding-rate-ladder"],
+    ),
     # The cheapest rival to the archive: spend one extra relay of a text rather than replicate it
     # afterwards. Measured against the archive in the same arm rather than separately.
     "R-repeats": ("extra-repeats", [False, True], []),

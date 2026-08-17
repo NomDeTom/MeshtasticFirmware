@@ -210,6 +210,7 @@ class Counters:
         "chain_round_trips",
         "chain_walks_completed",
         "chain_walks_abandoned",
+        "dm_via_transport",
     )
 
     def __init__(self):
@@ -355,11 +356,7 @@ class Campaign:
             hop_spread=opts.hop_spread,
             hop_assign=opts.hop_assign,
             topology=opts.topology,
-            profile=(
-                M.Profile(getattr(opts, "profile", "2.8"), extra_repeats=True)
-                if getattr(opts, "extra_repeats", False)
-                else getattr(opts, "profile", "2.8")
-            ),
+            profile=_profile_for(opts),
             old_profile=getattr(opts, "old_profile", "legacy"),
             legacy_fraction=getattr(opts, "legacy_fraction", 0.0),
             role_mix=getattr(opts, "role_mix", None) or None,
@@ -390,6 +387,9 @@ class Campaign:
             telemetry_throttle=opts.telemetry_throttle,
         )
         self.counters = Counters()
+        # Which route an addressed SR message takes. `hop-by-hop` is the fiction every published
+        # chain cost was measured under; `transport` is the real one.
+        self.dm_transport = getattr(opts, "dm_transport", "hop-by-hop")
         self.duration_ms = opts.hours * 3600_000.0
 
         self.catch_up = None
@@ -488,6 +488,13 @@ class Campaign:
 
     def _on_receive(self, node, packet, rssi, snr):
         self._note_class_reception(node, packet)
+        if (
+            self.dm_transport == "transport"
+            and packet.destination != M.BROADCAST
+            and node.index != packet.destination
+        ):
+            # A relay on the path, not the addressee. It carried the packet; it does not read it.
+            return
         if packet.kind == "text":
             self._on_text(node, packet)
         elif packet.kind == "sr:item_provide" and packet.payload is not None:
@@ -641,12 +648,31 @@ class Campaign:
             self._unicast(src, dst, kind, payload, length)
 
     def _unicast(self, src, dst, kind, payload, length, attempt=0):
-        """Hop-by-hop along the shortest path, the way next-hop routing moves a DM.
+        """An addressed SR message, by one of two routes.
 
-        Flooding an addressed reply would charge the whole neighbourhood for a conversation between
-        two nodes and would badly overstate what reconciliation costs on a modern firmware. Each hop
-        is still a real transmission that contends and can be lost, with a bounded retry.
+        `transport` hands it to the transport as a real DM: NextHopRouter picks the next hop from
+        what the sender has actually learned, falls back to flooding when it has learned nothing,
+        and runs the retry ladder. Costs are then whatever routing really costs, including being
+        wrong.
+
+        `hop-by-hop` walks a precomputed shortest path outside the transport, one addressed hop at a
+        time with a hand-written delay and no contention for the route decision itself. Every
+        published chain-arm cost was measured this way, so it stays the default until those numbers
+        are re-measured.
         """
+        if self.dm_transport == "transport":
+            packet = self.mesh.originate(
+                src,
+                STORE_FORWARD_PLUSPLUS_APP,
+                length,
+                kind=kind,
+                payload=payload,
+                destination=dst,
+                want_ack=True,
+            )
+            if packet is not None:
+                self.counters.dm_via_transport += 1
+            return
         path = self._path(src, dst)
         if path is None or len(path) < 2:
             return
@@ -1496,6 +1522,22 @@ class Campaign:
         shutil.rmtree(self.db_dir, ignore_errors=True)
 
 
+def _profile_for(opts):
+    """The rule set, with the branch-only and compiled-out mechanisms the flags asked for."""
+    name = getattr(opts, "profile", "2.8")
+    dm_mode = getattr(opts, "dm_mode", "directed-with-late-flood")
+    overrides = {}
+    if getattr(opts, "extra_repeats", False):
+        overrides["extra_repeats"] = True
+    if getattr(opts, "coding_rate_ladder", False):
+        overrides["coding_rate_ladder"] = True
+    if dm_mode == "flood-only":
+        overrides["next_hop_routing"] = False
+    elif dm_mode == "m4-early-flood":
+        overrides["early_flood_on_unverified"] = True
+    return M.Profile(name, **overrides) if overrides else name
+
+
 def _hot_store_size(opts):
     """The hot-store cap to hand every node, or None to let the platform mix decide.
 
@@ -1546,6 +1588,28 @@ def build_parser():
         default="legacy",
         choices=M.VERSIONS + ("legacy",),
         help="the rules the --legacy-fraction share of nodes runs instead of --profile",
+    )
+    ap.add_argument(
+        "--dm-transport",
+        default="hop-by-hop",
+        choices=("hop-by-hop", "transport"),
+        help="route an addressed SR message through the transport, so next-hop routing and its "
+        "retry ladder decide what it costs, or walk a precomputed shortest path outside the "
+        "transport as every published chain-arm cost was measured",
+    )
+    ap.add_argument(
+        "--dm-mode",
+        default="directed-with-late-flood",
+        choices=("flood-only", "directed-with-late-flood", "m4-early-flood"),
+        help="how a DM escalates: never directed, directed until the last retry (the shipped "
+        "behaviour), or flooding one retry sooner whenever the route is not verified (M4, which "
+        "is written and compiled out)",
+    )
+    ap.add_argument(
+        "--coding-rate-ladder",
+        action="store_true",
+        help="raise the coding rate on each retransmission - base, base+1, then 4/8 (branch "
+        "CRCRRCRRR, no release has it)",
     )
     ap.add_argument(
         "--extra-repeats",

@@ -191,7 +191,11 @@ BUSY_DIRECT_ACTIVE_NODES = 10
 # mesh.proto portnums the transport itself reads. NodeInfo is the one that carries a public key, so
 # it is where a node learns whom it can encrypt to.
 NODEINFO_PORTNUM = 4
+ROUTING_PORTNUM = 5  # ROUTING_APP, which is what an ACK is
 TEXT_PORTNUMS = frozenset({1, 8})  # TEXT_MESSAGE_APP and TEXT_MESSAGE_COMPRESSED_APP
+
+# A Routing ACK is a two-byte payload; the header dominates it.
+ACK_PAYLOAD_BYTES = 2
 
 # NodeDB.h LastByteResolution. Callers must treat anything but UNIQUE as untrustworthy.
 RESOLUTION_NONE = "none"
@@ -489,6 +493,8 @@ class Profile:
         "signing",
         "hop_scaling",
         "extra_repeats",
+        "early_flood_on_unverified",
+        "coding_rate_ladder",
         "exhaust_hops",
         "event_relay_hop_limit",
         "opaque_relay",
@@ -590,6 +596,10 @@ class Profile:
         # Off unless the module or the build flag is on. `extra_repeats` is RepeatScalingModule,
         # which is on a branch rather than in any release, so no series turns it on by itself.
         self.extra_repeats = False
+        # M4 is written and compiled out at NEXTHOP_EARLY_FLOOD_ON_UNVERIFIED 0, and the coding-rate
+        # ladder is on a branch, so no release turns either on.
+        self.early_flood_on_unverified = False
+        self.coding_rate_ladder = False
         self.exhaust_hops = False
         self.event_relay_hop_limit = None
         self.opaque_relay = self.at_least("2.8")
@@ -635,6 +645,8 @@ class Profile:
         self.exhaust_hops = False
         self.event_relay_hop_limit = None
         self.extra_repeats = False
+        self.early_flood_on_unverified = False
+        self.coding_rate_ladder = False
         self.opaque_relay = False
 
 
@@ -685,6 +697,7 @@ class Packet:
         "want_ack",
         "xeddsa_signed",
         "pki_encrypted",
+        "coding_rate",
         "request_id",
         "reply_id",
         "opaque",
@@ -724,6 +737,9 @@ class Packet:
         # A DM encrypted to the destination's key. It carries no signature - the encryption is the
         # authentication - so every receive policy passes it through untouched.
         self.pki_encrypted = False
+        # A per-packet TX coding-rate override. None uses the preset's, which is what every packet
+        # does unless the retransmission ladder has stepped this one.
+        self.coding_rate = None
         self.priority = (
             priority
             if priority is not None
@@ -766,6 +782,7 @@ class Packet:
         clone.rx_snr = self.rx_snr
         clone.xeddsa_signed = self.xeddsa_signed
         clone.pki_encrypted = self.pki_encrypted
+        clone.coding_rate = self.coding_rate
         return clone
 
 
@@ -1488,6 +1505,11 @@ class Mesh:
             # too busy for that to be allowed.
             "extra_repeats_tolerated": 0,
             "extra_repeats_suppressed": 0,
+            # M4 flooding a retry early, and retransmission chains that never got an ACK.
+            "early_floods": 0,
+            # Routing ACKs generated at a destination, and deliveries they confirmed.
+            "acks_sent": 0,
+            "acks_delivered": 0,
             "reliable_retx": 0,
             "reliable_failures": 0,
             "opaque_relays": 0,
@@ -1597,11 +1619,14 @@ class Mesh:
 
     # ---- transmission -----------------------------------------------------------------
 
-    def airtime_ms(self, length):
+    def airtime_ms(self, length, coding_rate=None):
+        """How long a payload holds the channel. A slower coding rate is a longer packet."""
         import lib.phy as phy
 
         p = self.conf.current_preset
-        return phy.airtime(self.conf, p["sf"], p["cr"], length, p["bw"])
+        return phy.airtime(
+            self.conf, p["sf"], coding_rate or p["cr"], length, p["bw"]
+        )
 
     def slot_time_ms(self):
         """RadioInterface::computeSlotTimeMsec. 0.2 + 0.4 + 7 ms of propagation, turnaround and MAC.
@@ -1711,7 +1736,7 @@ class Mesh:
         Assumes the worst contention window and a responder at half the SNR range, then adds the
         4.5 s the firmware allows for constructing, processing and reconstructing a packet.
         """
-        airtime = int(self.airtime_ms(packet.length))
+        airtime = int(self.airtime_ms(packet.length, packet.coding_rate))
         util = self.nodes[node].channel_utilization_percent(self.now)
         profile = self.nodes[node].profile
         cw = arduino_map(util, 0, 100, profile.cw_min, profile.cw_max)
@@ -1978,7 +2003,7 @@ class Mesh:
         return True
 
     def _start_send(self, node, packet):
-        duration = self.airtime_ms(packet.length)
+        duration = self.airtime_ms(packet.length, packet.coding_rate)
         radio = self.nodes[node]
         radio.busy_until = self.now + duration
         radio.log_airtime(self.now, duration)
@@ -2039,7 +2064,7 @@ class Mesh:
                 continue
             if (
                 self._deaf(rx)
-                or self._lost_to_phy(rssi, packet.length)
+                or self._lost_to_phy(rssi, packet.length, packet.coding_rate)
                 or (self.extra_loss and self.rng.random() < self.extra_loss)
             ):
                 self.stats["lost_to_phy"] += 1
@@ -2072,13 +2097,18 @@ class Mesh:
                 self._deaf_until[node] = self.now + self.burst_ms
         return self.now < self._deaf_until[node]
 
-    def _lost_to_phy(self, rssi, length):
+    def _lost_to_phy(self, rssi, length, coding_rate=None):
+        """The empirical SNR-to-PER curve. More redundancy survives a worse link."""
         import lib.radio_loss as radio_loss
 
         if not self.conf.PHY_LOSS_MODEL_ENABLED:
             return False
         return radio_loss.payload_is_lost(
-            self.conf, rssi, self.conf.current_preset["cr"], length, self.rng.random()
+            self.conf,
+            rssi,
+            coding_rate or self.conf.current_preset["cr"],
+            length,
+            self.rng.random(),
         )
 
     # ---- breaking the mesh -------------------------------------------------------------
@@ -2536,16 +2566,46 @@ class Mesh:
         return stored
 
     def note_route_learned(self, rx, destination, next_hop):
+        """NextHopRouter::noteRouteLearned - refresh a route, without forgiving it.
+
+        The failure count is cleared only when the hop itself changes. Re-learning the *same* hop
+        keeps the count, so an asymmetric reverse path that keeps re-teaching a dead forward hop
+        still ages that hop out instead of resetting the counter on every lesson.
+        """
         node = self.nodes[rx]
-        if (
-            destination not in node.route_health
-            and len(node.route_health) >= ROUTE_HEALTH_MAX
-        ):
-            oldest = min(
-                node.route_health, key=lambda d: node.route_health[d].learned_at
-            )
-            node.route_health.pop(oldest)
-        node.route_health[destination] = RouteHealth(self.now, next_hop)
+        health = node.route_health.get(destination)
+        if health is None:
+            if len(node.route_health) >= ROUTE_HEALTH_MAX:
+                oldest = min(
+                    node.route_health, key=lambda d: node.route_health[d].learned_at
+                )
+                node.route_health.pop(oldest)
+            node.route_health[destination] = RouteHealth(self.now, next_hop)
+            return
+        if health.last_next_hop != next_hop:
+            health.last_next_hop = next_hop
+            health.consecutive_failures = 0
+        health.learned_at = self.now
+
+    def note_route_success(self, rx, destination):
+        """NextHopRouter::noteRouteSuccess - a directed delivery worked, so the route is fresh.
+
+        Only a route we actually learned has health to refresh; nothing is created here.
+        """
+        health = self.nodes[rx].route_health.get(destination)
+        if health is None:
+            return
+        health.consecutive_failures = 0
+        health.learned_at = self.now
+
+    def route_is_verified(self, rx, destination):
+        """M4's test: a route we learned, never since failed, and not yet stale."""
+        health = self.nodes[rx].route_health.get(destination)
+        return (
+            health is not None
+            and health.consecutive_failures == 0
+            and (self.now - health.learned_at) < ROUTE_TTL_MSEC
+        )
 
     def note_route_failure(self, rx, destination):
         health = self.nodes[rx].route_health.get(destination)
@@ -2619,6 +2679,7 @@ class Mesh:
         self._sniff_ack_or_reply(rx, heard)
         if self.on_receive is not None:
             self.on_receive(node, packet, rssi, snr)
+        self._perhaps_ack(rx, heard)
         self.perhaps_rebroadcast(rx, heard)
 
     # ---- extra repeats (RepeatScalingModule) -------------------------------------------
@@ -2824,6 +2885,51 @@ class Mesh:
             node.pending[packet.id] = record
         return entry is not None
 
+    def hop_limit_for_response(self, rx, packet):
+        """RoutingModule::getHopLimitForResponse - answer over the distance the request came.
+
+        A reply does not need the sender's whole hop budget: it needs the hops the request used,
+        plus a margin because the way back may differ. A request that arrived with a hop_start of
+        zero is answered directly and not relayed at all.
+        """
+        limit = self.hop_limit_for(rx)
+        hops_used = packet.hops_taken()
+        if hops_used >= 0:
+            if hops_used > limit:
+                return hops_used
+            if packet.hop_start == 0:
+                return 0
+            if hops_used + 2 < limit:
+                return hops_used + 2
+        return limit
+
+    def _perhaps_ack(self, rx, packet):
+        """ReliableRouter::sendAckNak at the destination of a packet that asked to be acknowledged.
+
+        Only the addressee answers, and only for a request: a packet that is itself a response gets
+        a hop-limited ACK, so the far end stops retransmitting without the ACK itself flooding.
+        """
+        node = self.nodes[rx]
+        if not node.profile.reliable_retx or not packet.want_ack:
+            return None
+        if packet.destination != rx or packet.origin == rx:
+            return None
+        is_response = bool(packet.request_id or packet.reply_id)
+        hop_limit = 0 if is_response else self.hop_limit_for_response(rx, packet)
+        ack = self.originate(
+            rx,
+            ROUTING_PORTNUM,
+            ACK_PAYLOAD_BYTES,
+            kind="ack",
+            hop_limit=hop_limit,
+            destination=packet.origin,
+            priority=PRIORITY_ACK,
+            request_id=packet.id,
+        )
+        if ack is not None:
+            self.stats["acks_sent"] += 1
+        return ack
+
     def _sniff_ack_or_reply(self, rx, packet):
         """NextHopRouter::sniffReceived - learn a route from a delivery that demonstrably worked.
 
@@ -2847,6 +2953,16 @@ class Mesh:
                     self.note_heard(rx, packet.origin).next_hop = packet.relay_node
                     self.note_route_learned(rx, packet.origin, packet.relay_node)
                     self.stats["next_hop_learned"] += 1
+
+        if packet.destination == rx and packet.request_id:
+            # An ACK for something we sent came back. The route we used is working, so refresh its
+            # freshness and clear the failure count - without creating health for a route we never
+            # learned - and stop retransmitting, which is the whole point of having asked.
+            self.note_route_success(rx, packet.origin)
+            self.stats["acks_delivered"] += 1
+            # Often already stopped: overhearing our own packet relayed is an implicit ACK, and it
+            # usually beats the real one back.
+            self._stop_retransmission(rx, packet.request_id)
 
         if packet.destination != rx:
             self._cancel_sending(rx, packet.request_id)
@@ -2885,15 +3001,27 @@ class Mesh:
             return
 
         retry = packet.copy()
+        attempt = record["initial"] - record["left"] + 1
+        if radio.profile.coding_rate_ladder:
+            # Branch `CRCRRCRRR`: a retry that already failed once should not go out identical.
+            # Base, then one step slower, then 4/8 - keyed by (from, id) so every copy of the same
+            # retransmission picks up the same rate.
+            retry.coding_rate = self._ladder_coding_rate(attempt)
         if packet.destination != BROADCAST and record["left"] == 1:
             # Last directed try. The route has not worked; record the failure, clear it, and let
             # this attempt flood, which is the only thing left that can still deliver.
-            self.note_route_failure(node, packet.destination)
-            dest_record = radio.nodedb.get(packet.destination)
-            if dest_record is not None:
-                dest_record.next_hop = NO_NEXT_HOP_PREFERENCE
-            retry.next_hop = NO_NEXT_HOP_PREFERENCE
-            self.stats["next_hop_fallbacks"] += 1
+            self._fall_back_to_flooding(node, packet, retry)
+        elif (
+            packet.destination != BROADCAST
+            and radio.profile.early_flood_on_unverified
+            and retry.next_hop != NO_NEXT_HOP_PREFERENCE
+            and not self.route_is_verified(node, packet.destination)
+        ):
+            # M4, off in the firmware: a route that is not proven healthy does not get a second
+            # directed attempt. Start flooding one retry sooner, which trades airtime for recovery
+            # latency and leaves a fresh, never-failed route on the unchanged path.
+            self._fall_back_to_flooding(node, packet, retry)
+            self.stats["early_floods"] += 1
         record["left"] -= 1
         self.stats["reliable_retx"] += 1
         self.send(node, retry)
@@ -2901,6 +3029,24 @@ class Mesh:
             self.now + self.retransmission_msec(node, packet),
             lambda: self._do_retransmission(node, packet_id),
         )
+
+    def _fall_back_to_flooding(self, node, packet, retry):
+        """Clear the route in the packet, in the hot store, and in the health table, then flood."""
+        self.note_route_failure(node, packet.destination)
+        dest_record = self.nodes[node].nodedb.get(packet.destination)
+        if dest_record is not None:
+            dest_record.next_hop = NO_NEXT_HOP_PREFERENCE
+        retry.next_hop = NO_NEXT_HOP_PREFERENCE
+        self.stats["next_hop_fallbacks"] += 1
+
+    def _ladder_coding_rate(self, attempt):
+        """`if (retransmissionAttempt >= 2) return 8;` else base + 1 on the first retry."""
+        base = self.conf.current_preset["cr"]
+        if attempt >= 2:
+            return 8
+        if attempt == 1:
+            return min(8, base + 1)
+        return base
 
     def _prune(self):
         """Keep the transmission list bounded; nothing this old can overlap anything new."""
