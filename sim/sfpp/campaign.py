@@ -359,6 +359,11 @@ class Campaign:
             hop_spread=opts.hop_spread,
             hop_assign=opts.hop_assign,
             topology=opts.topology,
+            profile=getattr(opts, "profile", "2.8"),
+            router_late_fraction=getattr(opts, "router_late_fraction", 0.0),
+            client_base_fraction=getattr(opts, "client_base_fraction", 0.0),
+            favourite_routers=getattr(opts, "favourite_routers", False),
+            rebroadcast_mode=getattr(opts, "rebroadcast_mode", M.REBROADCAST_ALL),
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(
@@ -1265,6 +1270,15 @@ class Campaign:
                 "nodes_per_km2": round(self.opts.nodes / (self.area / 1000.0) ** 2, 2),
                 "hop_limit": self.opts.hop_limit,
                 "routers": sum(1 for n in self.mesh.nodes if n.role == M.ROUTER),
+                "routers_late": sum(
+                    1 for n in self.mesh.nodes if n.role == M.ROUTER_LATE
+                ),
+                "client_base": sum(
+                    1 for n in self.mesh.nodes if n.role == M.CLIENT_BASE
+                ),
+                # Which firmware's rules produced this row. Without it a JSON from before the 2.8
+                # fold-in is indistinguishable from one after it.
+                "firmware_profile": self.mesh.profile.name,
                 "topology": getattr(self.mesh, "topology", "uniform"),
                 "diameter": max(
                     max(self.mesh.hops_from([i]).values())
@@ -1472,6 +1486,31 @@ def build_parser():
     ap.add_argument("--area", type=float, default=8000.0)
     ap.add_argument("--hop-limit", type=int, default=3)
     ap.add_argument("--router-fraction", type=float, default=0.1)
+    ap.add_argument("--router-late-fraction", type=float, default=0.0)
+    ap.add_argument("--client-base-fraction", type=float, default=0.0)
+    ap.add_argument(
+        "--favourite-routers",
+        action="store_true",
+        help="router-like nodes favourite each other, so relays between them keep their hop limit",
+    )
+    ap.add_argument(
+        "--rebroadcast-mode",
+        default=M.REBROADCAST_ALL,
+        choices=(
+            M.REBROADCAST_ALL,
+            M.REBROADCAST_ALL_SKIP_DECODING,
+            M.REBROADCAST_LOCAL_ONLY,
+            M.REBROADCAST_KNOWN_ONLY,
+            M.REBROADCAST_CORE_PORTNUMS_ONLY,
+            M.REBROADCAST_NONE,
+        ),
+    )
+    ap.add_argument(
+        "--profile",
+        default="2.8",
+        choices=("2.8", "legacy"),
+        help="which firmware's MAC and routing rules to obey; legacy is the pre-fold-in model",
+    )
     ap.add_argument(
         "--diurnal",
         default="commuter",
