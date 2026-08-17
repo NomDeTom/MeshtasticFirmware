@@ -324,6 +324,25 @@ PRIORITY_RELIABLE = 70
 PRIORITY_ACK = 120
 
 
+# Named rule sets. `2.8` is read from this tree and is the only one evidenced line by line.
+#
+# `2.5-approx` is a *floor*, not a reconstruction: it turns off the behaviours this tree carries that
+# are known to postdate 2.5, and leaves everything else at 2.8. It is named -approx because the
+# intermediate versions were never diffed, so it must not be read as "what 2.5 did" - only as "2.8
+# minus the parts that are certainly newer".
+#
+# `pre-fold-in` is not a firmware version at all. It is the rule set this simulator's transport
+# carried before the 2.8 fold-in, kept so a result can be attributed to a rule change rather than to
+# the rewrite around it. It was previously called `legacy`, which invited exactly the misreading that
+# it described some older firmware.
+#
+# Anything older than 2.5 is deliberately not offered as a profile. Specific pre-2.5 pathologies are
+# available as individual flags instead - `clamp_cw=False` is the unclamped Arduino map() of the older
+# contention window, `router_cw_floor=True` is the old router-pinned-to-the-bottom window - so a bad
+# behaviour can be simulated on purpose without pretending a whole-version reconstruction exists.
+PROFILE_NAMES = ("2.8", "2.5-approx", "pre-fold-in", "legacy")
+
+
 class Profile:
     """Which firmware's rules to obey.
 
@@ -360,9 +379,13 @@ class Profile:
     )
 
     def __init__(self, name="2.8", **overrides):
-        if name not in ("2.8", "legacy"):
+        if name not in PROFILE_NAMES:
             raise ValueError(f"unknown profile {name!r}")
-        modern = name == "2.8"
+        if name == "legacy":
+            name = (
+                "pre-fold-in"  # accepted for continuity; the old name misdescribed it
+            )
+        modern = name != "pre-fold-in"
         self.name = name
         self.cw_min = CW_MIN if modern else 2
         self.cw_max = CW_MAX
@@ -389,6 +412,15 @@ class Profile:
         self.exhaust_hops = False
         self.event_relay_hop_limit = None
         self.opaque_relay = modern
+
+        if name == "2.5-approx":
+            # Off because they are certainly newer than 2.5 in this tree. Everything not listed stays
+            # at 2.8, which is why the name says approx: absence of evidence, not evidence of absence.
+            self.next_hop_routing = False
+            self.late_window = False
+            self.util_backoff = False
+            self.role_aware_cancel = False
+            self.hop_upgrade = False
 
         for key, value in overrides.items():
             if key not in Profile.__slots__ or key == "name":

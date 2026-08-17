@@ -360,7 +360,7 @@ class Campaign:
             hop_spread=opts.hop_spread,
             hop_assign=opts.hop_assign,
             topology=opts.topology,
-            profile=getattr(opts, "profile", "2.8"),
+            profile=_build_profile(opts),
             role_mix=getattr(opts, "role_mix", None) or None,
             router_late_fraction=getattr(opts, "router_late_fraction", 0.0),
             client_base_fraction=getattr(opts, "client_base_fraction", 0.0),
@@ -1665,6 +1665,30 @@ class Campaign:
         shutil.rmtree(self.db_dir, ignore_errors=True)
 
 
+def _build_profile(opts):
+    """The named rule set, with any individual overrides applied on top.
+
+    Individual flags exist so a specific pre-2.5 pathology can be simulated deliberately without
+    pretending a whole-version reconstruction exists - the unclamped contention window and the
+    router-pinned window are the two worth reaching for.
+    """
+    overrides = {}
+    for item in getattr(opts, "profile_flag", []) or []:
+        key, _, raw = item.partition("=")
+        key = key.strip()
+        val = raw.strip().lower()
+        if val in ("true", "1", "yes", "on"):
+            parsed = True
+        elif val in ("false", "0", "no", "off"):
+            parsed = False
+        elif val in ("none", ""):
+            parsed = None
+        else:
+            parsed = float(val) if "." in val else int(val)
+        overrides[key] = parsed
+    return M.Profile(getattr(opts, "profile", "2.8"), **overrides)
+
+
 def _hot_store_size(opts):
     """The hot-store cap to hand every node, or None to let the platform mix decide.
 
@@ -1706,8 +1730,17 @@ def build_parser():
     ap.add_argument(
         "--profile",
         default="2.8",
-        choices=("2.8", "legacy"),
-        help="which firmware's MAC and routing rules to obey; legacy is the pre-fold-in model",
+        choices=M.PROFILE_NAMES,
+        help="rule set: 2.8 is read from this tree; 2.5-approx is 2.8 minus what is certainly "
+        "newer; pre-fold-in is this simulator's own older transport and NOT a firmware version",
+    )
+    ap.add_argument(
+        "--profile-flag",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="override one rule, repeatable. Specific pre-2.5 pathologies live here rather than as "
+        "a profile, e.g. --profile-flag clamp_cw=true for the unclamped Arduino map() window",
     )
     ap.add_argument(
         "--diurnal",
