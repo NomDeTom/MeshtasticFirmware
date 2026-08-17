@@ -345,6 +345,7 @@ class Profile:
         "snr_max",
         "router_offset",
         "router_cw_floor",
+        "max_backoffs",
         "quantised_slots",
         "clamp_cw",
         "util_backoff",
@@ -374,6 +375,15 @@ class Profile:
         # The old model pinned a router to the bottom of the window and drew from 2^CWmin. 2.8
         # keeps a router's window SNR-derived and only halves the exponent to a doubling.
         self.router_cw_floor = not modern
+        # The pre-fold-in CSMA loop discarded a packet that could not find a clear channel within
+        # 400 backoffs, counting it as a queue drop. The firmware has no such cap - setTransmitDelay
+        # reschedules indefinitely - so this is a defect, not a rule, and 2.8 does not have it.
+        #
+        # It is restored here anyway, because `legacy` is only useful if it reproduces the runs it
+        # is named for, and every SF++ result up to round three was measured with this cap live and
+        # throwing away about two thirds of all rebroadcast attempts. A legacy profile that quietly
+        # fixed the bug could not re-derive those numbers or say what the bug cost.
+        self.max_backoffs = None if modern else 400
         # random(0, N) is integer and half-open; a continuous draw cannot produce a slot collision.
         self.quantised_slots = modern
         # getCWsize() runs Arduino map() and does not constrain the result.
@@ -601,12 +611,14 @@ class QueueEntry:
     behind every ready one, and the late-rebroadcast window is nothing more than setting it.
     """
 
-    __slots__ = ("packet", "tx_after", "sent")
+    __slots__ = ("packet", "tx_after", "sent", "backoffs")
 
     def __init__(self, packet, tx_after=0.0):
         self.packet = packet
         self.tx_after = tx_after
         self.sent = False
+        # Only read under the legacy profile, where exceeding a cap discarded the packet.
+        self.backoffs = 0
 
 
 class Node:
@@ -1028,6 +1040,7 @@ class Mesh:
             "nodes_brought_up": 0,
             "links_severed": 0,
             "sends_while_offline": 0,
+            "dropped_to_backoff_cap": 0,
         }
         self.airtime_by_kind = {}
         # Filled by build() when per-node hop limits are in play; None means everyone uses the same.
@@ -1415,6 +1428,17 @@ class Mesh:
             return
         if self._channel_busy(node) or radio.busy_until > self.now:
             self.stats["deferrals"] += 1
+            entry.backoffs += 1
+            cap = radio.profile.max_backoffs
+            if cap is not None and entry.backoffs > cap:
+                # The pre-fold-in defect, faithfully reproduced: give up and drop it.
+                radio.queue.pop(0)
+                radio.pending.pop(entry.packet.id, None)
+                self.stats["queue_drops"] += 1
+                self.stats["dropped_to_backoff_cap"] += 1
+                if radio.queue:
+                    self.set_transmit_delay(node)
+                return
             self.set_transmit_delay(node)
             return
         radio.queue.pop(0)
