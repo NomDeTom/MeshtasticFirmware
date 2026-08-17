@@ -155,6 +155,7 @@ class Generator:
         position_throttle=1,
         telemetry_throttle=1,
         online_cap=120,
+        broadcast_interval_s=None,
         diurnal="flat",
         start_hour=8.0,
     ):
@@ -184,6 +185,10 @@ class Generator:
         # Text follows the clock because a person sends it. Telemetry and nodeinfo do not - a device
         # reports on a timer regardless of the hour. Position sits in between and is treated as
         # human-driven, since a node only has a new position when someone has moved it.
+        # One interval for every device-originated class, the way an operator sets it. None keeps the
+        # per-class mix. This is the denominator every SF++ airtime share is quoted against, so it
+        # deserves to be a knob rather than an assumption.
+        self.broadcast_interval_s = broadcast_interval_s
         self.diurnal = diurnal
         self.diurnal_classes = {"text", "position"}
         self.start_hour = start_hour

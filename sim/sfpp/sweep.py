@@ -144,10 +144,19 @@ BLOCKS = {
     # Congestion scaling on against off, to size what the firmware's own throttling is worth.
     "P-congestion": ("no-congestion-scaling", [False, True], ["--nodes", "120"]),
     # Round three. Mesh shape as its own variable - round one and two only ever ran uniform points.
+    # The headline: nothing, the incumbent chain walk, and the sketch - all at one seed, so `none`
+    # is a paired baseline and every other cell is a difference rather than a comparison.
+    "Q-protocol": ("protocol", ["none", "chain", "sr"], []),
+    # The denominator. Every SF++ airtime share quoted so far is a share of a mesh broadcasting
+    # hourly, which is a property of the mesh and not of SF++.
+    "Q-interval": ("broadcast-interval-s", [900, 3600, 10800, 43200], []),
+    # centrality is what operators do; random is the control that separates the hop limit's own
+    # effect from the siting of the nodes that happen to have raised it.
+    "Q-hopassign": ("hop-assign", ["centrality", "random"], []),
     "Q-topology": (
         "topology",
         ["uniform", "clustered", "corridor", "hub"],
-        ["--hop-spread"],
+        [],
     ),
     # All six routers as servers, against three of them, against three nodes beside them. Same
     # mesh, same traffic; only who is holding the archive changes.

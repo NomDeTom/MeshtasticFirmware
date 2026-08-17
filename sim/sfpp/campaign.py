@@ -368,6 +368,7 @@ class Campaign:
             mix=MIX,
             congestion_scaling=not opts.no_congestion_scaling,
             online_cap=opts.max_num_nodes,
+            broadcast_interval_s=opts.broadcast_interval_s,
             diurnal=opts.diurnal,
             start_hour=opts.start_hour,
             position_throttle=opts.position_throttle,
@@ -1487,6 +1488,12 @@ def build_parser():
         "--no-congestion-scaling",
         action="store_true",
         help="disable the firmware's node-count broadcast scaling (Default.h congestionScalingCoefficient)",
+    )
+    ap.add_argument(
+        "--broadcast-interval-s",
+        type=float,
+        default=None,
+        help="one interval for every device class; 3600 is the firmware client default",
     )
     ap.add_argument(
         "--max-num-nodes",
