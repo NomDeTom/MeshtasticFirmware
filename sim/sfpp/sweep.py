@@ -171,6 +171,40 @@ BLOCKS = {
     # A hop between two favourited routers is free in 2.8. On a mesh whose diameter already
     # exceeds the hop limit, that is the difference between reaching the far end and not.
     "R-favourites": ("favourite-routers", [False, True], ["--router-fraction", "0.15"]),
+    # The hot store is per-board and small, and everything routing knows is bounded by it. Run with
+    # its consumers engaged - hop preservation and a rebroadcast mode that consults the NodeDB -
+    # because with rebroadcast ALL and no favourites nothing reads the store and every mix ties.
+    "R-platform": (
+        "platform-mix",
+        ["uniform", "baymesh-2026-08", "constrained"],
+        ["--favourite-routers", "--router-fraction", "0.2"],
+    ),
+    # The same question as one number rather than a board mix, so the trend is readable: 10 is an
+    # STM32WL, 120 the nRF52840 default, 250 a 16 MB S3. A 60-node mesh does not fit in the first.
+    "R-hotstore": (
+        "max-num-nodes",
+        [10, 100, 120, 250],
+        ["--favourite-routers", "--router-fraction", "0.2"],
+    ),
+    # Role shares as measured against the shares the simulator assumed. The old default was 10%
+    # ROUTER and nothing else; the census is 4% ROUTER, 3% ROUTER_LATE, 16% CLIENT_BASE and 18%
+    # CLIENT_MUTE. Run with and without favourites, because that assumption decides the sign.
+    "R-roles": (
+        "role-mix",
+        ["legacy-default", "baymesh-2026-08"],
+        [],
+    ),
+    "R-roles-fav": (
+        "role-mix",
+        ["legacy-default", "baymesh-2026-08"],
+        ["--favourite-routers"],
+    ),
+    # What a restrictive rebroadcast mode costs when the store is too small to remember who is who.
+    "R-rebroadcast": (
+        "rebroadcast-mode",
+        ["ALL", "KNOWN_ONLY", "CORE_PORTNUMS_ONLY"],
+        ["--platform-mix", "baymesh-2026-08"],
+    ),
 }
 
 

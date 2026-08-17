@@ -13,10 +13,27 @@ import unittest
 from . import mesh as M
 
 
-def small_mesh(profile="2.8", nodes=12, seed=11, **kwargs):
+def small_mesh(profile="2.8", nodes=12, seed=11, area=None, **kwargs):
     rng = random.Random(seed)
     conf = M.make_config()
-    return M.build(conf, nodes, 4000.0, rng, hop_limit=3, profile=profile, **kwargs)
+    # Keep density roughly constant as the node count grows, or placement cannot converge.
+    area = area if area is not None else max(4000.0, 400.0 * nodes**0.5 * 2)
+    return M.build(conf, nodes, area, rng, hop_limit=3, profile=profile, **kwargs)
+
+
+def heard(mesh, rx, peer, hops_away=0, at=None):
+    """Put `peer` in `rx`'s hot store, as receiving a packet from it would.
+
+    Routing can only see what the store holds, so a test that skips this is testing a node that has
+    never heard of anyone - which is a real state, but rarely the one under test.
+    """
+    if at is None:
+        return mesh.note_heard(rx, peer, hops_away=hops_away)
+    was, mesh.now = mesh.now, at
+    try:
+        return mesh.note_heard(rx, peer, hops_away=hops_away)
+    finally:
+        mesh.now = was
 
 
 class ArduinoMap(unittest.TestCase):
@@ -60,7 +77,7 @@ class ContentionWindow(unittest.TestCase):
         mesh = small_mesh()
         slot = mesh.slot_time_ms()
         mesh.nodes[0].role = M.ROUTER
-        cw = mesh.cw_size(0.0)
+        cw = mesh.cw_size(0, 0.0)
         for _ in range(50):
             delay = mesh.tx_delay_weighted(0, 0.0)
             self.assertLess(delay, 2 * cw * slot)
@@ -85,9 +102,9 @@ class ContentionWindow(unittest.TestCase):
         """getTxDelayMsecWeightedWorst: (2 * CWmax + 2^CWsize) * slot."""
         mesh = small_mesh()
         slot = mesh.slot_time_ms()
-        cw = mesh.cw_size(-2.0)
+        cw = mesh.cw_size(0, -2.0)
         self.assertAlmostEqual(
-            mesh.tx_delay_weighted_worst(-2.0), (2 * M.CW_MAX + 2**cw) * slot
+            mesh.tx_delay_weighted_worst(0, -2.0), (2 * M.CW_MAX + 2**cw) * slot
         )
 
     def test_retransmission_timer_matches_the_formula(self):
@@ -344,7 +361,7 @@ class LateWindow(unittest.TestCase):
         self.assertEqual(len(mesh.nodes[0].queue), 1)
         entry = mesh.nodes[0].queue[0]
         self.assertAlmostEqual(
-            entry.tx_after, mesh.now + mesh.tx_delay_weighted_worst(5.0)
+            entry.tx_after, mesh.now + mesh.tx_delay_weighted_worst(0, 5.0)
         )
         self.assertEqual(mesh.stats["late_window_clamps"], 1)
 
@@ -357,6 +374,7 @@ class HopLimit(unittest.TestCase):
         mesh.nodes[0].role = M.ROUTER
         mesh.nodes[1].role = M.ROUTER
         mesh.nodes[0].favourites = {1}
+        heard(mesh, 0, 1)  # hop preservation can only see peers in the hot store
         packet = M.Packet(1, 5, 70, 40, hop_limit=2)
         packet.hop_start = 3  # one hop taken already
         packet.relay_node = mesh.nodes[1].relay_byte
@@ -383,16 +401,20 @@ class HopLimit(unittest.TestCase):
         self.assertTrue(mesh.should_decrement_hop_limit(0, packet))
 
     def test_ambiguous_relay_byte_pays(self):
-        """Two nodes sharing a last byte means the safe branch: decrement."""
+        """Two known nodes sharing a last byte means the safe branch: decrement."""
         mesh, packet = self._favourite_pair()
-        byte = mesh.nodes[1].relay_byte
-        mesh._by_relay_byte[byte] = [1, 2]
+        mesh.nodes[2].node_num = (mesh.nodes[2].node_num & ~0xFF) | mesh.nodes[
+            1
+        ].relay_byte
+        mesh.nodes[2].role = M.ROUTER  # relevant, so it counts as a rival candidate
+        heard(mesh, 0, 2)
         self.assertTrue(mesh.should_decrement_hop_limit(0, packet))
 
     def test_legacy_profile_always_pays(self):
         mesh = small_mesh(profile="legacy")
         mesh.nodes[0].role = M.ROUTER
         mesh.nodes[0].favourites = {1}
+        heard(mesh, 0, 1)
         packet = M.Packet(1, 5, 70, 40, hop_limit=2)
         packet.hop_start = 3
         packet.relay_node = mesh.nodes[1].relay_byte
@@ -453,7 +475,7 @@ class RebroadcastMode(unittest.TestCase):
         mesh = small_mesh()
         mesh.nodes[0].rebroadcast_mode = M.REBROADCAST_KNOWN_ONLY
         self.assertFalse(mesh.is_rebroadcaster(0, M.Packet(1, 5, 70, 40)))
-        mesh.nodes[0].known_origins.add(5)
+        heard(mesh, 0, 5)
         self.assertTrue(mesh.is_rebroadcaster(0, M.Packet(1, 5, 70, 40)))
 
 
@@ -462,26 +484,74 @@ class LastByteResolution(unittest.TestCase):
 
     def test_unique_byte_resolves(self):
         mesh = small_mesh()
-        target = next(
-            i
-            for i in range(len(mesh.nodes))
-            if len(mesh._by_relay_byte[mesh.nodes[i].relay_byte]) == 1
-        )
-        self.assertEqual(
-            mesh.resolve_unique_last_byte(0, mesh.nodes[target].relay_byte), target
-        )
+        heard(mesh, 0, 3)
+        self.assertEqual(mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte), 3)
 
     def test_shared_byte_is_ambiguous(self):
         mesh = small_mesh()
-        byte = mesh.nodes[3].relay_byte
-        mesh._by_relay_byte[byte] = [3, 4]
-        self.assertIsNone(mesh.resolve_unique_last_byte(0, byte))
+        mesh.nodes[4].node_num = (mesh.nodes[4].node_num & ~0xFF) | mesh.nodes[
+            3
+        ].relay_byte
+        heard(mesh, 0, 3)
+        heard(mesh, 0, 4)
+        self.assertIsNone(mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte))
 
-    def test_unknown_byte_resolves_to_nothing(self):
+    def test_a_byte_we_have_not_heard_resolves_to_nothing(self):
+        """The candidate gate is the hot store, so an unheard peer is not a candidate."""
         mesh = small_mesh()
-        used = {n.relay_byte for n in mesh.nodes}
-        spare = next(b for b in range(1, 256) if b not in used)
-        self.assertIsNone(mesh.resolve_unique_last_byte(0, spare))
+        self.assertIsNone(mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte))
+
+    def test_evicting_a_peer_forgets_how_to_resolve_it(self):
+        mesh = small_mesh()
+        heard(mesh, 0, 3)
+        self.assertEqual(mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte), 3)
+        del mesh.nodes[0].nodedb[3]
+        self.assertIsNone(mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte))
+
+    def test_a_collision_outside_the_store_is_not_a_collision(self):
+        """The reason a small store makes resolution *better*, stated as a test.
+
+        Two nodes share a byte, but only one is in our store. A model that resolved against the
+        whole mesh would call this ambiguous and fall back to flooding; the firmware resolves it.
+        """
+        mesh = small_mesh()
+        mesh.nodes[4].node_num = (mesh.nodes[4].node_num & ~0xFF) | mesh.nodes[
+            3
+        ].relay_byte
+        heard(mesh, 0, 3)
+        self.assertEqual(mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte), 3)
+
+    def test_the_send_path_needs_a_fresh_direct_neighbour(self):
+        """requireDirectNeighbor: hops_away 0 and heard inside NEXTHOP_NEIGHBOR_FRESH_SECS."""
+        mesh = small_mesh()
+        mesh.now = 0.0
+        heard(mesh, 0, 3, hops_away=1)
+        byte = mesh.nodes[3].relay_byte
+        self.assertIsNone(
+            mesh.resolve_unique_last_byte(0, byte, require_direct_neighbour=True)
+        )
+        heard(mesh, 0, 3, hops_away=0)
+        self.assertEqual(
+            mesh.resolve_unique_last_byte(0, byte, require_direct_neighbour=True), 3
+        )
+        mesh.now = M.NEXTHOP_NEIGHBOR_FRESH_MSEC + 1
+        self.assertIsNone(
+            mesh.resolve_unique_last_byte(0, byte, require_direct_neighbour=True),
+            "a neighbour not heard for two hours is not a usable next hop",
+        )
+
+    def test_the_relay_path_accepts_a_router_that_is_not_a_neighbour(self):
+        """Without requireDirectNeighbor the gate widens to favourites and router-like nodes."""
+        mesh = small_mesh()
+        mesh.nodes[3].role = M.ROUTER
+        heard(mesh, 0, 3, hops_away=2)
+        self.assertEqual(mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte), 3)
+
+    def test_a_distant_client_is_not_a_relevant_candidate(self):
+        mesh = small_mesh()
+        mesh.nodes[3].role = M.CLIENT
+        heard(mesh, 0, 3, hops_away=2)
+        self.assertIsNone(mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte))
 
     def test_zero_is_no_preference_not_a_node(self):
         mesh = small_mesh()
@@ -495,7 +565,9 @@ class NextHop(unittest.TestCase):
         mesh = small_mesh()
         peer = mesh.neighbours[0][0]
         dest = 7 if 7 not in (0, peer) else 8
-        mesh.nodes[0].routes[dest] = mesh.nodes[peer].relay_byte
+        heard(mesh, 0, peer)
+        heard(mesh, 0, dest, hops_away=2)
+        mesh.nodes[0].nodedb[dest].next_hop = mesh.nodes[peer].relay_byte
         mesh.note_route_learned(0, dest, mesh.nodes[peer].relay_byte)
         return mesh, dest, peer
 
@@ -515,19 +587,21 @@ class NextHop(unittest.TestCase):
         mesh, dest, _ = self._routed()
         mesh.now = M.ROUTE_TTL_MSEC + 1
         self.assertIsNone(mesh.get_next_hop(0, dest, 0))
-        self.assertNotIn(dest, mesh.nodes[0].routes)
-        self.assertEqual(mesh.stats["route_health_expiries"], 1)
+        self.assertEqual(mesh.nodes[0].nodedb[dest].next_hop, M.NO_NEXT_HOP_PREFERENCE)
+        self.assertEqual(mesh.stats["route_expired_ttl"], 1)
+        self.assertEqual(mesh.stats["route_expired_failures"], 0)
 
     def test_three_failures_kill_the_route(self):
         mesh, dest, _ = self._routed()
         for _ in range(M.ROUTE_FAILURE_THRESHOLD):
             mesh.note_route_failure(0, dest)
         self.assertIsNone(mesh.get_next_hop(0, dest, 0))
-        self.assertNotIn(dest, mesh.nodes[0].routes)
+        self.assertEqual(mesh.nodes[0].nodedb[dest].next_hop, M.NO_NEXT_HOP_PREFERENCE)
 
     def test_legacy_profile_has_no_unicast_routing(self):
         mesh = small_mesh(profile="legacy")
-        mesh.nodes[0].routes[7] = mesh.nodes[1].relay_byte
+        heard(mesh, 0, 7)
+        mesh.nodes[0].nodedb[7].next_hop = mesh.nodes[1].relay_byte
         self.assertIsNone(mesh.get_next_hop(0, 7, 0))
 
     def test_relay_gate_ignores_a_packet_addressed_to_another_hop(self):
@@ -537,6 +611,245 @@ class NextHop(unittest.TestCase):
         used = {n.relay_byte for n in mesh.nodes}
         packet.next_hop = next(b for b in range(1, 256) if b not in used)
         self.assertFalse(mesh.perhaps_rebroadcast(0, packet))
+
+
+class HotStore(unittest.TestCase):
+    """NodeDB as a bounded store, and the four separate ways a learned next hop dies."""
+
+    def test_the_store_is_capped_and_drops_the_stalest(self):
+        mesh = small_mesh(nodes=12, max_num_nodes=4)
+        for peer in range(1, 6):
+            heard(mesh, 0, peer, at=float(peer))
+        store = mesh.nodes[0].nodedb
+        self.assertEqual(len(store), 4)
+        self.assertNotIn(1, store, "the least-recently-heard record goes first")
+        self.assertIn(5, store)
+
+    def test_a_favourite_outranks_recency(self):
+        """demoteOldestHotNodesToWarm: protection beats recency, always."""
+        mesh = small_mesh(nodes=12, max_num_nodes=3)
+        mesh.nodes[0].favourites = {1}
+        heard(mesh, 0, 1, at=1.0)  # oldest, but protected
+        for peer in (2, 3, 4):
+            heard(mesh, 0, peer, at=float(peer) * 10)
+        self.assertIn(1, mesh.nodes[0].nodedb)
+
+    def test_eviction_forgets_the_route_with_no_expiry_involved(self):
+        """The quietest of the four deaths: no TTL, no failure, no fallback - just gone."""
+        mesh = small_mesh(nodes=12, max_num_nodes=3)
+        heard(mesh, 0, 1, at=1.0)
+        heard(mesh, 0, 9, at=2.0)
+        mesh.nodes[0].nodedb[9].next_hop = mesh.nodes[1].relay_byte
+        mesh.note_route_learned(0, 9, mesh.nodes[1].relay_byte)
+        for peer in (2, 3, 4):
+            heard(mesh, 0, peer, at=float(peer) * 10)
+        self.assertNotIn(9, mesh.nodes[0].nodedb)
+        self.assertEqual(mesh.stats["routes_lost_to_eviction"], 1)
+        self.assertIsNone(mesh.get_next_hop(0, 9, 0))
+        self.assertEqual(mesh.stats["route_expired_ttl"], 0)
+        self.assertEqual(mesh.stats["route_expired_failures"], 0)
+
+    def test_the_two_health_expiries_are_told_apart(self):
+        mesh = small_mesh()
+        peer = mesh.neighbours[0][0]
+        dest = next(i for i in range(len(mesh.nodes)) if i not in (0, peer))
+        heard(mesh, 0, peer)
+        heard(mesh, 0, dest, hops_away=2)
+        mesh.nodes[0].nodedb[dest].next_hop = mesh.nodes[peer].relay_byte
+        mesh.note_route_learned(0, dest, mesh.nodes[peer].relay_byte)
+        for _ in range(M.ROUTE_FAILURE_THRESHOLD):
+            mesh.note_route_failure(0, dest)
+        self.assertIsNone(mesh.get_next_hop(0, dest, 0))
+        self.assertEqual(mesh.stats["route_expired_failures"], 1)
+        self.assertEqual(mesh.stats["route_expired_ttl"], 0)
+
+    def test_a_fresh_route_dies_when_its_neighbour_goes_quiet(self):
+        """The fourth death, and the one with the longest clock: resolution freshness.
+
+        The route is inside its 30-minute TTL and has never failed, but the neighbour it points at
+        has not been heard for two hours, so the byte no longer resolves on the send path.
+        """
+        mesh = small_mesh()
+        peer = mesh.neighbours[0][0]
+        dest = next(i for i in range(len(mesh.nodes)) if i not in (0, peer))
+        mesh.now = 0.0
+        heard(mesh, 0, peer, hops_away=0)
+        heard(mesh, 0, dest, hops_away=2)
+        mesh.nodes[0].nodedb[dest].next_hop = mesh.nodes[peer].relay_byte
+        mesh.note_route_learned(0, dest, mesh.nodes[peer].relay_byte)
+
+        mesh.now = M.ROUTE_TTL_MSEC - 1  # still inside the route's own TTL
+        self.assertIsNotNone(mesh.get_next_hop(0, dest, 0))
+
+        # Re-learn so the TTL cannot be what expires, then let the neighbour go quiet.
+        mesh.now = M.NEXTHOP_NEIGHBOR_FRESH_MSEC + 1
+        mesh.note_route_learned(0, dest, mesh.nodes[peer].relay_byte)
+        self.assertIsNone(mesh.get_next_hop(0, dest, 0))
+        self.assertEqual(
+            mesh.stats["route_expired_ttl"], 0, "not an expiry - a resolution failure"
+        )
+
+    def test_packet_history_is_a_ring(self):
+        """PACKETHISTORY_MAX: twice the hot store, floored at 100, oldest evicted."""
+        mesh = small_mesh(nodes=6, max_num_nodes=10)
+        node = mesh.nodes[0]
+        self.assertEqual(node.history_max, 100)
+        for packet_id in range(node.history_max + 5):
+            node.remember(packet_id, M.SeenRecord(1, 3, 0, float(packet_id)))
+        self.assertEqual(len(node.history), node.history_max)
+        self.assertNotIn(0, node.history)
+        self.assertNotIn(0, node.seen, "seen is the same ring, not a second one")
+        self.assertIn(node.history_max + 4, node.history)
+
+    def test_a_forgotten_packet_can_be_relayed_again(self):
+        """The consequence of the ring: eviction restores a node's willingness to relay."""
+        mesh = small_mesh(nodes=6, max_num_nodes=10)
+        node = mesh.nodes[0]
+        packet = M.Packet(1, 5, 70, 40, hop_limit=3)
+        packet.hop_start = (
+            4  # one hop already taken, so this is not an originator retry
+        )
+        mesh._receive(0, packet, -100.0)
+        self.assertEqual(len(node.queue), 1)
+        node.queue.clear()
+        mesh._receive(0, packet, -100.0)
+        self.assertEqual(len(node.queue), 0, "still remembered, so still suppressed")
+
+        for packet_id in range(2, node.history_max + 3):
+            node.remember(packet_id, M.SeenRecord(1, 3, 0, float(packet_id) * 1000))
+        self.assertNotIn(1, node.history)
+        mesh._receive(0, packet, -100.0)
+        self.assertEqual(len(node.queue), 1, "forgotten, so relayed as if new")
+
+
+class Platforms(unittest.TestCase):
+    def test_store_sizes_match_mesh_pb_constants(self):
+        self.assertEqual(M.PLATFORM_HOT_STORE["stm32wl"], 10)
+        self.assertEqual(M.PLATFORM_HOT_STORE["nrf52840"], 120)
+        self.assertEqual(M.PLATFORM_HOT_STORE["esp32s3_16mb"], 250)
+
+    def test_a_uniform_mesh_is_all_one_board(self):
+        mesh = small_mesh(nodes=20, platform_mix="uniform")
+        self.assertEqual({n.platform for n in mesh.nodes}, {"nrf52840"})
+        self.assertEqual({n.max_num_nodes for n in mesh.nodes}, {120})
+
+    def test_a_mixed_mesh_has_nodes_with_different_stores(self):
+        mesh = small_mesh(nodes=60, platform_mix="baymesh-2026-08", seed=4)
+        sizes = {n.max_num_nodes for n in mesh.nodes}
+        self.assertGreater(len(sizes), 1, "the point of a mix is that nodes differ")
+        for node in mesh.nodes:
+            self.assertEqual(node.max_num_nodes, M.PLATFORM_HOT_STORE[node.platform])
+            self.assertEqual(node.history_max, M.packet_history_max(node.max_num_nodes))
+
+    def test_a_single_board_can_be_named_directly(self):
+        mesh = small_mesh(nodes=12, platform_mix="stm32wl")
+        self.assertEqual({n.max_num_nodes for n in mesh.nodes}, {10})
+        self.assertEqual({n.history_max for n in mesh.nodes}, {100})
+
+    def test_an_unknown_mix_is_refused(self):
+        with self.assertRaises(ValueError):
+            small_mesh(nodes=6, platform_mix="pentium")
+
+    def test_the_board_table_is_derived_from_this_tree(self):
+        """Spot-checks against variants/*/platformio.ini, which is where these numbers come from.
+
+        Heltec V3 is the one worth pinning: it is an 8 MB ESP32-S3, so it gets 200 slots, not the
+        120 that an "nRF52840-ish default" assumption hands it.
+        """
+        self.assertEqual(M.HARDWARE_STORE["HELTEC_V3"], 200)
+        self.assertEqual(M.HARDWARE_STORE["HELTEC_V4"], 250)
+        self.assertEqual(M.HARDWARE_STORE["RAK4631"], 120)
+        self.assertEqual(M.HARDWARE_STORE["STATION_G2"], 250)
+        self.assertEqual(M.HARDWARE_STORE["T_DECK"], 250)
+        self.assertEqual(M.HARDWARE_STORE["TRACKER_T1000_E"], 120)
+        self.assertEqual(M.HARDWARE_STORE["TLORA_T3_S3"], 100)
+
+    def test_a_census_converts_to_a_mix(self):
+        mix = M.census_to_mix({"RAK4631": 421, "HELTEC_V3": 233, "T_DECK": 32})
+        self.assertAlmostEqual(sum(mix.values()), 1.0)
+        self.assertAlmostEqual(mix["nrf52840"], 421 / 686, places=3)
+        self.assertAlmostEqual(mix["esp32s3_8mb"], 233 / 686, places=3)
+
+    def test_a_census_normalises_names(self):
+        self.assertEqual(
+            M.census_to_mix({"heltec-v3": 1}), M.census_to_mix({"HELTEC_V3": 1})
+        )
+
+    def test_an_unknown_model_is_not_silently_bucketed(self):
+        """A census that is 30% 'unrecognised' must not quietly become a census of the default."""
+        with self.assertRaises(ValueError):
+            M.census_to_mix({"RAK4631": 10, "TOTALLY_MADE_UP": 5})
+
+    def test_an_empty_census_is_refused(self):
+        with self.assertRaises(ValueError):
+            M.census_to_mix({"RAK4631": 0})
+
+    def test_the_measured_mix_matches_the_census_it_came_from(self):
+        """The published mix must be reproducible from the raw counts, not hand-tuned afterwards."""
+        census = {
+            "RAK4631": 421,
+            "HELTEC_V3": 233,
+            "HELTEC_V4": 180,
+            "TRACKER_T1000_E": 135,
+            "SEEED_SOLAR_NODE": 98,
+            "STATION_G2": 84,
+            "SEEED_WIO_TRACKER_L1": 77,
+            "HELTEC_MESH_NODE_T114": 62,
+            "T_DECK": 32,
+            "T_ECHO": 28,
+            "HELTEC_MESH_POCKET": 28,
+            "RAK3401": 27,
+            "WISMESH_TAG": 27,
+            "LILYGO_TBEAM_S3_CORE": 26,
+            "XIAO_NRF52_KIT": 23,
+            "TBEAM": 22,
+            "SEEED_XIAO_S3": 19,
+            "HELTEC_WIRELESS_TRACKER": 17,
+        }
+        derived = M.census_to_mix(census)
+        published = M.PLATFORM_MIXES["baymesh-2026-08"]
+        self.assertEqual(set(derived), set(published))
+        for platform, share in published.items():
+            self.assertAlmostEqual(derived[platform], share, places=2)
+
+
+class RoleCensus(unittest.TestCase):
+    """Role shares from the same 1769-node census."""
+
+    def test_the_measured_shares_are_what_gets_assigned(self):
+        mesh = small_mesh(nodes=200, seed=5, role_mix="baymesh-2026-08")
+        counts = {}
+        for node in mesh.nodes:
+            counts[node.role] = counts.get(node.role, 0) + 1
+        self.assertEqual(counts[M.ROUTER], 8)  # 4% of 200
+        self.assertEqual(counts[M.ROUTER_LATE], 6)  # 3%
+        self.assertEqual(counts[M.CLIENT_BASE], 32)  # 16%
+        self.assertEqual(counts[M.CLIENT_MUTE], 36)  # 18%
+
+    def test_the_census_has_far_fewer_routers_than_the_old_default(self):
+        """4% measured against the 10% the simulator assumed."""
+        self.assertLess(M.ROLE_MIXES["baymesh-2026-08"][M.ROUTER], 0.05)
+        self.assertEqual(M.ROLE_MIXES["legacy-default"][M.ROUTER], 0.10)
+
+    def test_muted_nodes_never_relay(self):
+        """18% of the real mesh, and none of it was modelled before the census."""
+        mesh = small_mesh(nodes=60, seed=5, role_mix="baymesh-2026-08")
+        muted = [n.index for n in mesh.nodes if n.role == M.CLIENT_MUTE]
+        self.assertTrue(muted)
+        for index in muted:
+            self.assertFalse(mesh.is_rebroadcaster(index))
+
+    def test_router_like_roles_go_to_the_best_sited_nodes(self):
+        mesh = small_mesh(nodes=100, seed=5, role_mix="baymesh-2026-08")
+        degrees = [len(mesh.neighbours[i]) for i in range(100)]
+        router_like = [i for i in range(100) if mesh.nodes[i].is_router_like()]
+        others = [i for i in range(100) if not mesh.nodes[i].is_router_like()]
+        best_other = max(degrees[i] for i in others)
+        self.assertTrue(all(degrees[i] >= best_other for i in router_like))
+
+    def test_a_role_mix_can_be_passed_directly(self):
+        mesh = small_mesh(nodes=100, seed=5, role_mix={M.ROUTER: 0.5, M.CLIENT: 0.5})
+        self.assertEqual(sum(1 for n in mesh.nodes if n.role == M.ROUTER), 50)
 
 
 class Reliable(unittest.TestCase):
@@ -571,13 +884,15 @@ class Reliable(unittest.TestCase):
         mesh = small_mesh()
         peer = mesh.neighbours[0][0]
         dest = next(i for i in range(len(mesh.nodes)) if i not in (0, peer))
-        mesh.nodes[0].routes[dest] = mesh.nodes[peer].relay_byte
+        heard(mesh, 0, peer)
+        heard(mesh, 0, dest, hops_away=2)
+        mesh.nodes[0].nodedb[dest].next_hop = mesh.nodes[peer].relay_byte
         mesh.note_route_learned(0, dest, mesh.nodes[peer].relay_byte)
         mesh.neighbours[0] = []  # the route is dead; nothing comes back
         mesh.originate(0, 70, 40, destination=dest, want_ack=True)
         mesh.run(1800000.0)
         self.assertGreater(mesh.stats["next_hop_fallbacks"], 0)
-        self.assertNotIn(dest, mesh.nodes[0].routes)
+        self.assertEqual(mesh.nodes[0].nodedb[dest].next_hop, M.NO_NEXT_HOP_PREFERENCE)
 
 
 class Opaque(unittest.TestCase):
