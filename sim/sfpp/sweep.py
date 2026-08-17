@@ -34,8 +34,10 @@ BASE = [
     "3",
     "--capacity",
     "32",
+    # Bucket-close, on the D-cadence evidence: it holds more than a five-minute interval for a
+    # fourteenth of the airtime, so every later block measures the design as it should be run.
     "--trigger",
-    "bucket+interval",
+    "bucket",
     "--resolve",
     "hybrid",
 ]
@@ -49,11 +51,21 @@ BLOCKS = {
     "F-loss": ("extra-loss", [0.0, 0.1, 0.2, 0.3], []),
     "G-place": (
         "place",
-        ["spread", "routers", "alternate-routers", "beside-router", "hops-apart"],
+        [
+            "spread",
+            "routers",
+            "alternate-routers",
+            "beside-router",
+            "random-clients",
+            "hops-apart",
+        ],
         [],
     ),
     "G-hops": ("hops-apart", [1, 2, 3, 4], ["--place", "hops-apart"]),
     "G-servers": ("servers", [2, 3, 5, 8], []),
+    # All six routers as servers, against three of them, against three nodes beside them. Same
+    # mesh, same traffic; only who is holding the archive changes.
+    "G-allrouters": ("servers", [3, 6], ["--place", "routers"]),
 }
 
 

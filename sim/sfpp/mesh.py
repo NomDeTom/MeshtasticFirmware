@@ -508,7 +508,14 @@ class Mesh:
 
 
 def build(
-    conf, node_count, area, rng, hop_limit=3, min_dist=300.0, router_fraction=0.0
+    conf,
+    node_count,
+    area,
+    rng,
+    hop_limit=3,
+    min_dist=300.0,
+    router_fraction=0.0,
+    extra_loss=0.0,
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 

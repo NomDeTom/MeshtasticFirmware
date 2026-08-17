@@ -128,6 +128,12 @@ class Placement:
         return out[:count] if count else out
 
     @staticmethod
+    def random_clients(mesh, count, rng, hops=None):
+        """Ordinary nodes, chosen at random - the control for every deliberate arrangement."""
+        clients = [i for i, node in enumerate(mesh.nodes) if node.role != M.ROUTER]
+        return rng.sample(clients, min(count, len(clients)))
+
+    @staticmethod
     def hops_apart(mesh, count, rng, hops=3):
         """Servers whose pairwise separation is as close to `hops` as the graph allows."""
         n = len(mesh.nodes)
@@ -155,6 +161,7 @@ class Placement:
         "routers": routers.__func__,
         "alternate-routers": alternate_routers.__func__,
         "beside-router": beside_router.__func__,
+        "random-clients": random_clients.__func__,
         "hops-apart": hops_apart.__func__,
     }
 
