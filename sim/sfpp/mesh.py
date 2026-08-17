@@ -101,22 +101,194 @@ PLATFORM_HOT_STORE = {
 }
 MAX_NUM_NODES = PLATFORM_HOT_STORE["nrf52840"]
 
-# Rough field mixes. `uniform` is every node on the default cap - not realistic, but it is what the
-# transport did before platforms existed, so it keeps an old comparison honest. `realistic` is a
-# guess at a deployed regional mesh and is labelled as one: nobody has census data for this, and a
-# result that turns on the exact proportions should say which mix produced it.
+# Which board every declared hardware model actually is, as a hot-store size. Generated from this
+# tree's own variants - each variant's platformio.ini declares custom_meshtastic_hw_model_slug,
+# custom_meshtastic_architecture and custom_meshtastic_partition_scheme, and mesh-pb-constants.h
+# turns those into MAX_NUM_NODES. So this table is derived, not guessed, and regenerating it after a
+# firmware bump is a script rather than an argument.
+#
+# The one that matters: HELTEC_V3, the most widely deployed board there is, is an 8 MB ESP32-S3 and
+# therefore gets **200** slots, not the 120 an "nRF52840-ish default" assumption would give it.
+HARDWARE_STORE = {
+    # 100 slots
+    "CDEBYTE_EORA_S3": 100,
+    "MINI_EPAPER_S3": 100,
+    "THINKNODE_M2": 100,
+    "THINKNODE_M5": 100,
+    "TLORA_T3_S3": 100,
+    # 120 slots
+    "CANARYONE": 120,
+    "DIY_V1": 120,
+    "DR_DEV": 120,
+    "HELTEC_HT62": 120,
+    "HELTEC_MESH_NODE_T096": 120,
+    "HELTEC_MESH_NODE_T1": 120,
+    "HELTEC_MESH_NODE_T114": 120,
+    "HELTEC_MESH_POCKET": 120,
+    "HELTEC_MESH_SOLAR": 120,
+    "HELTEC_MESH_TOWER_V2": 120,
+    "HELTEC_V1": 120,
+    "HELTEC_V2_0": 120,
+    "HELTEC_V2_1": 120,
+    "HELTEC_WIRELESS_TRACKER_V2": 120,
+    "HYDRA": 120,
+    "M5STACK": 120,
+    "M5STACK_C6L": 120,
+    "MESH_TRACKER_X1": 120,
+    "MUZI_BASE": 120,
+    "MUZI_R1_NEO": 120,
+    "NANO_G1": 120,
+    "NANO_G1_EXPLORER": 120,
+    "NANO_G2_ULTRA": 120,
+    "NOMADSTAR_METEOR_PRO": 120,
+    "NRF52_PROMICRO_DIY": 120,
+    "NRF54L15_DK": 120,
+    "RADIOMASTER_900_BANDIT_NANO": 120,
+    "RAK11200": 120,
+    "RAK11310": 120,
+    "RAK3401": 120,
+    "RAK4631": 120,
+    "RP2040_LORA": 120,
+    "RPI_PICO": 120,
+    "SEEED_SOLAR_NODE": 120,
+    "SEEED_WIO_TRACKER_L1": 120,
+    "SEEED_WIO_TRACKER_L1_EINK": 120,
+    "STATION_G1": 120,
+    "TBEAM": 120,
+    "TBEAM_1_WATT": 120,
+    "TBEAM_BPF": 120,
+    "TBEAM_V0P7": 120,
+    "THINKNODE_M1": 120,
+    "THINKNODE_M3": 120,
+    "THINKNODE_M6": 120,
+    "THINKNODE_M8": 120,
+    "TLORA_C6": 120,
+    "TLORA_V1": 120,
+    "TLORA_V2": 120,
+    "TLORA_V2_1_1P6": 120,
+    "TLORA_V2_1_1P8": 120,
+    "TRACKER_T1000_E": 120,
+    "T_ECHO": 120,
+    "T_ECHO_LITE": 120,
+    "T_ECHO_PLUS": 120,
+    "T_IMPULSE_PLUS": 120,
+    "WIO_WM1110": 120,
+    "WISMESH_HUB": 120,
+    "WISMESH_TAG": 120,
+    "WISMESH_TAP": 120,
+    "XIAO_NRF52_KIT": 120,
+    # 200 slots
+    "HELTEC_V3": 200,
+    "HELTEC_VISION_MASTER_E213": 200,
+    "HELTEC_VISION_MASTER_E290": 200,
+    "HELTEC_VISION_MASTER_T190": 200,
+    "HELTEC_WIRELESS_PAPER": 200,
+    "HELTEC_WIRELESS_PAPER_V1_0": 200,
+    "HELTEC_WIRELESS_TRACKER": 200,
+    "HELTEC_WIRELESS_TRACKER_V1_0": 200,
+    "HELTEC_WSL_V3": 200,
+    "LILYGO_TBEAM_S3_CORE": 200,
+    "PICOMPUTER_S3": 200,
+    "SEEED_XIAO_S3": 200,
+    "SENSECAP_INDICATOR": 200,
+    "T_WATCH_S3": 200,
+    "UNPHONE": 200,
+    # 250 slots
+    "CROWPANEL": 250,
+    "HELTEC_V4": 250,
+    "HELTEC_V4_R8": 250,
+    "MESHNOLOGY_W10": 250,
+    "MESHNOLOGY_W12": 250,
+    "RAK3312": 250,
+    "STATION_G2": 250,
+    "STATION_G3": 250,
+    "T_DECK": 250,
+    "T_DECK_PRO": 250,
+    "T_LORA_PAGER": 250,
+    "WISMESH_TAP_V2": 250,
+}
+
+# No declared hardware model maps to the 10-slot STM32WL tier: the stm32 variants in this tree
+# (wio-e5, rak3172, nucleo_wl55jc and friends) do not declare a hw_model_slug, so they cannot be
+# named in a census by slug. The `constrained` mix below reaches that tier directly, and is a
+# stress test rather than a deployment.
+
+
+def census_to_mix(census):
+    """Turn a real hardware census into a platform mix the sim can draw from.
+
+    `census` maps hardware model slugs - the names the firmware puts on the wire, and the names a
+    network dashboard reports - to counts or shares. Unknown slugs raise rather than being silently
+    dropped into a default bucket, because a census that is 30% "unrecognised" quietly becomes a
+    census of whatever the default happens to be.
+
+    Returns weights over the platform names in PLATFORM_HOT_STORE, normalised to sum to one.
+    """
+    by_store = {}
+    total = 0.0
+    for model, count in census.items():
+        slug = model.upper().replace("-", "_").replace(" ", "_")
+        if slug not in HARDWARE_STORE:
+            raise ValueError(
+                f"unknown hardware model {model!r}; add it to HARDWARE_STORE or drop it from "
+                "the census deliberately"
+            )
+        store = HARDWARE_STORE[slug]
+        by_store[store] = by_store.get(store, 0.0) + float(count)
+        total += float(count)
+    if total <= 0:
+        raise ValueError("census has no nodes in it")
+
+    store_to_platform = {size: name for name, size in PLATFORM_HOT_STORE.items()}
+    return {
+        store_to_platform[store]: weight / total for store, weight in by_store.items()
+    }
+
+
+# Named mixes. `uniform` is every node on the 120-slot default - not a real deployment, but it is
+# what the transport did before boards existed, so it keeps an old comparison honest.
+#
+# `baymesh-2026-08` is a real census: 1769 nodes on the Bay Area mesh, exported from
+# meshview.bayme.sh/stats on 2026-08-17, run through census_to_mix(). 87% of it mapped to a board in
+# this tree; the 13% that did not is PORTDUINO (operator-set cap, no fixed tier), one unknown model
+# id, and the long tail reported only as "Other". The weights below are over the mapped share.
+#
+# It is one regional mesh at one moment, not the population of all meshes, and it should be cited
+# that way. What it is emphatically not is a guess - the guess this replaced had the 200-slot tier
+# leading on the reasoning that Heltec V3 is the most popular board. Both halves were wrong: RAK4631
+# leads at 24%, Heltec V3 is second at 13%, and RAK4631 is a 120.
 PLATFORM_MIXES = {
     "uniform": {"nrf52840": 1.0},
-    "realistic": {
-        "nrf52840": 0.45,
-        "esp32s3_4mb": 0.25,
-        "esp32s3_8mb": 0.15,
-        "esp32s3_16mb": 0.10,
-        "stm32wl": 0.05,
+    "baymesh-2026-08": {
+        "nrf52840": 0.616,  # RAK4631 24%, T1000-E 8%, WIO Tracker L1 4%, T114 4%, T-Echo 2%, ...
+        "esp32s3_8mb": 0.192,  # Heltec V3 13%, T-Beam S3 Core, XIAO S3, Wireless Tracker
+        "esp32s3_16mb": 0.192,  # Heltec V4 10%, Station G2 5%, T-Deck 2%
     },
-    # Every node on the smallest store there is. Not a deployment - a stress test for what routing
-    # does when almost nothing fits, which is the same regime a very large mesh puts a 120 in.
+    # Every node on the smallest store there is. **No node in the census is on this tier** - the
+    # STM32WL boards are a rounding error in the field - so this is a stress test rather than a
+    # deployment: what routing does when almost nothing fits, which is the regime a very large mesh
+    # eventually puts a 120 in anyway.
     "constrained": {"stm32wl": 1.0},
+}
+
+# Role shares from the same census (1769 nodes). This matters more to a flood than the board mix
+# does, and the simulator's old default - 10% ROUTER and nothing else - was wrong in both
+# directions at once: two and a half times too many routers, and **no CLIENT_MUTE at all** where
+# nearly a fifth of the real mesh never rebroadcasts. Overstating the number of nodes willing to
+# relay is exactly the error that flatters a flood.
+#
+# TRACKER, CLIENT_HIDDEN, TAK and SENSOR together are ~1% and fold into CLIENT: none of them changes
+# a rebroadcast decision in 2.8, which is all this model reads a role for.
+ROLE_MIXES = {
+    "baymesh-2026-08": {
+        CLIENT: 0.60,
+        CLIENT_MUTE: 0.18,
+        CLIENT_BASE: 0.16,
+        ROUTER: 0.04,
+        ROUTER_LATE: 0.03,
+    },
+    # The pre-census default, kept so earlier runs can be reproduced and compared against.
+    "legacy-default": {CLIENT: 0.90, ROUTER: 0.10},
 }
 
 
@@ -2127,6 +2299,7 @@ def build(
     legacy_fraction=0.0,
     router_late_fraction=0.0,
     client_base_fraction=0.0,
+    role_mix=None,
     favourite_routers=False,
     rebroadcast_mode=REBROADCAST_ALL,
     max_num_nodes=None,
@@ -2211,18 +2384,36 @@ def build(
         ]
 
     by_degree = sorted(range(node_count), key=lambda i: -len(mesh.neighbours[i]))
-    taken = 0
-    for fraction, role in (
-        (router_fraction, ROUTER),
-        (router_late_fraction, ROUTER_LATE),
-        (client_base_fraction, CLIENT_BASE),
-    ):
-        if fraction <= 0:
-            continue
-        want = max(1, int(round(node_count * fraction)))
-        for i in by_degree[taken : taken + want]:
-            nodes[i].role = role
-        taken += want
+    if role_mix:
+        shares = ROLE_MIXES[role_mix] if isinstance(role_mix, str) else role_mix
+        # Router-like roles go to the best-sited nodes, because that is what an operator does with
+        # a hilltop. CLIENT_MUTE is drawn at random from the rest: muting a node is a decision about
+        # power or noise, not about siting, and handing it to the worst-connected nodes would make
+        # it look free.
+        taken = 0
+        for role in (ROUTER, ROUTER_LATE, CLIENT_BASE):
+            want = int(round(node_count * shares.get(role, 0.0)))
+            for i in by_degree[taken : taken + want]:
+                nodes[i].role = role
+            taken += want
+        rest = by_degree[taken:]
+        rng.shuffle(rest)
+        muted = int(round(node_count * shares.get(CLIENT_MUTE, 0.0)))
+        for i in rest[:muted]:
+            nodes[i].role = CLIENT_MUTE
+    else:
+        taken = 0
+        for fraction, role in (
+            (router_fraction, ROUTER),
+            (router_late_fraction, ROUTER_LATE),
+            (client_base_fraction, CLIENT_BASE),
+        ):
+            if fraction <= 0:
+                continue
+            want = max(1, int(round(node_count * fraction)))
+            for i in by_degree[taken : taken + want]:
+                nodes[i].role = role
+            taken += want
 
     if favourite_routers:
         # Hop preservation only fires between nodes that have favourited each other, which in the
