@@ -360,6 +360,7 @@ class Campaign:
             hop_assign=opts.hop_assign,
             topology=opts.topology,
             profile=getattr(opts, "profile", "2.8"),
+            role_mix=getattr(opts, "role_mix", None) or None,
             router_late_fraction=getattr(opts, "router_late_fraction", 0.0),
             client_base_fraction=getattr(opts, "client_base_fraction", 0.0),
             favourite_routers=getattr(opts, "favourite_routers", False),
@@ -1572,6 +1573,14 @@ def build_parser():
         help="MAX_NUM_NODES. Bounds the congestion input as getNumOnlineMeshNodes does, and "
         "sizes every node's NodeDB and packet-history ring unless --platform-mix gives them "
         "boards of their own. 10 = STM32WL, 120 = nRF52840, 250 = 16MB ESP32-S3",
+    )
+    ap.add_argument(
+        "--role-mix",
+        default="",
+        choices=[""] + sorted(M.ROLE_MIXES),
+        help="assign roles from a measured census instead of --router-fraction. Empty keeps the "
+        "old behaviour; baymesh-2026-08 is 1769 real nodes (60%% CLIENT, 18%% CLIENT_MUTE, "
+        "16%% CLIENT_BASE, 4%% ROUTER, 3%% ROUTER_LATE)",
     )
     ap.add_argument(
         "--platform-mix",

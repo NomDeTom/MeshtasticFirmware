@@ -13,10 +13,12 @@ import unittest
 from . import mesh as M
 
 
-def small_mesh(profile="2.8", nodes=12, seed=11, **kwargs):
+def small_mesh(profile="2.8", nodes=12, seed=11, area=None, **kwargs):
     rng = random.Random(seed)
     conf = M.make_config()
-    return M.build(conf, nodes, 4000.0, rng, hop_limit=3, profile=profile, **kwargs)
+    # Keep density roughly constant as the node count grows, or placement cannot converge.
+    area = area if area is not None else max(4000.0, 400.0 * nodes**0.5 * 2)
+    return M.build(conf, nodes, area, rng, hop_limit=3, profile=profile, **kwargs)
 
 
 def heard(mesh, rx, peer, hops_away=0, at=None):
@@ -732,7 +734,7 @@ class Platforms(unittest.TestCase):
         self.assertEqual({n.max_num_nodes for n in mesh.nodes}, {120})
 
     def test_a_mixed_mesh_has_nodes_with_different_stores(self):
-        mesh = small_mesh(nodes=60, platform_mix="realistic", seed=4)
+        mesh = small_mesh(nodes=60, platform_mix="baymesh-2026-08", seed=4)
         sizes = {n.max_num_nodes for n in mesh.nodes}
         self.assertGreater(len(sizes), 1, "the point of a mix is that nodes differ")
         for node in mesh.nodes:
@@ -747,6 +749,107 @@ class Platforms(unittest.TestCase):
     def test_an_unknown_mix_is_refused(self):
         with self.assertRaises(ValueError):
             small_mesh(nodes=6, platform_mix="pentium")
+
+    def test_the_board_table_is_derived_from_this_tree(self):
+        """Spot-checks against variants/*/platformio.ini, which is where these numbers come from.
+
+        Heltec V3 is the one worth pinning: it is an 8 MB ESP32-S3, so it gets 200 slots, not the
+        120 that an "nRF52840-ish default" assumption hands it.
+        """
+        self.assertEqual(M.HARDWARE_STORE["HELTEC_V3"], 200)
+        self.assertEqual(M.HARDWARE_STORE["HELTEC_V4"], 250)
+        self.assertEqual(M.HARDWARE_STORE["RAK4631"], 120)
+        self.assertEqual(M.HARDWARE_STORE["STATION_G2"], 250)
+        self.assertEqual(M.HARDWARE_STORE["T_DECK"], 250)
+        self.assertEqual(M.HARDWARE_STORE["TRACKER_T1000_E"], 120)
+        self.assertEqual(M.HARDWARE_STORE["TLORA_T3_S3"], 100)
+
+    def test_a_census_converts_to_a_mix(self):
+        mix = M.census_to_mix({"RAK4631": 421, "HELTEC_V3": 233, "T_DECK": 32})
+        self.assertAlmostEqual(sum(mix.values()), 1.0)
+        self.assertAlmostEqual(mix["nrf52840"], 421 / 686, places=3)
+        self.assertAlmostEqual(mix["esp32s3_8mb"], 233 / 686, places=3)
+
+    def test_a_census_normalises_names(self):
+        self.assertEqual(
+            M.census_to_mix({"heltec-v3": 1}), M.census_to_mix({"HELTEC_V3": 1})
+        )
+
+    def test_an_unknown_model_is_not_silently_bucketed(self):
+        """A census that is 30% 'unrecognised' must not quietly become a census of the default."""
+        with self.assertRaises(ValueError):
+            M.census_to_mix({"RAK4631": 10, "TOTALLY_MADE_UP": 5})
+
+    def test_an_empty_census_is_refused(self):
+        with self.assertRaises(ValueError):
+            M.census_to_mix({"RAK4631": 0})
+
+    def test_the_measured_mix_matches_the_census_it_came_from(self):
+        """The published mix must be reproducible from the raw counts, not hand-tuned afterwards."""
+        census = {
+            "RAK4631": 421,
+            "HELTEC_V3": 233,
+            "HELTEC_V4": 180,
+            "TRACKER_T1000_E": 135,
+            "SEEED_SOLAR_NODE": 98,
+            "STATION_G2": 84,
+            "SEEED_WIO_TRACKER_L1": 77,
+            "HELTEC_MESH_NODE_T114": 62,
+            "T_DECK": 32,
+            "T_ECHO": 28,
+            "HELTEC_MESH_POCKET": 28,
+            "RAK3401": 27,
+            "WISMESH_TAG": 27,
+            "LILYGO_TBEAM_S3_CORE": 26,
+            "XIAO_NRF52_KIT": 23,
+            "TBEAM": 22,
+            "SEEED_XIAO_S3": 19,
+            "HELTEC_WIRELESS_TRACKER": 17,
+        }
+        derived = M.census_to_mix(census)
+        published = M.PLATFORM_MIXES["baymesh-2026-08"]
+        self.assertEqual(set(derived), set(published))
+        for platform, share in published.items():
+            self.assertAlmostEqual(derived[platform], share, places=2)
+
+
+class RoleCensus(unittest.TestCase):
+    """Role shares from the same 1769-node census."""
+
+    def test_the_measured_shares_are_what_gets_assigned(self):
+        mesh = small_mesh(nodes=200, seed=5, role_mix="baymesh-2026-08")
+        counts = {}
+        for node in mesh.nodes:
+            counts[node.role] = counts.get(node.role, 0) + 1
+        self.assertEqual(counts[M.ROUTER], 8)  # 4% of 200
+        self.assertEqual(counts[M.ROUTER_LATE], 6)  # 3%
+        self.assertEqual(counts[M.CLIENT_BASE], 32)  # 16%
+        self.assertEqual(counts[M.CLIENT_MUTE], 36)  # 18%
+
+    def test_the_census_has_far_fewer_routers_than_the_old_default(self):
+        """4% measured against the 10% the simulator assumed."""
+        self.assertLess(M.ROLE_MIXES["baymesh-2026-08"][M.ROUTER], 0.05)
+        self.assertEqual(M.ROLE_MIXES["legacy-default"][M.ROUTER], 0.10)
+
+    def test_muted_nodes_never_relay(self):
+        """18% of the real mesh, and none of it was modelled before the census."""
+        mesh = small_mesh(nodes=60, seed=5, role_mix="baymesh-2026-08")
+        muted = [n.index for n in mesh.nodes if n.role == M.CLIENT_MUTE]
+        self.assertTrue(muted)
+        for index in muted:
+            self.assertFalse(mesh.is_rebroadcaster(index))
+
+    def test_router_like_roles_go_to_the_best_sited_nodes(self):
+        mesh = small_mesh(nodes=100, seed=5, role_mix="baymesh-2026-08")
+        degrees = [len(mesh.neighbours[i]) for i in range(100)]
+        router_like = [i for i in range(100) if mesh.nodes[i].is_router_like()]
+        others = [i for i in range(100) if not mesh.nodes[i].is_router_like()]
+        best_other = max(degrees[i] for i in others)
+        self.assertTrue(all(degrees[i] >= best_other for i in router_like))
+
+    def test_a_role_mix_can_be_passed_directly(self):
+        mesh = small_mesh(nodes=100, seed=5, role_mix={M.ROUTER: 0.5, M.CLIENT: 0.5})
+        self.assertEqual(sum(1 for n in mesh.nodes if n.role == M.ROUTER), 50)
 
 
 class Reliable(unittest.TestCase):
