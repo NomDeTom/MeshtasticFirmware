@@ -1108,6 +1108,160 @@ class WarmTier(unittest.TestCase):
         self.assertFalse(M.Profile("2.7").warm_store)
 
 
+class PacketSigning(unittest.TestCase):
+    """Router.cpp: a 64-byte XEdDSA signature, the size gate, and the three receive policies."""
+
+    def test_the_size_gate_is_the_frame_budget(self):
+        """signedDataFits: payload + 66 + 16 <= 255, so 173 bytes is the last that signs."""
+        self.assertTrue(M.signed_data_fits(173))
+        self.assertFalse(M.signed_data_fits(174))
+
+    def test_a_broadcast_carries_the_signature_in_its_airtime(self):
+        mesh = small_mesh(nodes=6)
+        packet = mesh.originate(0, 1, 60)
+        self.assertTrue(packet.xeddsa_signed)
+        self.assertEqual(packet.length, 60 + M.XEDDSA_SIGNATURE_FIELD_BYTES)
+        self.assertEqual(mesh.stats["packets_signed"], 1)
+
+    def test_an_oversized_payload_goes_unsigned_rather_than_undelivered(self):
+        """The gate exists so a packet that would not fit signed is sent as it is."""
+        mesh = small_mesh(nodes=6)
+        packet = mesh.originate(0, 1, 200)
+        self.assertFalse(packet.xeddsa_signed)
+        self.assertEqual(packet.length, 200)
+        self.assertEqual(mesh.stats["packets_too_large_to_sign"], 1)
+
+    def test_a_dm_is_not_signed(self):
+        """Signing covers unencrypted broadcasts; a unicast only when the operator is licensed."""
+        mesh = small_mesh(nodes=6)
+        heard(mesh, 0, 1).has_key = True
+        packet = mesh.originate(0, 1, 40, destination=1, pki=True)
+        self.assertFalse(packet.xeddsa_signed)
+        self.assertTrue(packet.pki_encrypted)
+
+    def test_no_series_before_this_tree_signs(self):
+        for version in ("2.4", "2.5", "2.6", "2.7"):
+            mesh = small_mesh(nodes=6, profile=version)
+            packet = mesh.originate(0, 1, 60)
+            self.assertFalse(packet.xeddsa_signed, version)
+            self.assertEqual(packet.length, 60, version)
+
+    def _packet(self, mesh, signed=True, length=40, portnum=1):
+        packet = M.Packet(7, 3, portnum, length, hop_limit=3)
+        packet.xeddsa_signed = signed
+        return packet
+
+    def test_strict_drops_what_it_cannot_verify(self):
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_STRICT
+        signed = self._packet(mesh)
+        self.assertFalse(mesh._signature_policy_admits(0, signed))
+        self.assertEqual(mesh.stats["dropped_unverifiable"], 1)
+        heard(mesh, 0, 3).has_key = True
+        self.assertTrue(mesh._signature_policy_admits(0, signed))
+
+    def test_strict_drops_unsigned_traffic_outright(self):
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_STRICT
+        self.assertFalse(mesh._signature_policy_admits(0, self._packet(mesh, signed=False)))
+        self.assertEqual(mesh.stats["dropped_unsigned_strict"], 1)
+
+    def test_a_signed_nodeinfo_bootstraps_its_own_key(self):
+        """verifyFirstContactNodeInfo: the packet carries the key its node number is derived from."""
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_STRICT
+        info = self._packet(mesh, portnum=M.NODEINFO_PORTNUM)
+        self.assertTrue(mesh._signature_policy_admits(0, info))
+        self.assertTrue(mesh.nodes[0].nodedb[3].has_key)
+        self.assertEqual(mesh.stats["signature_bootstraps"], 1)
+
+    def test_balanced_drops_only_a_downgrade_from_a_known_signer(self):
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_BALANCED
+        plain = self._packet(mesh, signed=False)
+        self.assertTrue(mesh._signature_policy_admits(0, plain), "not a known signer yet")
+        record = heard(mesh, 0, 3)
+        record.has_key = True
+        self.assertTrue(mesh._signature_policy_admits(0, self._packet(mesh)))
+        self.assertTrue(record.xeddsa_signed, "verifying marks the sender as a signer")
+        self.assertFalse(mesh._signature_policy_admits(0, plain))
+        self.assertEqual(mesh.stats["dropped_downgrade"], 1)
+
+    def test_a_payload_too_big_to_sign_escapes_the_downgrade_rule(self):
+        """The gate an attacker inflates past, and the reason a growing signable type breaks."""
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_BALANCED
+        record = heard(mesh, 0, 3)
+        record.has_key = True
+        record.xeddsa_signed = True
+        self.assertFalse(mesh._signature_policy_admits(0, self._packet(mesh, signed=False)))
+        big = self._packet(mesh, signed=False, length=200)
+        self.assertTrue(mesh._signature_policy_admits(0, big))
+
+    def test_compatible_takes_everything(self):
+        mesh = small_mesh(nodes=6)
+        record = heard(mesh, 0, 3)
+        record.has_key = True
+        record.xeddsa_signed = True
+        self.assertTrue(mesh._signature_policy_admits(0, self._packet(mesh, signed=False)))
+        self.assertEqual(mesh.stats["dropped_downgrade"], 0)
+
+    def test_a_pki_dm_passes_every_policy_unread(self):
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_STRICT
+        packet = self._packet(mesh, signed=False)
+        packet.pki_encrypted = True
+        self.assertTrue(mesh._signature_policy_admits(0, packet))
+
+
+class AdaptiveCongestion(unittest.TestCase):
+    """Default::getConfiguredOrDefaultMsScaled - each node throttles on what it has heard."""
+
+    def test_the_coefficient_comes_from_this_node_s_own_store(self):
+        import random
+
+        from . import traffic as T
+
+        mesh = small_mesh(nodes=60, seed=2)
+        gen = T.Generator(mesh, random.Random(1), bytes(range(16)))
+        self.assertEqual(gen.node_congestion(0), 1.0, "a node that has heard nobody")
+        for peer in range(1, 60):
+            heard(mesh, 0, peer)
+        self.assertGreater(
+            gen.node_congestion(0),
+            1.0,
+            "having heard the mesh, the same node throttles",
+        )
+        self.assertEqual(gen.node_congestion(1), 1.0, "and node 1 has still heard nobody")
+
+    def test_the_two_hour_window_bounds_the_input(self):
+        import random
+
+        from . import traffic as T
+
+        mesh = small_mesh(nodes=60, seed=2)
+        gen = T.Generator(mesh, random.Random(1), bytes(range(16)))
+        for peer in range(1, 60):
+            heard(mesh, 0, peer)
+        self.assertGreater(gen.node_congestion(0), 1.0)
+        mesh.now = M.NUM_ONLINE_SECS * 1000.0 + 1
+        self.assertEqual(
+            gen.node_congestion(0), 1.0, "nothing heard inside the window is online"
+        )
+
+    def test_static_mode_keeps_one_coefficient_for_the_whole_mesh(self):
+        import random
+
+        from . import traffic as T
+
+        mesh = small_mesh(nodes=60, seed=2)
+        gen = T.Generator(
+            mesh, random.Random(1), bytes(range(16)), congestion_mode="static"
+        )
+        self.assertEqual(gen.node_congestion(0), gen.congestion)
+        self.assertGreater(gen.congestion, 1.0)
+
+
 class KeyEconomics(unittest.TestCase):
     """What eviction costs: not a worse route, but no conversation until NodeInfo is heard again."""
 

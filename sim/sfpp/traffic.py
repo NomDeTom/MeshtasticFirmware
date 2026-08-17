@@ -185,6 +185,7 @@ class Generator:
         mix=DEFAULT_MIX,
         text_scale=1.0,
         congestion_scaling=True,
+        congestion_mode="adaptive",
         position_throttle=1,
         telemetry_throttle=1,
         online_cap=120,
@@ -202,16 +203,37 @@ class Generator:
         # nothing in the firmware throttles a person deciding to send a message. Which era's
         # throttle applies comes from the mesh's own default profile, so a 2.5 mesh gets the
         # per-preset table and its small-mesh speedup rather than 2.8's SF/BW curve.
+        #
+        # `adaptive` recomputes the coefficient per node from that node's own online count at the
+        # moment it would send, which is what Default::getConfiguredOrDefaultMsScaled does on every
+        # interval. `static` computes one mesh-wide coefficient up front - what this generator used
+        # to do, and what earlier runs were measured under.
         profile = mesh.nodes[0].profile if mesh.nodes else None
+        self.congestion_mode = congestion_mode if congestion_scaling else "off"
+        self.congestion_model = (
+            profile.congestion_model if profile is not None else "sf_bw"
+        )
+        self.preset_name = getattr(mesh.conf, "MODEM_PRESET", "LONG_FAST")
+        self.sf = preset["sf"]
+        self.bw = preset["bw"]
+        self.online_cap = online_cap
+        # The coefficient falls below 1 on the 2.5 and 2.6 models, which speed a small mesh up.
+        # Thinning needs a candidate rate at least as high as anything later selected from it, so
+        # candidates are generated against the most permissive coefficient the model can produce.
+        self.congestion_floor = (
+            min(c for _, c in SMALL_MESH_SPEEDUP)
+            if self.congestion_model == "preset"
+            else 1.0
+        )
         self.congestion = (
             # getNumOnlineMeshNodes() iterates the hot store, so a node cannot count mesh members it
             # has evicted. The coefficient is bounded by MAX_NUM_NODES, not by mesh size.
             congestion_coefficient(
                 min(len(mesh.nodes), online_cap),
-                preset["sf"],
-                preset["bw"],
-                model=profile.congestion_model if profile is not None else "sf_bw",
-                preset=getattr(mesh.conf, "MODEM_PRESET", "LONG_FAST"),
+                self.sf,
+                self.bw,
+                model=self.congestion_model,
+                preset=self.preset_name,
             )
             if congestion_scaling
             else 1.0
@@ -247,6 +269,26 @@ class Generator:
             chosen = rng.sample(range(node_count), count)
             self.emitters[cls.name] = set(chosen)
 
+    def node_congestion(self, node_index):
+        """The coefficient this node would apply right now, from its own view of the mesh.
+
+        getNumOnlineMeshNodes() walks the hot store, so the input is bounded twice: by the store,
+        which cannot hold more than MAX_NUM_NODES, and by the two-hour NUM_ONLINE_SECS window. The
+        node counts itself, as the firmware does by iterating a table that contains its own record.
+        """
+        if self.congestion_mode != "adaptive":
+            return self.congestion
+        node = self.mesh.nodes[node_index]
+        online = min(node.num_online(self.mesh.now) + 1, self.online_cap)
+        return congestion_coefficient(
+            online,
+            self.sf,
+            self.bw,
+            model=node.profile.congestion_model,
+            preset=self.preset_name,
+            event_mode=node.profile.event_relay_hop_limit is not None,
+        )
+
     def _size(self, cls):
         return max(8, int(self.rng.gauss(cls.mean_bytes, cls.sigma_bytes)))
 
@@ -264,9 +306,19 @@ class Generator:
                     if self.broadcast_interval_s
                     else cls.per_hour
                 )
-                rate = base / self.congestion / self.throttle.get(cls.name, 1)
+                # Under `adaptive` the coefficient is not known until the moment of sending, so
+                # candidates are laid down at the most permissive rate the model allows and thinned
+                # at emit time against each node's own view. Under `static` the coefficient is a
+                # constant and divides the rate directly.
+                rate = base / self.throttle.get(cls.name, 1)
+                rate = (
+                    rate / self.congestion_floor
+                    if self.congestion_mode == "adaptive"
+                    else rate / self.congestion
+                )
             if rate <= 0:
                 continue
+            adaptive = self.congestion_mode == "adaptive" and not cls.archived
             diurnal = self.diurnal != "flat" and cls.name in self.diurnal_classes
             peak = (
                 max(DIURNAL[self.diurnal]) / (sum(DIURNAL[self.diurnal]) / 24.0)
@@ -280,21 +332,24 @@ class Generator:
             for node in self.emitters[cls.name]:
                 t = self.rng.expovariate(1.0 / mean_gap_ms)
                 while t < duration_ms:
-                    if not diurnal:
-                        self._schedule_one(node, cls, t)
-                    else:
+                    keep = True
+                    if diurnal:
                         hour = (self.start_hour + t / 3600_000.0) % 24
-                        if (
-                            self.rng.random()
-                            < diurnal_weight(self.diurnal, hour) / peak
-                        ):
-                            self._schedule_one(node, cls, t)
+                        keep = self.rng.random() < diurnal_weight(self.diurnal, hour) / peak
+                    if keep:
+                        self._schedule_one(node, cls, t, adaptive=adaptive)
                     t += self.rng.expovariate(1.0 / mean_gap_ms)
 
-    def _schedule_one(self, node, cls, when):
+    def _schedule_one(self, node, cls, when, adaptive=False):
         size = self._size(cls)
 
         def emit(node=node, cls=cls, size=size):
+            if adaptive:
+                # Thinning against the node's live coefficient: a candidate survives with
+                # probability floor/coefficient, so a node whose store says the mesh is large sends
+                # proportionally less often, and one on a small 2.5 mesh sends more often.
+                if self.rng.random() > self.congestion_floor / self.node_congestion(node):
+                    return
             if cls.archived:
                 packet = self.mesh.originate(
                     node, cls.portnum, size, kind=cls.name, payload=None
