@@ -161,6 +161,12 @@ BLOCKS = {
     # What the 2.8 fold-in is worth against the pre-fold-in transport: same seed, same mesh, same
     # traffic, only the MAC and routing rules change.
     "R-firmware": ("profile", ["legacy", "2.8"], []),
+    # 64 bytes on every signable broadcast, against the reliability that buys. Report the share of
+    # signable traffic that was actually signed rather than assuming all of it was.
+    "R-signing": ("signature-policy", ["COMPATIBLE", "BALANCED", "STRICT"], []),
+    # Each node throttling on its own online count, against one coefficient for the whole mesh. The
+    # firmware does the former; every figure measured here before did the latter.
+    "R-congestion-mode": ("congestion-mode", ["static", "adaptive"], ["--nodes", "120"]),
     # What the warm tier is worth on a mesh larger than the hot store: 0 is the pre-2.8 behaviour
     # of forgetting an evicted peer outright, and the rest is how much identity a node keeps.
     "R-warm": (

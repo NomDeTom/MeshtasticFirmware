@@ -156,6 +156,28 @@ PLATFORM_COLD_CACHE = {
     "esp32s3_16mb": 2048,
 }
 
+# CryptoEngine.h and RadioInterface.h. An XEdDSA signature is 64 bytes, and the protobuf field that
+# carries it costs two more. A frame is 255 bytes with a 16-byte header, so a Data payload signs only
+# while it stays under 173 bytes - the gate signedDataFits() applies with the real encoder.
+XEDDSA_SIGNATURE_SIZE = 64
+XEDDSA_SIGNATURE_FIELD_BYTES = XEDDSA_SIGNATURE_SIZE + 2
+MAX_LORA_PAYLOAD_LEN = 255
+MESHTASTIC_HEADER_LENGTH = 16
+
+# config.security.packet_signature_policy, applied by the receiver.
+SIGNATURE_POLICY_COMPATIBLE = "COMPATIBLE"
+SIGNATURE_POLICY_BALANCED = "BALANCED"
+SIGNATURE_POLICY_STRICT = "STRICT"
+
+
+def signed_data_fits(length):
+    """Router.cpp signedDataFits - would this payload still fit a frame with a signature on it?"""
+    return (
+        length + XEDDSA_SIGNATURE_FIELD_BYTES + MESHTASTIC_HEADER_LENGTH
+        <= MAX_LORA_PAYLOAD_LEN
+    )
+
+
 # mesh.proto portnums the transport itself reads. NodeInfo is the one that carries a public key, so
 # it is where a node learns whom it can encrypt to.
 NODEINFO_PORTNUM = 4
@@ -646,6 +668,8 @@ class Packet:
         "rx_snr",
         "priority",
         "want_ack",
+        "xeddsa_signed",
+        "pki_encrypted",
         "request_id",
         "reply_id",
         "opaque",
@@ -680,6 +704,11 @@ class Packet:
         self.next_hop = NO_NEXT_HOP_PREFERENCE
         self.rx_rssi = 0.0
         self.rx_snr = 0.0
+        # Set by the sender when it attached a signature, and read by every receiver's policy.
+        self.xeddsa_signed = False
+        # A DM encrypted to the destination's key. It carries no signature - the encryption is the
+        # authentication - so every receive policy passes it through untouched.
+        self.pki_encrypted = False
         self.priority = (
             priority
             if priority is not None
@@ -720,6 +749,8 @@ class Packet:
         clone.next_hop = self.next_hop
         clone.rx_rssi = self.rx_rssi
         clone.rx_snr = self.rx_snr
+        clone.xeddsa_signed = self.xeddsa_signed
+        clone.pki_encrypted = self.pki_encrypted
         return clone
 
 
@@ -884,6 +915,7 @@ class Node:
         "max_num_nodes",
         "warm_num_nodes",
         "cold_cache_size",
+        "signature_policy",
         "history_max",
         "platform",
         "profile",
@@ -905,6 +937,7 @@ class Node:
         max_num_nodes=MAX_NUM_NODES,
         warm_num_nodes=0,
         cold_cache_size=0,
+        signature_policy=SIGNATURE_POLICY_COMPATIBLE,
         platform="nrf52840",
         profile=None,
     ):
@@ -954,6 +987,9 @@ class Node:
         # authoritative, so nothing routes or resolves from it.
         self.cold_keys = set()
         self.cold_cache_size = cold_cache_size
+        # config.security.packet_signature_policy. Only affects what this node accepts, never what
+        # it sends: a node signs whatever it can whichever policy it runs.
+        self.signature_policy = signature_policy
         self.history_max = packet_history_max(max_num_nodes)
         self.route_health = {}  # destination index -> RouteHealth
         self.reliable = {}  # packet id -> pending retransmission record
@@ -1082,7 +1118,13 @@ class Node:
         return self.warm.pop(peer, None)
 
     def warm_key(self, peer):
-        """`copyPublicKey`: hot first, then warm. Both are authoritative."""
+        """`copyPublicKey`: hot first, then warm. Both are authoritative.
+
+        Our own record is in the hot store with our own key, so a node can always verify a
+        signature of its own - which is what it hears when its relay comes back.
+        """
+        if peer == self.index:
+            return True
         record = self.nodedb.get(peer)
         if record is not None and record.has_key:
             return True
@@ -1371,6 +1413,13 @@ class Mesh:
             "warm_evictions": 0,
             # A PKI DM that could not be encrypted because no tier held the peer's key.
             "dm_blocked_no_key": 0,
+            # Signing, and the three ways a receive policy refuses a packet.
+            "packets_signed": 0,
+            "packets_too_large_to_sign": 0,
+            "dropped_unsigned_strict": 0,
+            "dropped_unverifiable": 0,
+            "dropped_downgrade": 0,
+            "signature_bootstraps": 0,
             "reliable_retx": 0,
             "reliable_failures": 0,
             "opaque_relays": 0,
@@ -2156,6 +2205,68 @@ class Mesh:
                 self.stats["warm_evictions"] += 1
         return record
 
+    def _signature_policy_admits(self, rx, packet):
+        """Router::checkXeddsaReceivePolicy - does this node accept the packet as it arrived?
+
+        COMPATIBLE takes anything. STRICT takes only what it can verify. BALANCED sits between:
+        it accepts unsigned traffic in general, but drops an unsigned broadcast from a node it has
+        already seen sign, when that payload would have fitted a signature.
+
+        The size test is the sharp edge. It is the mirror of the sender's gate, so a payload big
+        enough to push a signature over the frame is exempt from the downgrade rule - which is what
+        an attacker inflates to evade it, and what makes an honest unsigned broadcast get dropped
+        if a signable type ever grows past the budget.
+        """
+        node = self.nodes[rx]
+        if not node.profile.signing or packet.pki_encrypted:
+            # PKI encryption authenticates the sender on its own, so no policy inspects it.
+            return True
+        policy = node.signature_policy
+        if packet.xeddsa_signed:
+            if packet.origin == rx:
+                # Our own relay coming back. We hold our own key, so it verifies, and there is no
+                # peer record to update - a node does not keep a NodeDB entry about itself here.
+                return True
+            if node.warm_key(packet.origin):
+                # Verification succeeds: nothing here forges a signature. Remember that the sender
+                # signs, which is what the downgrade rule later reads. The policy runs before the
+                # store is updated for this packet, so the record is created here as
+                # getOrCreateMeshNode does.
+                self.note_heard(rx, packet.origin).xeddsa_signed = True
+                return True
+            if packet.portnum == NODEINFO_PORTNUM:
+                # verifyFirstContactNodeInfo: a signed NodeInfo carries the sender's own key, and
+                # the node number is a CRC32 of that key, so the packet verifies against itself and
+                # nobody can claim another node's number with it. This is how a mesh bootstraps at
+                # all under STRICT - without it the NodeInfo that would teach the key is itself
+                # dropped for want of the key.
+                record = self.note_heard(rx, packet.origin)
+                record.has_key = True
+                record.xeddsa_signed = True
+                self._cache_cold_key(rx, packet.origin)
+                self.stats["signature_bootstraps"] += 1
+                return True
+            # A signature we have no key to check. Strict refuses to guess.
+            if policy == SIGNATURE_POLICY_STRICT:
+                self.stats["dropped_unverifiable"] += 1
+                return False
+            return True
+        if policy == SIGNATURE_POLICY_STRICT:
+            self.stats["dropped_unsigned_strict"] += 1
+            return False
+        if policy == SIGNATURE_POLICY_COMPATIBLE:
+            return True
+        record = node.nodedb.get(packet.origin)
+        known_signer = record is not None and record.xeddsa_signed
+        if (
+            known_signer
+            and packet.destination == BROADCAST
+            and signed_data_fits(packet.length)
+        ):
+            self.stats["dropped_downgrade"] += 1
+            return False
+        return True
+
     def _cache_cold_key(self, rx, peer):
         """The cold tier: a key seen on the wire, kept for the decrypt path only.
 
@@ -2384,6 +2495,13 @@ class Mesh:
         heard = packet.copy()
         heard.rx_rssi = rssi
         heard.rx_snr = snr
+
+        if not heard.opaque and not self._signature_policy_admits(rx, heard):
+            # Router::perhapsDecode returns DECODE_POLICY_REJECT and handleReceived skips the
+            # packet, so it is neither delivered nor relayed. It deliberately does not cancel a
+            # queued rebroadcast of the same packet either: a policy rejection is attacker-
+            # controlled input, and letting it cancel would hand anyone a way to silence a relay.
+            return
 
         if heard.opaque:
             # Never enters history, NodeDB, or the app layer. The only thing 2.8 does with a packet
@@ -2693,6 +2811,17 @@ class Mesh:
         if pki and destination != BROADCAST and not radio.knows_key(destination):
             self.stats["dm_blocked_no_key"] += 1
             return None
+        signed = False
+        if radio.profile.signing and not pki and destination == BROADCAST:
+            # Router.cpp:1145. Unencrypted broadcasts from a keyed node are signed - a unicast only
+            # when the operator is licensed, which is not modelled - and only while the payload
+            # still fits a frame with 66 more bytes on it.
+            if signed_data_fits(length):
+                signed = True
+                length += XEDDSA_SIGNATURE_FIELD_BYTES
+                self.stats["packets_signed"] += 1
+            else:
+                self.stats["packets_too_large_to_sign"] += 1
         packet = Packet(
             self.new_packet_id(),
             node,
@@ -2708,6 +2837,8 @@ class Mesh:
             reply_id=reply_id,
             opaque=opaque,
         )
+        packet.xeddsa_signed = signed
+        packet.pki_encrypted = bool(pki) and destination != BROADCAST
         packet.relay_node = radio.relay_byte
         packet.next_hop = (
             self.get_next_hop(node, destination, packet.relay_node)
@@ -2771,6 +2902,7 @@ def build(
     rebroadcast_mode=REBROADCAST_ALL,
     max_num_nodes=None,
     warm_num_nodes=None,
+    signature_policy=SIGNATURE_POLICY_COMPATIBLE,
     platform_mix="uniform",
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
@@ -2829,6 +2961,7 @@ def build(
                 cold_cache_size=(
                     PLATFORM_COLD_CACHE[platforms[i]] if node_profile.warm_store else 0
                 ),
+                signature_policy=signature_policy,
             )
         )
     for node in nodes:

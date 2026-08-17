@@ -365,6 +365,9 @@ class Campaign:
             rebroadcast_mode=getattr(opts, "rebroadcast_mode", M.REBROADCAST_ALL),
             max_num_nodes=_hot_store_size(opts),
             warm_num_nodes=getattr(opts, "warm_num_nodes", None),
+            signature_policy=getattr(
+                opts, "signature_policy", M.SIGNATURE_POLICY_COMPATIBLE
+            ),
             platform_mix=getattr(opts, "platform_mix", "uniform"),
         )
         self.root_hash = bytes(range(16))
@@ -374,6 +377,7 @@ class Campaign:
             self.root_hash,
             mix=MIX,
             congestion_scaling=not opts.no_congestion_scaling,
+            congestion_mode=getattr(opts, "congestion_mode", "adaptive"),
             online_cap=opts.max_num_nodes,
             broadcast_interval_s=opts.broadcast_interval_s,
             diurnal=opts.diurnal,
@@ -1538,6 +1542,25 @@ def build_parser():
         default="legacy",
         choices=M.VERSIONS + ("legacy",),
         help="the rules the --legacy-fraction share of nodes runs instead of --profile",
+    )
+    ap.add_argument(
+        "--congestion-mode",
+        default="adaptive",
+        choices=("adaptive", "static"),
+        help="adaptive recomputes the broadcast throttle per node from that node's own online "
+        "count at the moment it sends, as the firmware does; static applies one mesh-wide "
+        "coefficient for the whole run",
+    )
+    ap.add_argument(
+        "--signature-policy",
+        default=M.SIGNATURE_POLICY_COMPATIBLE,
+        choices=(
+            M.SIGNATURE_POLICY_COMPATIBLE,
+            M.SIGNATURE_POLICY_BALANCED,
+            M.SIGNATURE_POLICY_STRICT,
+        ),
+        help="config.security.packet_signature_policy, applied on receive: what a node does with "
+        "an unsigned or unverifiable packet",
     )
     ap.add_argument(
         "--warm-num-nodes",
