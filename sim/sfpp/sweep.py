@@ -161,6 +161,16 @@ BLOCKS = {
     # All six routers as servers, against three of them, against three nodes beside them. Same
     # mesh, same traffic; only who is holding the archive changes.
     "G-allrouters": ("servers", [3, 6], ["--place", "routers"]),
+    # What the 2.8 fold-in is worth. Every SF++ number before it was measured under `legacy`, so
+    # this is the block that says whether any of them need restating - same seed, same mesh, same
+    # traffic, only the firmware's MAC and routing rules change.
+    "R-firmware": ("profile", ["legacy", "2.8"], []),
+    # The roles 2.8 added. ROUTER_LATE only speaks when the mesh still needs it, so promoting the
+    # spine to it should cut relay airtime without costing reach - which is the claim to test.
+    "R-routerlate": ("router-late-fraction", [0.0, 0.05, 0.1, 0.2], []),
+    # A hop between two favourited routers is free in 2.8. On a mesh whose diameter already
+    # exceeds the hop limit, that is the difference between reaching the far end and not.
+    "R-favourites": ("favourite-routers", [False, True], ["--router-fraction", "0.15"]),
 }
 
 
