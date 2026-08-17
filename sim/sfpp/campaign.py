@@ -364,6 +364,7 @@ class Campaign:
             favourite_routers=getattr(opts, "favourite_routers", False),
             rebroadcast_mode=getattr(opts, "rebroadcast_mode", M.REBROADCAST_ALL),
             max_num_nodes=_hot_store_size(opts),
+            warm_num_nodes=getattr(opts, "warm_num_nodes", None),
             platform_mix=getattr(opts, "platform_mix", "uniform"),
         )
         self.root_hash = bytes(range(16))
@@ -1537,6 +1538,13 @@ def build_parser():
         default="legacy",
         choices=M.VERSIONS + ("legacy",),
         help="the rules the --legacy-fraction share of nodes runs instead of --profile",
+    )
+    ap.add_argument(
+        "--warm-num-nodes",
+        type=int,
+        default=None,
+        help="WARM_NODE_COUNT: identities kept for peers evicted from the hot store, so a DM to "
+        "them still encrypts. Omit to size it from each node's board; 0 disables the tier",
     )
     ap.add_argument(
         "--legacy-fraction",

@@ -1019,6 +1019,132 @@ class ForkExtras(unittest.TestCase):
         self.assertEqual(mesh.nodes[0].queue[0].packet.hop_limit, 2)
 
 
+class WarmTier(unittest.TestCase):
+    """WarmNodeStore - what an evicted node keeps, and what it loses."""
+
+    def small(self, slots=3, warm=4, profile="2.8"):
+        mesh = small_mesh(nodes=10, profile=profile)
+        for node in mesh.nodes:
+            node.max_num_nodes = slots
+            node.warm_num_nodes = warm
+            node.cold_cache_size = 0
+        return mesh
+
+    def test_eviction_demotes_rather_than_forgetting(self):
+        mesh = self.small()
+        for peer in (1, 2, 3, 4):
+            heard(mesh, 0, peer, at=peer * 1000.0)
+        node = mesh.nodes[0]
+        self.assertEqual(len(node.nodedb), 3)
+        self.assertIn(1, node.warm, "the stalest record is the one demoted")
+        self.assertEqual(mesh.stats["warm_demotions"], 1)
+
+    def test_re_admission_empties_the_warm_slot(self):
+        """A node lives in hot or warm, never both."""
+        mesh = self.small()
+        for peer in (1, 2, 3, 4):
+            heard(mesh, 0, peer, at=peer * 1000.0)
+        node = mesh.nodes[0]
+        self.assertIn(1, node.warm)
+        heard(mesh, 0, 1, at=9000.0)
+        self.assertIn(1, node.nodedb)
+        self.assertNotIn(1, node.warm)
+        self.assertEqual(mesh.stats["warm_promotions"], 1)
+        for peer in node.nodedb:
+            self.assertNotIn(peer, node.warm)
+
+    def test_the_key_survives_demotion_but_the_route_does_not(self):
+        """The tier exists for the key; next_hop and hops_away are hot-store fields."""
+        mesh = self.small()
+        node = mesh.nodes[0]
+        record = heard(mesh, 0, 1, hops_away=0, at=1000.0)
+        record.has_key = True
+        record.next_hop = 0x42
+        for peer in (2, 3, 4):
+            heard(mesh, 0, peer, at=peer * 1000.0)
+        self.assertNotIn(1, node.nodedb)
+        self.assertTrue(node.warm[1].has_key)
+        self.assertTrue(node.knows_key(1), "a warm key is still authoritative")
+        # Re-admitted without a usable hop count, so nothing but the key comes back: the route and
+        # the hop distance start again from what the next packets show.
+        mesh.now = 9000.0
+        readmitted = mesh.note_heard(0, 1, hops_away=None)
+        self.assertTrue(readmitted.has_key)
+        self.assertEqual(readmitted.next_hop, M.NO_NEXT_HOP_PREFERENCE)
+        self.assertIsNone(readmitted.hops_away)
+
+    def test_a_keyless_entry_never_displaces_a_keyed_one(self):
+        """absorb(): keyless candidates never displace keyed entries."""
+        mesh = self.small(slots=2, warm=1)
+        node = mesh.nodes[0]
+        keyed = heard(mesh, 0, 1, at=1000.0)
+        keyed.has_key = True
+        heard(mesh, 0, 2, at=2000.0)
+        heard(mesh, 0, 3, at=3000.0)  # evicts 1, which is keyed, into the warm slot
+        self.assertTrue(node.warm[1].has_key)
+        heard(mesh, 0, 4, at=4000.0)  # evicts 2, keyless, against a full keyed tier
+        self.assertIn(1, node.warm, "the keyed identity is kept")
+        self.assertNotIn(2, node.warm)
+        self.assertEqual(mesh.stats["warm_evictions"], 0)
+
+    def test_last_heard_is_quantised_to_128_seconds(self):
+        """The low seven bits of last_heard carry role, protection and the signed flag."""
+        self.assertEqual(M.warm_quantise(0.0), 0.0)
+        self.assertEqual(M.warm_quantise(127_999.0), 0.0)
+        self.assertEqual(M.warm_quantise(128_000.0), 128_000.0)
+        self.assertEqual(M.warm_quantise(200_000.0), 128_000.0)
+        entry = M.WarmEntry(200_000.0)
+        self.assertEqual(entry.last_heard, 128_000.0)
+
+    def test_no_warm_tier_before_this_tree_or_on_the_smallest_board(self):
+        mesh = self.small(profile="2.7")
+        for node in mesh.nodes:
+            node.warm_num_nodes = 0
+        for peer in (1, 2, 3, 4):
+            heard(mesh, 0, peer, at=peer * 1000.0)
+        self.assertEqual(mesh.nodes[0].warm, {})
+        self.assertEqual(mesh.stats["warm_demotions"], 0)
+        self.assertEqual(M.PLATFORM_WARM_STORE["stm32wl"], 0)
+        self.assertFalse(M.Profile("2.7").warm_store)
+
+
+class KeyEconomics(unittest.TestCase):
+    """What eviction costs: not a worse route, but no conversation until NodeInfo is heard again."""
+
+    def test_a_pki_dm_needs_a_key_from_some_tier(self):
+        mesh = small_mesh(nodes=6)
+        self.assertIsNone(
+            mesh.originate(0, 1, 40, destination=1, pki=True),
+            "no key in any tier, so nothing is composed",
+        )
+        self.assertEqual(mesh.stats["dm_blocked_no_key"], 1)
+        heard(mesh, 0, 1).has_key = True
+        self.assertIsNotNone(mesh.originate(0, 1, 40, destination=1, pki=True))
+
+    def test_nodeinfo_is_what_teaches_a_key(self):
+        mesh = small_mesh(nodes=8, seed=5)
+        peer = next(iter(mesh.neighbours[0]))
+        mesh.originate(peer, M.NODEINFO_PORTNUM, 40, kind="nodeinfo")
+        mesh.run(30000.0)
+        self.assertTrue(mesh.nodes[0].nodedb[peer].has_key)
+        self.assertTrue(mesh.nodes[0].knows_key(peer))
+
+    def test_the_cold_cache_answers_when_both_other_tiers_have_dropped_the_peer(self):
+        """A cold key is usable on the decrypt path and is never authoritative."""
+        mesh = small_mesh(nodes=6)
+        node = mesh.nodes[0]
+        node.cold_cache_size = 8
+        node.warm_num_nodes = 0
+        mesh._cache_cold_key(0, 3)
+        self.assertNotIn(3, node.nodedb)
+        self.assertTrue(node.knows_key(3))
+        self.assertFalse(node.warm_key(3), "the cold tier is not authoritative")
+        self.assertIsNone(
+            mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte),
+            "and nothing resolves from it",
+        )
+
+
 class FirmwareVersions(unittest.TestCase):
     """Pins each release series' rules to the tags in this repository.
 

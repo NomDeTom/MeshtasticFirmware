@@ -161,6 +161,13 @@ BLOCKS = {
     # What the 2.8 fold-in is worth against the pre-fold-in transport: same seed, same mesh, same
     # traffic, only the MAC and routing rules change.
     "R-firmware": ("profile", ["legacy", "2.8"], []),
+    # What the warm tier is worth on a mesh larger than the hot store: 0 is the pre-2.8 behaviour
+    # of forgetting an evicted peer outright, and the rest is how much identity a node keeps.
+    "R-warm": (
+        "warm-num-nodes",
+        [0, 25, 100, 2000],
+        ["--nodes", "120", "--max-num-nodes", "20"],
+    ),
     # The release series in order, each at its final release. Steps the whole rule set at once -
     # contention window, roles, queue order, hop preservation, next-hop, store size and the
     # congestion throttle - so it says what a mesh gained or lost per upgrade rather than what one
