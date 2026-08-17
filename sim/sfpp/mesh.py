@@ -97,7 +97,8 @@ MAX_AIRTIME_MS = 20000.0
 # The firmware's TX queue is finite, and overflow is its only drop: setTransmitDelay reschedules a
 # blocked packet indefinitely rather than giving up on it, so congestion shows up as a full queue
 # and as latency, never as a packet that quietly evaporates. The old model also dropped after 400
-# backoffs; that cap has no counterpart in the firmware and is gone.
+# backoffs; that cap has no counterpart in the firmware and is gone. On overflow the firmware picks
+# which packet to lose rather than always losing the newcomer - see replaceLowerPriorityPacket.
 QUEUE_DEPTH = 16
 
 # meshtastic_MeshPacket_Priority, only the values the queue order actually distinguishes.
@@ -928,15 +929,75 @@ class Mesh:
         `sent` and `event` keys so callers written against the old signature keep working.
         """
         radio = self.nodes[node]
-        if len(radio.queue) >= QUEUE_DEPTH:
-            self.stats["queue_drops"] += 1
-            return None
         entry = QueueEntry(packet)
-        self._enqueue(radio, entry)
+        if len(radio.queue) >= QUEUE_DEPTH:
+            # Something is dropped either way, so the counter fires either way - the question the
+            # firmware asks is only *which* packet. MeshPacketQueue::enqueue sets `dropped` before
+            # it knows the answer, and txDrop counts that.
+            self.stats["queue_drops"] += 1
+            if not self._replace_lower_priority(radio, entry):
+                return None
+        else:
+            self._enqueue(radio, entry)
         if token is not None:
             token["entry"] = entry
         self.set_transmit_delay(node)
         return entry
+
+    def _replace_lower_priority(self, radio, entry):
+        """MeshPacketQueue::replaceLowerPriorityPacket - make room, or refuse to.
+
+        A full queue does not simply reject the newcomer: the firmware looks for something it would
+        rather lose. Three chances, in order, and each one gives up the *back* of the queue because
+        that is the packet furthest from being sent.
+
+        This only bites once the queue holds a mix, which for this transport means once ROUTER_LATE
+        is in play - the late window is what puts deferred packets behind ready ones.
+        """
+        if not radio.queue:
+            return False
+        packet = entry.packet
+        back = radio.queue[-1]
+
+        # 1. The back is ready and worth less than the newcomer.
+        if not back.tx_after and back.packet.priority < packet.priority:
+            self._evict(radio, len(radio.queue) - 1)
+            self._enqueue(radio, entry)
+            return True
+
+        if back.tx_after:
+            # 2. The back is deferred, so look past the deferred tail for the last ready packet and
+            #    take that instead - a deferred packet is not necessarily the cheapest thing to lose.
+            index = len(radio.queue) - 1
+            while index > 0 and radio.queue[index].tx_after:
+                index -= 1
+            candidate = radio.queue[index]
+            if not candidate.tx_after and candidate.packet.priority < packet.priority:
+                self._evict(radio, index)
+                self._enqueue(radio, entry)
+                return True
+
+            # 3. Nothing ready to give up. Drop the back if its deadline has already passed and the
+            #    newcomer is more urgent still: ready always beats deferred, and between two overdue
+            #    packets the one that has been waiting longer goes first.
+            if self.now >= back.tx_after:
+                new_goes_first = not entry.tx_after or (
+                    self.now >= entry.tx_after
+                    and (self.now - back.tx_after) < (self.now - entry.tx_after)
+                )
+                if new_goes_first:
+                    self._evict(radio, len(radio.queue) - 1)
+                    self._enqueue(radio, entry)
+                    return True
+
+        return False
+
+    @staticmethod
+    def _evict(radio, index):
+        """Drop a queued packet to make room, and forget any relay record pointing at it."""
+        evicted = radio.queue.pop(index)
+        radio.pending.pop(evicted.packet.id, None)
+        return evicted
 
     @staticmethod
     def _enqueue(radio, entry):

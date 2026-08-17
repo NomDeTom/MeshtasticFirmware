@@ -176,6 +176,69 @@ class QueueOrder(unittest.TestCase):
         self.assertIs(self.radio.queue[0], ready)
         self.assertIs(self.radio.queue[1], late)
 
+    def test_a_full_queue_gives_up_its_cheapest_ready_packet(self):
+        """replaceLowerPriorityPacket branch 1: the back is ready and worth less."""
+        mesh = small_mesh(nodes=6)
+        radio = mesh.nodes[0]
+        radio.busy_until = 1e9
+        for packet_id in range(M.QUEUE_DEPTH):
+            mesh.send(0, M.Packet(packet_id, 0, 70, 40, priority=M.PRIORITY_BACKGROUND))
+        mesh.send(0, M.Packet(99, 0, 70, 40, priority=M.PRIORITY_ACK))
+        self.assertEqual(len(radio.queue), M.QUEUE_DEPTH)
+        self.assertEqual(radio.queue[0].packet.id, 99, "the ACK should be at the front")
+        self.assertNotIn(
+            M.QUEUE_DEPTH - 1,
+            [e.packet.id for e in radio.queue],
+            "the last background packet should have been the one evicted",
+        )
+
+    def test_a_full_queue_refuses_when_nothing_is_cheaper(self):
+        mesh = small_mesh(nodes=6)
+        radio = mesh.nodes[0]
+        radio.busy_until = 1e9
+        for packet_id in range(M.QUEUE_DEPTH):
+            mesh.send(0, M.Packet(packet_id, 0, 70, 40, priority=M.PRIORITY_ACK))
+        self.assertIsNone(
+            mesh.send(0, M.Packet(99, 0, 70, 40, priority=M.PRIORITY_BACKGROUND))
+        )
+        self.assertNotIn(99, [e.packet.id for e in radio.queue])
+
+    def test_a_ready_packet_displaces_a_deferred_one(self):
+        """Branch 3: ready always beats deferred once the deferred packet is overdue.
+
+        This is the case ROUTER_LATE creates, and the reason the eviction rule matters to
+        R-routerlate: a mesh with late relays queued is a mesh with a mixed queue.
+        """
+        mesh = small_mesh(nodes=6)
+        radio = mesh.nodes[0]
+        radio.busy_until = 1e9
+        mesh.now = 10000.0
+        for packet_id in range(M.QUEUE_DEPTH):
+            entry = M.QueueEntry(
+                M.Packet(packet_id, 0, 70, 40, priority=M.PRIORITY_ACK),
+                tx_after=5000.0,  # already overdue
+            )
+            M.Mesh._enqueue(radio, entry)
+        # Lowest priority there is, but it is ready, and every incumbent is deferred and overdue.
+        self.assertIsNotNone(
+            mesh.send(0, M.Packet(99, 0, 70, 40, priority=M.PRIORITY_BACKGROUND))
+        )
+        self.assertEqual(radio.queue[0].packet.id, 99)
+
+    def test_a_deferred_packet_does_not_displace_a_pending_one(self):
+        """A deferred newcomer cannot evict a deferred incumbent whose deadline has not passed."""
+        mesh = small_mesh(nodes=6)
+        radio = mesh.nodes[0]
+        radio.busy_until = 1e9
+        mesh.now = 1000.0
+        for packet_id in range(M.QUEUE_DEPTH):
+            M.Mesh._enqueue(
+                radio,
+                M.QueueEntry(M.Packet(packet_id, 0, 70, 40), tx_after=50000.0),
+            )
+        newcomer = M.QueueEntry(M.Packet(99, 0, 70, 40), tx_after=60000.0)
+        self.assertFalse(mesh._replace_lower_priority(radio, newcomer))
+
     def test_overflow_is_the_only_drop(self):
         """RadioLibInterface::send drops on a full queue and nowhere else.
 
