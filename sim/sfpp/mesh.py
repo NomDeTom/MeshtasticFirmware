@@ -230,6 +230,8 @@ class Mesh:
             "bytes_on_air": 0,
         }
         self.airtime_by_kind = {}
+        # Filled by build() when per-node hop limits are in play; None means everyone uses the same.
+        self.node_hop_limit = None
         self.on_receive = (
             None  # callback(node, packet, rssi, snr) for the campaign's app layer
         )
@@ -531,6 +533,10 @@ class Mesh:
         cutoff = self.now - MAX_AIRTIME_MS
         self.transmissions = [t for t in self.transmissions if t.start > cutoff]
 
+    def hop_limit_for(self, node):
+        """This node's configured hop limit. Operators do not all set 3."""
+        return self.node_hop_limit[node] if self.node_hop_limit else self.hop_limit
+
     def originate(self, node, portnum, length, kind=None, payload=None, hop_limit=None):
         """Inject a packet from a node's application layer, as if it had composed it."""
         packet = Packet(
@@ -538,7 +544,7 @@ class Mesh:
             node,
             portnum,
             length,
-            hop_limit=self.hop_limit if hop_limit is None else hop_limit,
+            hop_limit=self.hop_limit_for(node) if hop_limit is None else hop_limit,
             kind=kind,
             payload=payload,
         )
@@ -558,6 +564,7 @@ def build(
     extra_loss=0.0,
     burst_loss=0.0,
     burst_ms=60000.0,
+    hop_spread=False,
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -576,6 +583,20 @@ def build(
         burst_loss=burst_loss,
         burst_ms=burst_ms,
     )
+
+    if hop_spread:
+        # Real meshes are not uniform in this. A node in the middle of a dense mesh sees everything
+        # it needs at 3 or 4 hops and its owner leaves the default alone; someone on the edge turns
+        # it up until they can reach the rest, and 7 is where the field guidance tops out. Assigning
+        # by centrality reproduces that correlation instead of scattering hop limits at random.
+        degrees = sorted(range(node_count), key=lambda i: -len(mesh.neighbours[i]))
+        rank = {
+            node: position / max(1, node_count - 1)
+            for position, node in enumerate(degrees)
+        }
+        mesh.node_hop_limit = [
+            min(7, 3 + int(rank[i] * 4 + rng.random() * 1.5)) for i in range(node_count)
+        ]
 
     if router_fraction > 0:
         want = max(1, int(round(node_count * router_fraction)))

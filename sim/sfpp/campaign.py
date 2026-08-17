@@ -210,39 +210,46 @@ class Counters:
 
 
 class Server:
-    """One SF++ node: a store, plus the reconciliation state the protocol needs."""
+    """One SF++ node: a store, plus the reconciliation state the protocol needs.
+
+    Bucket membership is deliberately per-server. The firmware assigns a chain counter as
+    `chain_end.counter + 1` when it ingests a message that arrived without an official one
+    (StoreForwardPlusPlus.cpp:1366), so two servers that each hear the same broadcast off the air
+    number it differently. `SketchIndex.h` claims a count boundary is "one both sides derive from the
+    data itself"; it is not - it is derived from local arrival order, and that is exactly the thing
+    the bucket-mode arm exists to measure.
+    """
 
     def __init__(self, index, store, opts):
         self.index = index
         self.store = store
         self.opts = opts
-        self.held = {}  # message_hash -> counter
+        self.held = {}  # message_hash -> counter as this server numbered it
+        self.bucket = {}  # message_hash -> bucket as this server assigns it
+        self.next_counter = 0
         self.interval_ms = opts.advert_interval_s * 1000.0
         self.next_bucket = 0
-        self.matched = set()  # (peer, bucket) pairs whose checksums have closed
-        self.poisoned = (
-            set()
-        )  # buckets that escalated; the verdict is cached, as the design says
-
-    def summary(self, root_hash, bucket, capacity, width):
-        """Local bucket summary at a chosen capacity and short-ID width."""
-        from .sketchindex import BucketSummary
-
-        first = bucket * BUCKET_OBJECTS + 1
-        last = first + BUCKET_OBJECTS - 1
-        s = BucketSummary(capacity)
-        for message_hash, counter in self.held.items():
-            if first <= counter <= last:
-                s.add(
-                    truncated_short_id(message_hash, width),
-                    checksum_contribution(message_hash),
-                )
-        return s if s.count > 0 else None
+        self.matched = set()
+        self.poisoned = set()
+        self.sealed = set()  # buckets this server considers closed
 
     def members(self, bucket):
-        first = bucket * BUCKET_OBJECTS + 1
-        last = first + BUCKET_OBJECTS - 1
-        return {h for h, c in self.held.items() if first <= c <= last}
+        return {h for h, b in self.bucket.items() if b == bucket}
+
+    def buckets(self):
+        return set(self.bucket.values())
+
+    def summary(self, root_hash, bucket, capacity, width):
+        """This server's summary of its own bucket, whatever that bucket happens to contain."""
+        from .sketchindex import BucketSummary
+
+        s = BucketSummary(capacity)
+        for message_hash in self.members(bucket):
+            s.add(
+                truncated_short_id(message_hash, width),
+                checksum_contribution(message_hash),
+            )
+        return s if s.count > 0 else None
 
 
 class Campaign:
@@ -261,6 +268,7 @@ class Campaign:
             extra_loss=opts.extra_loss,
             burst_loss=opts.burst_loss,
             burst_ms=opts.burst_ms,
+            hop_spread=opts.hop_spread,
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(self.mesh, self.rng, self.root_hash, mix=MIX)
@@ -309,13 +317,14 @@ class Campaign:
         elif packet.kind and packet.kind.startswith("sr:"):
             self._on_sr(node, packet)
 
-    def _counter(self, message_hash):
-        """The chain counter, assigned in origination order.
+    def _global_counter(self, message_hash):
+        """Origination order across the whole mesh. A FICTION, kept only as an upper bound.
 
-        The chain protocol owns this numbering in the firmware and every server must agree on it,
-        because a bucket is a counter range: two nodes that number differently summarise different
-        sets and their checksums can never close. The simulator stands in for the chain by numbering
-        objects as they are originated.
+        No canonical counter exists. The firmware comment at StoreForwardPlusPlus.cpp:1364 reads "if
+        we get an official counter, use it. Otherwise, just increment" - and there is no official
+        counter to get. Every counter is a local increment off the local chain tip, so this mode
+        describes a mesh nobody can build. It is here to bound what bucket agreement would be worth
+        if it existed, and for no other purpose.
         """
         counter = self.counter_of.get(message_hash)
         if counter is None:
@@ -326,37 +335,63 @@ class Campaign:
             counter = self.counter_of.get(message_hash)
         return counter
 
+    def _assign(self, server, message_hash):
+        """Give this object a counter and a bucket from this server's point of view.
+
+        Returns (counter, bucket, sealed_bucket_or_None).
+        """
+        mode = self.opts.bucket_mode
+        if mode == "global":
+            counter = self._global_counter(message_hash)
+            if counter is None:
+                return None, None, None
+            bucket = bucket_of(counter)
+            # Sealing follows the shared counter: an object past the boundary closes the one below.
+            return counter, bucket, bucket - 1 if bucket > 0 else None
+
+        if mode == "local":
+            # What the firmware does, and the only mode that describes a real mesh: chain_end.counter
+            # + 1, every time, because no official counter is ever supplied. Both the bucket a
+            # message lands in and the moment a bucket fills are therefore per-server and effectively
+            # random - each server hears a different subset in a different order.
+            server.next_counter += 1
+            counter = server.next_counter
+            bucket = bucket_of(counter)
+            sealed = bucket - 1 if bucket > 0 else None
+            return counter, bucket, sealed
+
+        # Time buckets: quantise the receive clock. Both servers heard the packet within a second or
+        # two, so any window wider than that agrees except for objects near a boundary - which is a
+        # bounded disagreement rather than a total one.
+        window = self.opts.time_bucket_s * 1000.0
+        bucket = int(self.mesh.now // window)
+        server.next_counter += 1
+        return server.next_counter, bucket, bucket - 1 if bucket > 0 else None
+
     def _on_text(self, node, packet):
         message_hash = packet.payload
         self.heard_text[node.index].add(message_hash)
         server = self.servers.get(node.index)
         if server is None:
             return
-        counter = self._counter(message_hash)
+        counter, bucket, sealed = self._assign(server, message_hash)
         if counter is None:
             return
         obj = self.generator.objects[message_hash]
         if server.store.insert(obj, counter):
             server.held[message_hash] = counter
-            if self.opts.trigger in ("bucket", "bucket+interval"):
-                self._maybe_advertise_on_close(server, counter)
+            server.bucket[message_hash] = bucket
+            if sealed is not None and self.opts.trigger in (
+                "bucket",
+                "bucket+interval",
+            ):
+                self._maybe_advertise_on_close(server, sealed)
 
-    def _maybe_advertise_on_close(self, server, counter):
-        """A bucket that has just sealed is a permanent fact, and worth stating once.
-
-        Sealing is a property of the chain counter, not of what this node happens to hold. A server
-        that heard half a bucket still knows the bucket is closed the moment it sees an object
-        numbered past the boundary - and that is exactly the server with something to gain from
-        saying so. Waiting until the local store holds all 32 would mean never advertising at all,
-        because a server that already held the whole bucket would have nothing to reconcile.
-        """
-        bucket = bucket_of(counter) - 1
-        if bucket < 0:
+    def _maybe_advertise_on_close(self, server, bucket):
+        """A bucket this server considers sealed is worth stating once."""
+        if bucket < 0 or bucket in server.sealed:
             return
-        key = (server.index, bucket)
-        if key in self.bucket_closed_at:
-            return
-        self.bucket_closed_at[key] = self.mesh.now
+        server.sealed.add(bucket)
         jitter = self.rng.uniform(0, self.opts.advert_jitter_s * 1000.0)
         self.mesh.at(self.mesh.now + jitter, lambda: self._advertise(server, bucket))
 
@@ -482,6 +517,32 @@ class Campaign:
             body = summary
         if self.opts.signed:
             length += SR_SIGNATURE
+        # A broadcast advert is relayed by every node in earshot and is the reason adverts dominate
+        # the byte budget. Once a server knows its peers - and an advert is itself the discovery
+        # mechanism, so it does after the first one - the same information can go as a DM to each,
+        # paying per peer instead of per neighbourhood.
+        if self.opts.advert_transport == "dm":
+            peers = [i for i in self.servers if i != server.index]
+            for peer in peers:
+                self.counters.adverts += 1
+                self.counters.advert_bytes += length
+                self._sr_send(
+                    server.index,
+                    "sr:advert",
+                    {
+                        "src": server.index,
+                        "dst": peer,
+                        "bucket": bucket,
+                        "sketch": body,
+                        "checksum": summary.checksum,
+                        "count": summary.count,
+                        "members": server.members(bucket),
+                    },
+                    length,
+                    dst=peer,
+                )
+            return
+
         self.counters.adverts += 1
         self.counters.advert_bytes += length
         self._sr_send(
@@ -568,16 +629,11 @@ class Campaign:
             self._escalate(server, peer_index, bucket)
 
     def _hashes_for(self, server, sid, bucket):
-        first = bucket * BUCKET_OBJECTS + 1
-        last = first + BUCKET_OBJECTS - 1
-        out = []
-        for message_hash, counter in server.held.items():
-            if (
-                first <= counter <= last
-                and truncated_short_id(message_hash, self.width) == sid
-            ):
-                out.append(message_hash)
-        return out
+        return [
+            h
+            for h in server.members(bucket)
+            if truncated_short_id(h, self.width) == sid
+        ]
 
     def _send_object(self, server, peer_index, message_hash):
         obj = self.generator.objects[message_hash]
@@ -607,11 +663,15 @@ class Campaign:
         message_hash = payload["hash"]
         if message_hash in server.held:
             return
-        counter = self._counter(message_hash)
+        # A transferred object is numbered by the receiver, the same way one heard off the air is.
+        # Under local numbering that means an object can sit in a different bucket at each server
+        # even after it has been successfully replicated - which is the point of the arm.
+        counter, bucket, _ = self._assign(server, message_hash)
         if counter is None:
             return
         if server.store.insert(self.generator.objects[message_hash], counter):
             server.held[message_hash] = counter
+            server.bucket[message_hash] = bucket
             self.counters.objects_moved += 1
 
     def _escalate(self, server, peer_index, bucket):
@@ -689,7 +749,9 @@ class Campaign:
         unambiguous. It is the same claim the three-store simulator made, restated over a mesh.
         """
         keys = sorted(self.servers)
-        buckets = {bucket_of(c) for c in self.counter_of.values() if c}
+        buckets = set()
+        for server in self.servers.values():
+            buckets |= server.buckets()
         agree_and_differ = 0
         for i, a in enumerate(keys):
             for b in keys[i + 1 :]:
@@ -714,11 +776,11 @@ class Campaign:
         """Fixed-interval or AIMD advertising: pick a bucket and state it."""
         if self.mesh.now > self.duration_ms:
             return
-        tip = max(server.held.values(), default=0)
-        top = bucket_of(tip) if tip else 0
-        if top is not None:
+        # Round-robin over the buckets this server actually has, whatever numbering produced them.
+        own = sorted(server.buckets())
+        if own:
             before = self.counters.objects_moved
-            bucket = server.next_bucket % (top + 1)
+            bucket = own[server.next_bucket % len(own)]
             server.next_bucket += 1
             self._advertise(server, bucket)
             if self.opts.trigger == "aimd":
@@ -883,6 +945,17 @@ def build_parser():
     ap.add_argument("--area", type=float, default=8000.0)
     ap.add_argument("--hop-limit", type=int, default=3)
     ap.add_argument("--router-fraction", type=float, default=0.1)
+    ap.add_argument(
+        "--hop-spread",
+        action="store_true",
+        help="per-node hop limits 3-7 by centrality, instead of one value for everyone",
+    )
+    ap.add_argument(
+        "--advert-transport",
+        default="broadcast",
+        choices=("broadcast", "dm"),
+        help="broadcast adverts and let anyone hear them, or DM each known peer",
+    )
     ap.add_argument("--preset", default="LONG_FAST")
     ap.add_argument("--no-phy-loss", action="store_true")
     ap.add_argument(
@@ -909,6 +982,18 @@ def build_parser():
     ap.add_argument("--place", default="spread", choices=sorted(Placement.BY_NAME))
     ap.add_argument("--hops-apart", type=int, default=3)
 
+    ap.add_argument(
+        "--bucket-mode",
+        default="local",
+        choices=("global", "local", "time"),
+        help="how a server numbers objects into buckets; `local` is the only real one",
+    )
+    ap.add_argument(
+        "--time-bucket-s",
+        type=float,
+        default=1800.0,
+        help="window width for --bucket-mode time",
+    )
     ap.add_argument("--capacity", type=int, default=32)
     ap.add_argument("--short-id-bits", type=int, default=32)
     ap.add_argument("--signed", action="store_true")
