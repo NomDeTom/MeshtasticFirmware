@@ -905,11 +905,43 @@ def place_hub(count, area, rng, min_dist, spokes=6):
     return points
 
 
+def place_chain(count, area, rng, min_dist, towns=None, spread=0.035):
+    """Towns strung out in a line, each linked to the next. A valley, a rail line, a coast road.
+
+    The point is a mesh that is *long and connected*. Stretching a uniform field far enough to exceed
+    seven hops eventually fragments it - at 20 km with 60 nodes a fifth of them are isolated and the
+    measured diameter becomes the diameter of a surviving fragment, which is meaningless. A chain
+    stretches without breaking, because consecutive towns are placed inside each other's range.
+    """
+    towns = towns or max(3, count // 8)
+    # Span the diagonal so the chain has room; step is what keeps consecutive towns in contact.
+    step = area * 1.35 / max(1, towns - 1)
+    centres = [
+        (0.06 * area + i * step * 0.70, 0.5 * area + rng.gauss(0, 0.05 * area))
+        for i in range(towns)
+    ]
+    points, attempts = [], 0
+    while len(points) < count and attempts < count * 6000:
+        attempts += 1
+        cx, cy = (
+            centres[len(points) % towns]
+            if rng.random() < 0.92
+            else centres[rng.randrange(towns)]
+        )
+        p = (rng.gauss(cx, spread * area), rng.gauss(cy, spread * area))
+        if all(math.dist(p, q) >= min_dist for q in points):
+            points.append(p)
+    if len(points) < count:
+        raise RuntimeError("chain placement could not converge")
+    return points
+
+
 TOPOLOGIES = {
     "uniform": lambda c, a, r, m: place_nodes(c, a, r, m),
     "clustered": place_clustered,
     "corridor": place_corridor,
     "hub": place_hub,
+    "chain": place_chain,
 }
 
 
@@ -1076,11 +1108,42 @@ class Mesh:
 
     def link_stats(self):
         degrees = [len(v) for v in self.neighbours]
+        comps = self.components()
+        largest = max((len(c) for c in comps), default=0)
         return {
             "links": sum(degrees) // 2,
             "mean_degree": sum(degrees) / len(degrees),
             "isolated": sum(1 for d in degrees if d == 0),
+            # A diameter measured across a fragmented graph is the diameter of whichever fragment the
+            # walk started in, which is not a diameter. Report the structure so it cannot be read as one.
+            "components": len(comps),
+            "largest_component": largest,
+            "connected": len(comps) == 1,
         }
+
+    def components(self):
+        seen, out = set(), []
+        for start in range(len(self.nodes)):
+            if start in seen:
+                continue
+            stack, comp = [start], []
+            seen.add(start)
+            while stack:
+                node = stack.pop()
+                comp.append(node)
+                for peer in self.neighbours[node]:
+                    if peer not in seen:
+                        seen.add(peer)
+                        stack.append(peer)
+            out.append(comp)
+        return out
+
+    def diameter(self):
+        """Longest shortest-path within the largest component, and None if the mesh is fragmented."""
+        comps = self.components()
+        if len(comps) != 1:
+            return None
+        return max(max(self.hops_from([i]).values()) for i in range(len(self.nodes)))
 
     def hops_from(self, sources):
         """BFS over the link graph. Used for topology placement and for reporting depth."""

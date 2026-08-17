@@ -136,6 +136,20 @@ def congestion_coefficient(node_count, sf, bw_hz, event_mode=False):
     return 1.0 + (node_count - 40) * throttling_factor
 
 
+def observed_senders(mesh, window_ms=7200_000.0):
+    """Distinct senders heard recently, mesh-wide. A candidate congestion input that the hot store
+    cannot bound, because a node counts what it hears rather than what it can store."""
+    now = mesh.now
+    seen = set()
+    for node in mesh.nodes:
+        for pid, when in node.seen.items():
+            if now - when <= window_ms:
+                seen.add(
+                    pid % 100003
+                )  # stand-in for the sender identity the packet carried
+    return len(seen)
+
+
 class Generator:
     """Schedules every node's originated traffic across the run, then hands it to the mesh.
 
@@ -155,6 +169,7 @@ class Generator:
         position_throttle=1,
         telemetry_throttle=1,
         online_cap=120,
+        congestion_input="hotstore",
         broadcast_interval_s=None,
         diurnal="flat",
         start_hour=8.0,
@@ -167,11 +182,23 @@ class Generator:
         preset = mesh.conf.current_preset
         # Device-originated broadcasts stretch with mesh size; user-typed text does not, because
         # nothing in the firmware throttles a person deciding to send a message.
+        # Which quantity drives the throttle. `hotstore` is what the firmware does and is bounded by
+        # MAX_NUM_NODES, so it saturates on a mesh larger than the store - the pathology round four
+        # exists to price. `truesize` is the unbounded ideal, the upper bound on what a corrected
+        # input could buy. `utilisation` scales on measured channel busy-ness instead of a node count,
+        # which is what the throttle actually cares about and cannot be bounded by memory.
+        self.congestion_input = congestion_input
         self.congestion = (
             # getNumOnlineMeshNodes() iterates the hot store, so a node cannot count mesh members it
             # has evicted. The coefficient is bounded by MAX_NUM_NODES, not by mesh size.
             congestion_coefficient(
-                min(len(mesh.nodes), online_cap), preset["sf"], preset["bw"]
+                (
+                    len(mesh.nodes)
+                    if congestion_input == "truesize"
+                    else min(len(mesh.nodes), online_cap)
+                ),
+                preset["sf"],
+                preset["bw"],
             )
             if congestion_scaling
             else 1.0
