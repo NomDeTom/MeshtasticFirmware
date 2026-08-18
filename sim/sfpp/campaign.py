@@ -363,7 +363,6 @@ def _noise_field(opts, seed, area):
         transient_db=getattr(opts, "noise_transient_db", 8.0),
         transient_ms=getattr(opts, "noise_transient_ms", 30000.0),
         transient_radius_frac=getattr(opts, "noise_transient_radius", 0.35),
-        lift_share=getattr(opts, "noise_lift_share", 0.0),
         area=area,
     )
 
@@ -2497,14 +2496,6 @@ def build_parser():
         type=float,
         default=0.35,
         help="radius of a transient excursion as a fraction of the area's side, before its spread",
-    )
-    ap.add_argument(
-        "--noise-lift-share",
-        type=float,
-        default=0.0,
-        help="share of transient excursions that are NEGATIVE - a quieter band. Lift can improve a "
-        "link that exists and cannot create one that does not, because the link graph is thresholded "
-        "on static RSSI; degradation is modelled fully and lift only partly",
     )
     ap.add_argument(
         "--noise-model",

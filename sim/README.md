@@ -204,7 +204,6 @@ thirds of rebroadcast attempts.
 | `--noise-transient-db`      | 8.0     | depth of one transient excursion, before its own 0.5-1.5x spread                                  |
 | `--noise-transient-ms`      | 30000   | how long one transient excursion lasts                                                            |
 | `--noise-transient-radius`  | 0.35    | radius of one excursion as a fraction of the area's side, before its spread                        |
-| `--noise-lift-share`        | 0.0     | share of *transient* excursions that are negative - a quieter band. See §5.1f on why this is only half a lift |
 | `--noise-pulse-interval-ms` | 10000   | period of the `periodic` emitter                                                                   |
 | `--noise-pulse-ms`          | 200     | how long it holds the channel each time it fires                                                    |
 
@@ -581,18 +580,19 @@ adversarial case - a mesh cannot average it away.
 is needed to make it bite the stretched links first, because a fixed dB excursion removes the least
 margin first.
 
-`--noise-lift-share` makes that share of transient events **negative** - a quieter band. Note the
-asymmetry: **a lift here can improve a link that exists and cannot create one that does not**, because
-`neighbours` is thresholded on static RSSI. Degradation is modelled fully and lift only partly. For
-lift that extends reach, use ducting.
+Transient excursions only ever raise the floor. A band quieter than nominal is the temporal
+field's business - its excursion can fall below zero on its own, and `saved_by_quiet_band` counts
+the packets that arrived because of it. **For lift, use ducting** (§5.1g): a floor-only model can
+improve a link that already exists but can never create one, because `neighbours` is thresholded
+on static RSSI, and lift that does not extend the graph is not the interesting half.
 
 ### 5.1g Tropospheric ducting - `--duct-per-hour`
 
 Episodes when links far beyond normal range come alive: over water, under a temperature inversion, on
 a still evening, signal arrives 10-30 dB stronger than the path loss says it should. Kept separate
-from the noise profiles because it is the propagation path improving, not the floor moving, and unlike
-`--noise-lift-share` it **does** extend the link graph - a candidate set of sub-sensitivity pairs is
-built at construction and filtered by the lift in force.
+from the noise profiles because it is the propagation path improving, not the floor moving. It
+**does** extend the link graph - a candidate set of sub-sensitivity pairs is built at construction
+and filtered by the lift in force - which is why it is the only lift mechanism here.
 
 **A duct is not a gift, and reading it as extra reach misses the result.** Over 12 h, 30 nodes:
 
