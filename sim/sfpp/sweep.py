@@ -307,6 +307,33 @@ BLOCKS = {
         ["degree", "inverse"],
         ["--role-mix", "no-mute", "--siting-mix", "local-typical", "--nodes", "120"],
     ),
+    # Amplifiers, as separate transmit and receive gain. An amplified node is heard where it cannot
+    # hear, so it relays into places whose replies never reach it - watch one_way_links and
+    # cancelled_by_weaker_relay, not just reception.
+    "X-amplifiers": ("amplifier-mix", ["none", "sprinkled", "arms-race"], []),
+    # The field pathology: a PA fitted to exactly the nodes that hear worst.
+    "X-amplify-worst": ("amplify-worst", [0.0, 0.1, 0.3], []),
+    # Position and telemetry turned up, which is what an operator does when the map looks stale.
+    "X-chatty": ("broadcast-interval-s", [3600, 900, 300], []),
+    # The same, with the hop limit raised too - the other half of that instinct.
+    "X-chatty-hops": (
+        "broadcast-interval-s",
+        [3600, 900, 300],
+        ["--no-hop-spread", "--hop-limit", "7"],
+    ),
+    # Hop limits past what the 3-bit field can carry. See the manual: above 7 this is a wire-format
+    # question as much as a routing one.
+    "F-hoplimit": ("hop-limit", [3, 7, 15, 32], ["--no-hop-spread"]),
+    # Every node relaying everything, against the roles that exist to stop that.
+    "F-flooding": ("role-mix", ["baymesh-2026-08", "all-routers"], ["--rebroadcast-mode", "ALL"]),
+    # The turbo corners of the SF/bandwidth curve, including two presets no release has.
+    "F-preset-turbo": (
+        "preset",
+        ["EXTRA_SHORT_TURBO", "SHORT_TURBO", "LONG_FAST", "LONG_TURBO", "EXTRA_LONG_TURBO"],
+        [],
+    ),
+    # What a polite mesh costs: the region limit is a ceiling, not an obligation.
+    "F-txpower": ("tx-power", [30, 22, 17, 14], []),
     # The roles 2.8 added. ROUTER_LATE only speaks when the mesh still needs it, so promoting the
     # spine to it should cut relay airtime without costing reach - which is the claim to test.
     "R-routerlate": ("router-late-fraction", [0.0, 0.05, 0.1, 0.2], []),
@@ -391,37 +418,36 @@ def _flag_default(arm):
 # names belong together. Ordered cheap-to-expensive within each, so results accumulate rather than
 # waiting on the largest mesh in the group.
 BATCHES = {
-    # Which release a mesh runs, and what a half-upgraded one costs.
-    "versions": ["R-firmware", "R-versions", "R-mixed", "R-mixed-26"],
-    # The hop limit as an operator actually sets it: one value for everyone, against per-node
-    # limits, against nodes choosing their own from the histogram.
-    "hops": ["K-hopspread", "K-spread", "Q-hopassign", "R-adopt"],
-    # The archive itself: off, the incumbent walk, the sketch.
-    "protocol": ["Q-protocol", "Q-control"],
-    # The two unreleased mechanisms, each against its own control.
-    "unreleased": ["R-crladder", "R-repeats", "R-repeats-busy", "R-dmmode", "R-dmmode-cr"],
-    # One 2.8 mechanism per block, each with the conditions that make it do anything.
-    "mechanisms": [
-        "R-favourites",
-        "R-routerlate",
-        "R-roles",
-        "R-signing",
-        "R-signing-cost",
-        "R-rebroadcast",
-        "R-congestion-mode",
-        "R-warm",
-        "R-traceroute",
-        "R-traceroute-small",
-    ],
-    # What the mesh is made of and where it sits, which bounds every other block.
-    "shape": ["R-platform", "R-siting", "Q-topology", "K-density", "K-size"],
-    # Past the hot store, where the NodeDB stops being able to hold the mesh.
-    "scale": ["R-hotstore", "R-hopscale", "R-hotstore-stress", "R-oversubscribed"],
-    # Offered load and the clock, which set the denominator every share is quoted against.
-    "load": ["Q-interval", "P-diurnal", "P-preset", "P-congestion", "P-catchup"],
-    # The floor rather than the deployment: no CLIENT_MUTE, routers badly placed, nodes indoors.
+    # ---- PROPOSED: things that could be adopted, each against its own control ------------------
+    # Does this change earn its airtime? Every arm here has a "without it" cell.
+    "proposed-archive": ["Q-protocol", "Q-control", "R-srretries"],
+    "proposed-relay": ["R-repeats", "R-repeats-busy", "R-crladder", "R-dmmode", "R-dmmode-cr"],
+    "proposed-routing": ["R-traceroute", "R-traceroute-small", "R-adopt", "R-favourites"],
+    # ---- VERSIONING: what a release is worth, and what a half-upgraded mesh costs -------------
+    "versioning": ["R-firmware", "R-versions", "R-mixed", "R-mixed-26", "R-signing-cost", "R-signing"],
+    "versioning-hops": ["K-hopspread", "K-spread", "Q-hopassign"],
+    # ---- ADVERSARIAL: remove the things known to help, one at a time --------------------------
+    # Each arm deletes an improver rather than adding a stressor, so the loss is attributable.
     "adversarial": ["X-nomute", "X-badrouters", "X-siting", "X-worst"],
+    "adversarial-radio": ["X-amplifiers", "X-amplify-worst"],
+    "adversarial-load": ["X-chatty", "X-chatty-hops"],
+    # ---- FUTURE: beyond any release, to find where the design stops working -------------------
+    "future-hops": ["F-hoplimit", "F-flooding"],
+    "future-radio": ["F-preset-turbo", "F-txpower"],
+    # ---- CONTROLS: the mesh these are all measured against ------------------------------------
+    "shape": ["R-platform", "R-siting", "Q-topology", "K-density", "K-size"],
+    "scale": ["R-hotstore", "R-hopscale", "R-hotstore-stress", "R-oversubscribed"],
+    "load": ["Q-interval", "P-diurnal", "P-preset", "P-congestion", "P-catchup"],
+    "mechanisms": ["R-roles", "R-roles-fav", "R-routerlate", "R-rebroadcast", "R-congestion-mode", "R-warm", "R-congestion-input"],
+    # ---- ARCHIVE INTERNALS: how the sketch itself is tuned, not whether to have it -------------
+    "archive-cadence": ["D-cadence", "D-jitter", "D-resolve", "M-jitter"],
+    "archive-sketch": ["E-capacity", "E-width", "E-signed", "M-capacity"],
+    "archive-buckets": ["J-bucketmode", "J-window", "J-wincap", "J-timewin"],
+    "archive-placement": ["G-place", "G-hops", "G-servers", "G-allrouters", "N-place", "N-hops", "N-servers"],
+    "archive-transport": ["L-advert", "L-provide", "M-replayorder", "M-combined"],
+    "degradation": ["F-loss", "F-burst", "F-outage"],
 }
+
 
 
 def run_block(name, seeds, out_dir, grid=None):

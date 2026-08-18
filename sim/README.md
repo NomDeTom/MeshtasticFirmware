@@ -141,7 +141,8 @@ under `--grid` carries the grid in its filename, which is the usual reason one i
 
 | Flag                        | Default      | Meaning                                                                                          |
 | --------------------------- | ------------ | -------------------------------------------------------------------------------------------------- |
-| `--preset`                  | `LONG_FAST`  | modem preset. **Changes reception, not just airtime** - see §6                                   |
+| `--preset`                  | `LONG_FAST`  | modem preset. **Changes reception, not just airtime** - see §6. Two are ours, not upstream: `EXTRA_LONG_TURBO` (SF12/500 kHz) and `EXTRA_SHORT_TURBO` (SF5/500 kHz), with **extrapolated** sensitivity |
+| `--tx-power`                | region limit | transmit power in dBm. The region limit is a ceiling an operator may use, not one they must    |
 | `--profile`                 | `2.8`        | which release series' rules to obey: `2.4` … `2.8`, or `legacy`. See §9.1                        |
 | `--old-profile`             | `legacy`     | the rules the `--legacy-fraction` share runs instead. Inert at `--legacy-fraction 0`             |
 | `--legacy-fraction`         | 0.0          | share of nodes on `--old-profile`, drawn at random not by degree                                 |
@@ -343,6 +344,31 @@ nodes to administer strangers. That is deliberate - it is the case an operator h
 **SIMPLIFICATION:** the firmware's admin flow also carries a session key with its own expiry and a
 nonce exchange, and real config payloads span several packets. This measures whether the round trip
 is deliverable, not whether the whole session protocol completes.
+
+### 5.1c Presets past the shipped set
+
+`EXTRA_LONG_TURBO` and `EXTRA_SHORT_TURBO` are **not in any firmware build.** They extend the
+vendored table's own 500 kHz rows one spreading factor past each end, so a future-mesh block can ask
+what a different point on the curve would buy.
+
+| Preset | SF | BW | Sensitivity | Airtime 60 B | Degree | Diameter |
+| --- | --- | --- | --- | --- | --- | --- |
+| `EXTRA_SHORT_TURBO` | 5 | 500 kHz | −113.5 | 20 ms | 1.4 | fragmented |
+| `SHORT_TURBO` | 7 | 500 kHz | −118.5 | 60 ms | 2.2 | fragmented |
+| `LONG_FAST` | 11 | 250 kHz | −131.5 | 1264 ms | 8.9 | 7 |
+| `LONG_TURBO` | 11 | 500 kHz | −128.5 | 804 ms | 6.7 | 9 |
+| `EXTRA_LONG_TURBO` | 12 | 500 kHz | −131.0 | 1509 ms | 8.5 | 7 |
+
+**Sensitivity is extrapolated, not calculated.** The vendored figures come from an external
+calculator; across the 500 kHz rows they fall about 2.5 dB per spreading factor, and these continue
+that slope. Indicative of direction, not a link budget.
+
+`EXTRA_LONG_TURBO` turns out to be close to a wash against `LONG_FAST`: SF12 at 500 kHz has the same
+symbol time as SF11 at 250 kHz, so the extra bandwidth buys back exactly what the extra spreading
+costs, and CR8 then makes it slightly longer. Worth knowing before reading the block.
+
+Also: **SF5 and SF6 need an SX126x or SX128x.** An SX127x cannot do them at all, so
+`EXTRA_SHORT_TURBO` is not a setting every board could take even if the firmware offered it.
 
 ### 5.2 Archive placement - `--place`
 

@@ -2299,7 +2299,10 @@ print(",".join(failed))
         defaults = {
             a.option_strings[0]: a.default for a in build_parser()._actions if a.option_strings
         }
-        prose = {"-", "empty", "off", "on", "random", "per-class mix", "from board", "see §5"}
+        prose = {
+            "-", "empty", "off", "on", "random", "per-class mix", "from board", "see §5",
+            "region limit",
+        }
         wrong = []
         for line in section.splitlines():
             match = re.match(r"\|\s*`(--[a-z0-9-]+)`[^|]*\|\s*([^|]+?)\s*\|", line)
