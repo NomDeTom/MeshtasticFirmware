@@ -2296,6 +2296,9 @@ def main(argv=None):
             seed = opts.seed + repeat
         report = run_once(opts, seed)
         report["label"] = opts.label
+        # The commit that produced the numbers, in the numbers. Only the charts carried it before,
+        # so a saved JSON could not be told apart from one measured on different rules.
+        report["transport"] = AC.transport_pin()
         reports.append(report)
         summarise(report)
     if opts.out:

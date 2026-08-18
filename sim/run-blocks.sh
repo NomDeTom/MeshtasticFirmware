@@ -6,8 +6,11 @@
 # detaches properly, a lock stops a second launch racing the first, and a manifest records what was
 # asked for so a half-finished batch is visible rather than silent.
 #
-#   ./run-blocks.sh <out-dir> <seed-base> <block> [block...]
+#   ./run-blocks.sh <out-dir> <seed-base> <block|@batch> [block|@batch...]
 #   ./run-blocks.sh --status <out-dir>
+#
+# A @name argument expands to the blocks of that batch, so a themed group is launched by what it
+# asks rather than by listing its members. `python3 -m sfpp.sweep --list` prints both.
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -35,7 +38,29 @@ fi
 
 SEED_BASE=${2:?need a seed base}
 shift 2
-BLOCKS=("$@")
+
+# Expand any @batch argument into its blocks, leaving plain block names alone.
+BLOCKS=()
+for arg in "$@"; do
+	case "$arg" in
+	@*)
+		members=$(python3 -c "
+import sys
+from sfpp.sweep import BATCHES
+name = sys.argv[1]
+if name not in BATCHES:
+    sys.exit(f'unknown batch {name!r}; known: ' + ', '.join(sorted(BATCHES)))
+print(' '.join(BATCHES[name]))
+" "${arg#@}") || {
+			echo "$members"
+			exit 2
+		}
+		# shellcheck disable=SC2206
+		BLOCKS+=($members)
+		;;
+	*) BLOCKS+=("$arg") ;;
+	esac
+done
 [ ${#BLOCKS[@]} -gt 0 ] || {
 	echo "no blocks given"
 	exit 2
