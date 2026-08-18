@@ -1285,6 +1285,7 @@ class Campaign:
         started = time.time()
         self.generator.schedule(self.duration_ms)
         self._schedule_traceroutes()
+        self.mesh.start_hop_scaling()
         if self.chain is not None:
             for server in self.servers.values():
                 start = self.rng.uniform(0, server.interval_ms)
@@ -1348,6 +1349,7 @@ class Campaign:
             },
             "by_class": self._class_report(),
             "by_hop_limit": self._hop_report(),
+            "hop_scaling": self._hop_scaling_report(),
             "traffic": {
                 "originated": dict(self.generator.originated),
                 "congestion_coefficient": round(self.generator.congestion, 3),
@@ -1519,6 +1521,46 @@ class Campaign:
                 ),
             }
         return out
+
+    def _hop_scaling_report(self):
+        """Truth, observation and estimate for the mesh, averaged over the nodes that have rolled.
+
+        The three differ by construction. `truth` is the topological distance nothing on a device
+        can see; `observed` is every hop count the node actually heard, exhaustive; `estimated` is
+        what HopScalingModule would report after sampling, capping at 128 entries, colliding hashes
+        and scaling the survivors back up. The gap between the last two is what the estimator costs.
+        """
+        reports = [self.mesh.hop_report(i) for i in range(self.opts.nodes)]
+        rolled = [r for r in reports if r.get("rolls")]
+        if not rolled:
+            return {"nodes_rolled": 0}
+        hops = M.HopScaling.MAX_HOP + 1
+        mean = lambda key: [
+            round(statistics.mean(r[key][h] for r in rolled), 2) for h in range(hops)
+        ]
+        suggested = [r["suggested_hop"] for r in rolled]
+        return {
+            "nodes_rolled": len(rolled),
+            "truth_per_hop": mean("truth"),
+            "observed_per_hop": mean("observed"),
+            "estimated_per_hop": mean("estimated"),
+            "truth_total_mean": round(
+                statistics.mean(r["truth_total"] for r in rolled), 2
+            ),
+            "observed_total_mean": round(
+                statistics.mean(r["observed_total"] for r in rolled), 2
+            ),
+            "estimated_total_mean": round(
+                statistics.mean(r["estimated_total"] for r in rolled), 2
+            ),
+            "entries_mean": round(statistics.mean(r["entries"] for r in rolled), 2),
+            "sampling_denominator_max": max(
+                r["sampling_denominator"] for r in rolled
+            ),
+            "suggested_hop_mean": round(statistics.mean(suggested), 2),
+            "suggested_hop_spread": [min(suggested), max(suggested)],
+            "dropped_full": sum(r["dropped_full"] for r in rolled),
+        }
 
     def _reach_ceiling(self):
         """The best a node could do: the share of senders whose packets can physically reach it.

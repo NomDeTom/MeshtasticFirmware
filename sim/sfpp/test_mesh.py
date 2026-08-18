@@ -1108,6 +1108,170 @@ class WarmTier(unittest.TestCase):
         self.assertFalse(M.Profile("2.7").warm_store)
 
 
+class HopScalingEstimator(unittest.TestCase):
+    """HopScalingModule: sampled, capped, hash-collided, and hourly."""
+
+    def module(self):
+        return M.HopScaling(hash_seed=0)
+
+    def test_the_hash_is_the_identity_so_two_nodes_can_collide(self):
+        """Identity is a 16-bit hash, so a big enough mesh puts two nodes in one entry.
+
+        Real node numbers are needed to see it: the hash is multiplicative, and sequential ids
+        1..5000 produce no collisions at all, so a model numbering its nodes by array index would
+        report this estimator as exact.
+        """
+        module = self.module()
+        rng = random.Random(1)
+        collisions = {}
+        for _ in range(3000):
+            node_num = rng.randrange(1, 1 << 32)
+            collisions.setdefault(module.hash_node_id(node_num), []).append(node_num)
+        shared = [v for v in collisions.values() if len(v) > 1]
+        self.assertTrue(shared, "a 16-bit hash over enough nodes must collide")
+        self.assertEqual(
+            len({module.hash_node_id(n) for n in range(1, 5001)}),
+            5000,
+            "sequential ids never collide, which is why the model uses real node numbers",
+        )
+        a, b = shared[0][0], shared[0][1]
+        module.sample(a, 1)
+        module.sample(b, 4)
+        self.assertEqual(len(module.entries), 1, "one entry answers for both nodes")
+        module.roll_hour()
+        self.assertEqual(module.last_total, 1, "and the mesh looks one node smaller")
+
+    def test_sampling_admits_one_node_in_the_denominator(self):
+        module = self.module()
+        module.sampling_denominator = 4
+        admitted = sum(1 for node_num in range(1, 2001) if module.sample(node_num, 2))
+        self.assertGreater(admitted, 0)
+        self.assertLess(
+            admitted, 2000 // 3, "roughly a quarter of the hash space passes at 1/4"
+        )
+        for node_hash in module.entries:
+            self.assertEqual(node_hash & 3, 0)
+
+    def test_it_fills_and_then_raises_the_denominator(self):
+        module = self.module()
+        for node_num in range(1, 4000):
+            module.sample(node_num, 2)
+        self.assertLessEqual(len(module.entries), M.HopScaling.CAPACITY)
+        self.assertGreater(
+            module.sampling_denominator,
+            1,
+            "overflow coarsens the sample rather than dropping the newest",
+        )
+        self.assertGreaterEqual(module.filtering_denominator, module.sampling_denominator)
+
+    def test_recency_is_a_thirteen_hour_bitmap(self):
+        module = self.module()
+        module.sample(12345, 3)
+        node_hash = module.hash_node_id(12345)
+        self.assertEqual(module.entries[node_hash][1], 1)
+        for _ in range(12):
+            module.roll_hour()
+        self.assertTrue(module.entries[node_hash][1], "still inside the window")
+        module.roll_hour()
+        self.assertFalse(
+            module.entries[node_hash][1], "thirteen rolls without being heard is stale"
+        )
+
+    def test_a_stale_entry_is_trimmed_before_the_denominator_climbs(self):
+        module = self.module()
+        for node_num in range(1, 200):
+            module.sample(node_num, 2)
+        before = module.sampling_denominator
+        for _ in range(M.HopScaling.HOURS_TRACKED + 1):
+            module.roll_hour()
+        module.trim_if_needed()
+        self.assertEqual(module.entries, {}, "everything aged out")
+        self.assertLessEqual(module.sampling_denominator, before + 1)
+
+    def test_the_walk_recommends_the_first_hop_reaching_the_target(self):
+        """40 nodes is the threshold, and the walk extends one hop further when that is cheap.
+
+        5 + 15 + 25 clears 40 at three hops. The fourth hop reaches nobody at all here, so
+        extending to it costs nothing and the budget - 40 nodes, stretched toward 80 in proportion
+        to how politely the mesh is behaving - allows it: (45 + 0) * 4 <= 40 * 4 + 40 * 2.
+        """
+        module = self.module()
+        per_hop = [0] * (M.HopScaling.MAX_HOP + 1)
+        per_hop[1], per_hop[2], per_hop[3] = 5, 15, 25
+        self.assertEqual(module._walk(per_hop, sum(per_hop)), 4)
+
+    def test_the_extension_is_refused_when_the_next_hop_is_populated(self):
+        """(45 + 60) * 4 is 420, past the 240 the budget allows, so the walk stops at three."""
+        module = self.module()
+        per_hop = [0] * (M.HopScaling.MAX_HOP + 1)
+        per_hop[1], per_hop[2], per_hop[3], per_hop[4] = 5, 15, 25, 60
+        self.assertEqual(module._walk(per_hop, sum(per_hop)), 3)
+
+    def test_a_mesh_too_small_to_reach_the_target_asks_for_every_hop(self):
+        module = self.module()
+        per_hop = [0] * (M.HopScaling.MAX_HOP + 1)
+        per_hop[1] = 3
+        self.assertEqual(module._walk(per_hop, 3), M.HopScaling.MAX_HOP)
+
+    def test_the_scaled_buckets_are_the_estimate_of_the_mesh(self):
+        module = self.module()
+        module.filtering_denominator = 8
+        per_hop = [0] * (M.HopScaling.MAX_HOP + 1)
+        per_hop[2] = 6
+        # 6 sampled nodes at 1/8 stands for 48, which clears the 40-node threshold at two hops -
+        # then extends to three, since nothing was sampled beyond it.
+        self.assertEqual(module._walk(per_hop, 6), 3)
+        module.filtering_denominator = 1
+        self.assertEqual(
+            module._walk(per_hop, 6),
+            M.HopScaling.MAX_HOP,
+            "the same six nodes unscaled never reach the target at all",
+        )
+
+    def test_no_series_before_this_tree_has_the_module(self):
+        for version in ("2.5", "2.6", "2.7"):
+            self.assertFalse(M.Profile(version).hop_scaling, version)
+            mesh = small_mesh(nodes=6, profile=version)
+            self.assertIsNone(mesh.nodes[0].hop_scaling)
+        self.assertTrue(M.Profile("2.8").hop_scaling)
+        self.assertIsNotNone(small_mesh(nodes=6).nodes[0].hop_scaling)
+
+    def test_all_three_histograms_are_indexed_by_hops_away(self):
+        """A direct neighbour is zero hops away, not one, in every one of the three.
+
+        getHopsAway is hop_start - hop_limit, so an unrelayed packet reads 0. Reporting truth as a
+        BFS distance would put the same neighbour in bucket 1 and make the comparison meaningless.
+        """
+        mesh = small_mesh(nodes=10, seed=4)
+        report = mesh.hop_report(0)
+        neighbours = len(mesh.neighbours[0])
+        self.assertEqual(report["truth"][0], neighbours)
+        peer = next(iter(mesh.neighbours[0]))
+        mesh.originate(peer, 1, 40)
+        mesh.run(mesh.now + 20000.0)
+        self.assertEqual(
+            mesh.nodes[0].observed_hops[peer], 0, "heard directly, so zero hops away"
+        )
+
+    def test_the_report_puts_truth_observation_and_estimate_together(self):
+        mesh = small_mesh(nodes=12, seed=3)
+        for index in range(12):
+            mesh.originate(index, 1, 40)
+            mesh.run(mesh.now + 8000.0)
+        for node in mesh.nodes:
+            node.hop_scaling.roll_hour()
+        report = mesh.hop_report(0)
+        self.assertEqual(sum(report["truth"]), report["truth_total"])
+        self.assertGreater(report["observed_total"], 0)
+        self.assertIn("estimated", report)
+        self.assertIn("suggested_hop", report)
+        self.assertLessEqual(
+            report["observed_total"],
+            report["truth_total"],
+            "a node cannot observe more peers than exist within reach",
+        )
+
+
 class Traceroute(unittest.TestCase):
     """TraceRouteModule: a reply teaches a route, and this tree refuses to be told a lie."""
 
@@ -1445,6 +1609,9 @@ class ExtraRepeats(unittest.TestCase):
     def mesh(self, extra=True, nodes=6):
         mesh = small_mesh(nodes=nodes, profile=M.Profile("2.8", extra_repeats=extra))
         for node in mesh.nodes:
+            if node.hop_scaling is None:
+                node.hop_scaling = M.HopScaling()
+        for node in mesh.nodes:
             node.util_ring = [0.0] * len(node.util_ring)
             node.tx_ring = [0.0] * len(node.tx_ring)
         return mesh
@@ -1510,12 +1677,38 @@ class ExtraRepeats(unittest.TestCase):
         self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
 
     def test_a_dense_neighbourhood_forces_it_too(self):
+        """The count comes from HopScalingModule's zero-hop bucket, which only moves hourly.
+
+        So a mesh that has just become dense keeps tolerating repeats until the next roll: the
+        threshold is enforced against an estimate that lags the truth by up to an hour.
+        """
         mesh = self.mesh(nodes=20)
+        node = mesh.nodes[0]
         for peer in range(1, 12):
             heard(mesh, 0, peer, hops_away=0)
-        self.assertGreater(mesh.nodes[0].direct_neighbours, 10)
-        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
+            node.hop_scaling.sample(mesh.nodes[peer].node_num, 0)
+        self.assertGreater(node.direct_neighbours, 10)
+        self.assertFalse(
+            mesh._should_cancel_dupe(0, self.text()),
+            "nothing has rolled yet, so the module still reports no neighbours",
+        )
+        node.hop_scaling.roll_hour()
+        self.assertGreater(node.hop_scaling.last_per_hop[0], 10)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text(packet_id=6)))
         self.assertEqual(mesh.stats["extra_repeats_suppressed"], 1)
+
+    def test_without_the_module_the_exact_neighbour_count_is_used(self):
+        """An older release has no estimator, so the hot store answers instead."""
+        mesh = small_mesh(
+            nodes=20, profile=M.Profile("2.7", extra_repeats=True)
+        )
+        for node in mesh.nodes:
+            node.util_ring = [0.0] * len(node.util_ring)
+            node.tx_ring = [0.0] * len(node.tx_ring)
+        self.assertIsNone(mesh.nodes[0].hop_scaling)
+        for peer in range(1, 12):
+            heard(mesh, 0, peer, hops_away=0)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
 
     def test_a_router_still_never_cancels(self):
         """The role gate runs first, so tolerating copies cannot make a router cancel one."""

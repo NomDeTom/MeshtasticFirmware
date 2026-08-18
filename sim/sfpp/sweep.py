@@ -161,6 +161,9 @@ BLOCKS = {
     # What the 2.8 fold-in is worth against the pre-fold-in transport: same seed, same mesh, same
     # traffic, only the MAC and routing rules change.
     "R-firmware": ("profile", ["legacy", "2.8"], []),
+    # How far the firmware's estimator sits from the exhaustive count it approximates, as the mesh
+    # outgrows its 128 entries. Reported truth / observed / estimated side by side.
+    "R-hopscale": ("nodes", [60, 120, 250, 500], ["--scale-area", "--hop-spread"]),
     # Does traceroute learning pay for its own airtime? Each reply teaches a route for every node
     # beyond the learner, and this tree's corroboration guard refuses a share of what it is told.
     "R-traceroute": ("traceroute-per-hour", [0.0, 0.25, 1.0, 4.0], []),
