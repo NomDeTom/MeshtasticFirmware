@@ -1782,12 +1782,10 @@ class NoiseField:
     it bite the stretched links first - a fixed dB excursion removes the least margin first, so the
     marginal population is exactly who pays.
 
-    `lift_share` of transient events are NEGATIVE - a quieter band, further reach. This is as close
-    as this model gets to the lift it is meant to invert, and the asymmetry is worth stating: a lift
-    event can improve a link that exists, and cannot create one that does not, because `neighbours`
-    is thresholded on static RSSI and the graph never moves. Degradation is therefore modelled fully
-    and lift only partly. Extending range under lift needs the sensitivity cliff gone, which is a
-    change to the vendored physics and not this.
+    Transient excursions are one-directional: the floor rises. A band that is quieter than nominal
+    is left to the temporal field, whose excursion can fall below zero on its own. Reach that
+    extends under a lift belongs to `Ducting`, which moves the link graph instead of the floor -
+    the thing a floor-only model cannot do, because `neighbours` is thresholded on static RSSI.
     """
 
     MAX_SAMPLES = 64  # a 36 s VERY_LONG_SLOW frame at tau=500 ms would otherwise cost 72 hashes
@@ -1804,7 +1802,6 @@ class NoiseField:
         transient_db=8.0,
         transient_ms=30000.0,
         transient_radius_frac=0.35,
-        lift_share=0.0,
         pulse_interval_ms=10000.0,
         pulse_ms=200.0,
         area=8000.0,
@@ -1821,7 +1818,6 @@ class NoiseField:
         self.transient_db = transient_db
         self.transient_ms = max(1.0, transient_ms)
         self.transient_radius_frac = transient_radius_frac
-        self.lift_share = lift_share
         self.area = area
 
     def _smooth(self, lane, t_ms):
@@ -1853,10 +1849,7 @@ class NoiseField:
         radius = self.transient_radius_frac * self.area * (0.5 + _unit(self.seed, 0x54, window))
         if math.dist(pos, (cx, cy)) > radius:
             return 0.0
-        amp = self.transient_db * (0.5 + _unit(self.seed, 0x55, window))
-        if _unit(self.seed, 0x56, window) < self.lift_share:
-            amp = -amp
-        return amp
+        return self.transient_db * (0.5 + _unit(self.seed, 0x55, window))
 
     def _transient_db(self, pos, start, end):
         if self.transient_rate <= 0:
@@ -2323,10 +2316,11 @@ class Mesh:
             "receptions": 0,
             "lost_to_collision": 0,
             # Lost with a noise excursion that the static floor would have delivered through, and
-            # delivered under a lift event the static floor would have dropped. Both are attributed
-            # off the same single draw, so neither costs a extra random number.
+            # delivered through a band quieter than nominal - the temporal field below zero - that
+            # the static floor would have dropped. Both are attributed off the same single draw, so
+            # neither costs an extra random number.
             "lost_to_noise_excursion": 0,
-            "saved_by_noise_lift": 0,
+            "saved_by_quiet_band": 0,
             # Periodic interference caught the frame in flight: a hard loss, not a probability.
             "wiped_by_periodic": 0,
             # Receptions that happened only because a duct was open - the pair is not a link at rest.
@@ -3316,7 +3310,7 @@ class Mesh:
             if lost and draw <= calm:
                 self.stats["lost_to_noise_excursion"] += 1
             elif not lost and draw > calm:
-                self.stats["saved_by_noise_lift"] += 1
+                self.stats["saved_by_quiet_band"] += 1
         return lost
 
     # ---- breaking the mesh -------------------------------------------------------------
