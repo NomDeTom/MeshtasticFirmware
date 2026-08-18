@@ -252,6 +252,16 @@ BLOCKS = {
     # 64 bytes on every signable broadcast, against the reliability that buys. Report the share of
     # signable traffic that was actually signed rather than assuming all of it was.
     "R-signing": ("signature-policy", ["COMPATIBLE", "BALANCED", "STRICT"], []),
+    # --signature-policy is a receive rule and never decides whether we sign, so it cannot price
+    # signing itself. Router.cpp signs every non-PKI broadcast, which puts 66 bytes on the packet
+    # and on each of its rebroadcasts; at LONG_FAST that is most of a doubling of channel airtime.
+    # This is the only arm that turns it off inside 2.8, and so the only way to tell "2.8 costs
+    # reach" apart from "signing costs reach".
+    "R-signing-cost": (
+        "profile-flag",
+        ["signing=false", "signing=true"],
+        ["--profile", "2.8"],
+    ),
     # Each node throttling on its own online count, against one coefficient for the whole mesh. The
     # firmware does the former; every figure measured here before did the latter.
     "R-congestion-mode": ("congestion-mode", ["static", "adaptive"], ["--nodes", "120"]),
@@ -353,6 +363,7 @@ BATCHES = {
         "R-routerlate",
         "R-roles",
         "R-signing",
+        "R-signing-cost",
         "R-rebroadcast",
         "R-congestion-mode",
         "R-warm",
