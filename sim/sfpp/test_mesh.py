@@ -8,6 +8,7 @@ Run from `sim/`:  python3 -m unittest sfpp.test_mesh -v
 """
 
 import json
+import math
 import os
 import pathlib
 import sys
@@ -2011,6 +2012,185 @@ class AsymmetricGain(unittest.TestCase):
         """A basement is a bad place to transmit from and to receive in; only a PA is one-sided."""
         mesh = small_mesh(nodes=20, seed=7, siting_mix="basement")
         self.assertEqual(mesh.tx_gain, mesh.rx_gain)
+
+
+class Propagation(unittest.TestCase):
+    """Stretch, a moving noise floor, and ducting."""
+
+    def test_a_rebuild_moves_nothing_it_was_not_asked_to(self):
+        """The bug this guards: _build_links redrew every pair's skew, so fitting one amplifier
+        re-randomised the whole mesh and consumed the RNG the traffic generator shares."""
+        mesh = small_mesh(nodes=30, seed=7, area=6000.0)
+        before = [row[:] for row in mesh.rssi]
+        mesh.tx_gain[0] += 15.0
+        mesh._build_links()
+        moved = [
+            (i, j)
+            for i in range(1, 30)
+            for j in range(1, 30)
+            if i != j and abs(mesh.rssi[i][j] - before[i][j]) > 1e-9
+        ]
+        self.assertEqual(moved, [], "a pair touching no amplified node must not move")
+
+    def test_a_rebuild_draws_no_randomness(self):
+        mesh = small_mesh(nodes=20, seed=7, area=6000.0)
+        state = mesh.rng.getstate()
+        mesh._build_links()
+        self.assertEqual(mesh.rng.getstate(), state, "a rebuild must not touch the RNG stream")
+
+    def test_stretch_keeps_the_arrangement_and_scales_the_distances(self):
+        pts = [(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)]
+        out = M.stretch_points(pts, 2.0)
+        self.assertAlmostEqual(math.dist(out[0], out[1]), 200.0)
+        self.assertAlmostEqual(math.dist(out[0], out[2]), 200.0)
+        # About the centroid, so the mesh grows in place rather than translating.
+        cx = sum(x for x, _ in out) / 3
+        cy = sum(y for _, y in out) / 3
+        self.assertAlmostEqual(cx, sum(x for x, _ in pts) / 3)
+        self.assertAlmostEqual(cy, sum(y for _, y in pts) / 3)
+
+    def test_stretch_consumes_no_randomness(self):
+        """So every arm of a stretch sweep carries the same traffic schedule."""
+        draws = []
+        for factor in (1.0, 2.5):
+            rng = random.Random(11)
+            M.build(M.make_config(), 25, 6000.0, rng, hop_limit=3, stretch=factor)
+            draws.append([rng.random() for _ in range(4)])
+        self.assertEqual(draws[0], draws[1])
+
+    def test_stretching_deletes_links_rather_than_degrading_them(self):
+        """The headline of any stretch result, and the reason the census has a fixed denominator."""
+        conf = M.make_config()
+        mesh = M.build(conf, 60, 8000.0, random.Random(101), hop_limit=3, stretch=1.5)
+        census = mesh.stretch_census()
+        self.assertGreater(census["lost_to_cliff_share"], census["marginal_now_share"])
+        self.assertEqual(
+            census["links_at_stretch_1"], census["still_links"] + census["lost_to_cliff"]
+        )
+
+    def test_the_stretch_census_denominator_does_not_move(self):
+        conf = M.make_config()
+        counts = set()
+        for factor in (1.0, 1.5, 2.0, 3.0):
+            mesh = M.build(conf, 40, 8000.0, random.Random(5), hop_limit=3, stretch=factor)
+            counts.add(mesh.stretch_census()["links_at_stretch_1"])
+        self.assertEqual(len(counts), 1, "the reference link set must be stretch-invariant")
+
+    def test_a_longer_packet_meets_a_worse_temporal_excursion(self):
+        """The whole point of the temporal profile: judged on the worst excursion its airtime spans."""
+        field = M.NoiseField(3, temporal=True, sigma_db=3.0, tau_ms=500.0)
+        short = [field.excursion_db(0, (0, 0), t * 71.0, t * 71.0 + 175.0) for t in range(300)]
+        long_ = [field.excursion_db(0, (0, 0), t * 71.0, t * 71.0 + 21000.0) for t in range(300)]
+        self.assertGreater(sum(long_) / len(long_), sum(short) / len(short) + 2.0)
+
+    def test_the_noise_field_draws_no_randomness_and_repeats(self):
+        a = M.NoiseField(9, temporal=True, transient=True, transient_rate_per_hour=20.0)
+        b = M.NoiseField(9, temporal=True, transient=True, transient_rate_per_hour=20.0)
+        for t in (0.0, 1234.5, 999999.0):
+            self.assertEqual(
+                a.excursion_db(2, (100.0, 200.0), t, t + 800.0),
+                b.excursion_db(2, (100.0, 200.0), t, t + 800.0),
+            )
+
+    def test_periodic_interference_catches_long_frames_and_spares_short_ones(self):
+        field = M.NoiseField(1, periodic=True, pulse_interval_ms=10000.0, pulse_ms=200.0)
+        share = lambda span: sum(  # noqa: E731
+            field.wiped(t * 37.0, t * 37.0 + span) for t in range(2000)
+        ) / 2000.0
+        self.assertLess(share(175.0), 0.08)  # SHORT_TURBO at a full payload
+        self.assertEqual(share(11670.0), 1.0)  # LONG_MODERATE cannot dodge a 10 s period
+        self.assertGreater(share(3623.0), share(351.0))  # LONG_FAST over SHORT_FAST
+
+    def test_a_duct_brings_pairs_into_range_that_are_not_links(self):
+        conf = M.make_config()
+        duct = M.Ducting(1, rate_per_hour=60.0, gain_db=25.0, duration_ms=600000.0)
+        mesh = M.build(conf, 40, 12000.0, random.Random(3), hop_limit=3, ducting=duct)
+        self.assertTrue(any(mesh.duct_reach), "there must be pairs a duct could reach")
+        # Nothing in duct_reach is a link at rest, by construction.
+        sens = conf.current_preset["sensitivity"]
+        for i, cands in enumerate(mesh.duct_reach):
+            for j in cands:
+                self.assertLess(mesh.rssi[i][j], sens)
+                self.assertNotIn(j, mesh.neighbours[i])
+
+    def test_a_duct_costs_contention_as_well_as_paying_reach(self):
+        """A duct is not a free gain: the extra audience contends and collides."""
+        conf = M.make_config()
+
+        def run(rate):
+            duct = (
+                M.Ducting(1, rate_per_hour=rate, gain_db=25.0, duration_ms=600000.0)
+                if rate
+                else None
+            )
+            mesh = M.build(conf, 30, 9000.0, random.Random(8), hop_limit=3, ducting=duct)
+            for step in range(120):
+                mesh.originate(step % 30, 1, 60, kind="text")
+                mesh.run(mesh.now + 4000.0)
+            return mesh.stats
+
+        calm, ducted = run(0.0), run(60.0)
+        self.assertGreater(ducted["receptions"], calm["receptions"])
+        self.assertGreater(ducted["ducted_receptions"], 0)
+        self.assertGreaterEqual(ducted["lost_to_collision"], calm["lost_to_collision"])
+
+
+class FirmwarePresets(unittest.TestCase):
+    def test_the_derived_sensitivity_reproduces_the_vendored_table(self):
+        """What licenses deriving the missing presets instead of extrapolating a slope."""
+        conf = M.make_config()
+        for name, p in conf.MODEM_PRESETS.items():
+            if name in M.FIRMWARE_PRESETS or name in M.EXTRA_PRESETS:
+                continue
+            self.assertAlmostEqual(
+                p["sensitivity"], M.derived_sensitivity(p["bw"], p["sf"]), delta=0.05,
+                msg=f"{name} does not fall out of kTB + 6 dB NF + the SF limit",
+            )
+
+    def test_the_presets_this_firmware_ships_are_all_present(self):
+        """src/mesh/MeshRadio.h modemPresetToParams is the authority; these were missing."""
+        conf = M.make_config()
+        for name, sf, bw, cr in (
+            ("MEDIUM_TURBO", 9, 500e3, 5),
+            ("LITE_FAST", 9, 125e3, 5),
+            ("LITE_SLOW", 10, 125e3, 5),
+            ("NARROW_FAST", 7, 62.5e3, 6),
+            ("NARROW_SLOW", 8, 62.5e3, 6),
+        ):
+            p = conf.MODEM_PRESETS[name]
+            self.assertEqual((p["sf"], p["bw"], p["cr"]), (sf, bw, cr), name)
+
+    def test_the_overlap_window_covers_the_longest_frame_at_every_preset(self):
+        """A frame still in flight past the window is dropped from the interferer scan."""
+        for name in ("SHORT_TURBO", "LONG_FAST", "LONG_MODERATE", "LONG_SLOW", "VERY_LONG_SLOW"):
+            conf = M.make_config(preset=name)
+            mesh = M.build(conf, 8, 4000.0, random.Random(1), hop_limit=3)
+            longest = mesh.airtime_ms(M.MAX_PAYLOAD_BYTES)
+            self.assertGreater(mesh.max_airtime_ms, longest, name)
+
+    def test_the_overlap_window_is_not_one_constant_for_every_preset(self):
+        """20 s was both too small at the slow end and a hundredfold too big at the fast end."""
+        windows = {}
+        for name in ("SHORT_TURBO", "VERY_LONG_SLOW"):
+            conf = M.make_config(preset=name)
+            windows[name] = M.build(
+                conf, 8, 4000.0, random.Random(1), hop_limit=3
+            ).max_airtime_ms
+        self.assertLess(windows["SHORT_TURBO"], 1000.0)
+        self.assertGreater(windows["VERY_LONG_SLOW"], 35000.0)
+
+    def test_a_full_payload_is_not_six_seconds_on_long_slow(self):
+        """MAX_AIRTIME_MS was justified against a 6 s figure. A full LONG_SLOW payload is 21 s, and
+        VERY_LONG_SLOW exceeds the window outright, which drops in-flight interferers from the scan.
+        """
+        conf = M.make_config()
+        for name, at_least in (("LONG_SLOW", 20000.0), ("VERY_LONG_SLOW", 35000.0)):
+            conf.MODEM_PRESET = name
+            p = conf.current_preset
+            air = M.Mesh.airtime_ms(
+                type("X", (), {"conf": conf})(), 237, p["cr"]
+            )
+            self.assertGreater(air, at_least, f"{name} at a full payload")
 
 
 class ToolingContract(unittest.TestCase):

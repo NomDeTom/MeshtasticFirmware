@@ -352,8 +352,11 @@ def _noise_field(opts, seed, area):
         return None
     return M.NoiseField(
         seed=(int(seed) ^ 0x4E4F4953),
-        temporal=profile in ("temporal", "both"),
-        transient=profile in ("transient", "both"),
+        temporal=profile in ("temporal", "both", "all"),
+        transient=profile in ("transient", "both", "all"),
+        periodic=profile in ("periodic", "all"),
+        pulse_interval_ms=getattr(opts, "noise_pulse_interval_ms", 10000.0),
+        pulse_ms=getattr(opts, "noise_pulse_ms", 200.0),
         sigma_db=getattr(opts, "noise_sigma_db", 3.0),
         tau_ms=getattr(opts, "noise_tau_ms", 500.0),
         transient_rate_per_hour=getattr(opts, "noise_transient_per_hour", 6.0),
@@ -361,6 +364,20 @@ def _noise_field(opts, seed, area):
         transient_ms=getattr(opts, "noise_transient_ms", 30000.0),
         transient_radius_frac=getattr(opts, "noise_transient_radius", 0.35),
         lift_share=getattr(opts, "noise_lift_share", 0.0),
+        area=area,
+    )
+
+
+def _ducting(opts, seed, area):
+    """Tropospheric ducting, or None. Its own seed constant, for the reason _noise_field has one."""
+    rate = getattr(opts, "duct_per_hour", 0.0)
+    if rate <= 0:
+        return None
+    return M.Ducting(
+        seed=(int(seed) ^ 0x44554354),
+        rate_per_hour=rate,
+        gain_db=getattr(opts, "duct_gain_db", 20.0),
+        duration_ms=getattr(opts, "duct_ms", 1800000.0),
         area=area,
     )
 
@@ -410,6 +427,7 @@ class Campaign:
             amplify_worst=getattr(opts, "amplify_worst", 0.0),
             stretch=getattr(opts, "stretch", 1.0),
             noise=_noise_field(opts, seed, self.area),
+            ducting=_ducting(opts, seed, self.area),
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(
@@ -2396,11 +2414,47 @@ def build_parser():
     ap.add_argument(
         "--noise-profile",
         default="none",
-        choices=("none", "temporal", "transient", "both"),
+        choices=("none", "temporal", "transient", "periodic", "both", "all"),
         help="a noise floor that moves, on top of --noise-model's static one. temporal is a smooth "
         "field with a coherence time, and a packet is judged on the worst excursion its own airtime "
         "spans - so a long frame is disproportionately exposed. transient is episodic and spatial: "
-        "an interferer switching on over part of the map",
+        "an interferer switching on over part of the map. periodic is a regular emitter that wipes "
+        "out whatever is in flight when it fires, which is the hardest length penalty of the three. "
+        "both is temporal+transient; all adds periodic",
+    )
+    ap.add_argument(
+        "--noise-pulse-interval-ms",
+        type=float,
+        default=10000.0,
+        help="period of the periodic emitter. The chance a frame is caught is (airtime + pulse) / "
+        "interval, so this and the preset's airtime together decide whether a preset is usable at "
+        "all near one: at 10 s, LONG_MODERATE at a full payload is hit every single time",
+    )
+    ap.add_argument(
+        "--noise-pulse-ms",
+        type=float,
+        default=200.0,
+        help="how long the periodic emitter holds the channel each time it fires",
+    )
+    ap.add_argument(
+        "--duct-per-hour",
+        type=float,
+        default=0.0,
+        help="tropospheric ducting episodes per hour. A duct is not a gift: it brings distant nodes "
+        "into range, and the extra audience contends, collides and is written into NodeDBs and "
+        "next_hops that outlive it. Read ducted_receptions beside lost_to_collision",
+    )
+    ap.add_argument(
+        "--duct-gain-db",
+        type=float,
+        default=20.0,
+        help="how much signal a duct adds at its peak; each episode draws half to full of this",
+    )
+    ap.add_argument(
+        "--duct-ms",
+        type=float,
+        default=1800000.0,
+        help="how long one ducting episode lasts",
     )
     ap.add_argument(
         "--noise-sigma-db",
