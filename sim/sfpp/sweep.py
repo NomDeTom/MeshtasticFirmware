@@ -16,6 +16,7 @@ import os
 import random
 import statistics
 import time
+from functools import lru_cache
 
 from . import autochart as AC
 from . import report as RP
@@ -334,14 +335,41 @@ BLOCKS = {
 
 
 def cell_argv(arm, value, extra):
+    """The command line for one cell of a block.
+
+    A false arm cannot simply omit its flag. Omitting it lands on the parser's default, and a flag
+    that defaults to true - `--hop-spread` is one - then reads as true in both cells, so the block
+    produces two identical rows. Where the parser offers the negation, emit it; where it does not,
+    say so rather than quietly measuring the same thing twice.
+    """
     argv = list(BASE) + list(extra)
     if isinstance(value, bool):
-        # A flag arm: present or absent, no value.
         if value:
             argv.append(f"--{arm}")
+        elif _flag_default(arm) is True:
+            negation = f"--no-{arm}"
+            if negation not in _known_flags():
+                raise ValueError(
+                    f"--{arm} defaults to true and has no {negation}; "
+                    f"a false arm cannot be expressed and would repeat the true one"
+                )
+            argv.append(negation)
     else:
         argv += [f"--{arm}", str(value)]
     return argv
+
+
+@lru_cache(maxsize=1)
+def _known_flags():
+    return {opt for a in build_parser()._actions for opt in a.option_strings}
+
+
+@lru_cache(maxsize=None)
+def _flag_default(arm):
+    for action in build_parser()._actions:
+        if f"--{arm}" in action.option_strings:
+            return action.default
+    return None
 
 
 # Named groups, so a batch can be launched by what it asks rather than by remembering which block

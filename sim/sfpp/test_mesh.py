@@ -2027,6 +2027,36 @@ print(",".join(failed))
         unknown = sorted({arm for arm, _, _ in BLOCKS.values()} - known)
         self.assertEqual(unknown, [], "sweep arms that no longer exist on the command line")
 
+    def test_every_block_cell_actually_differs_from_its_neighbours(self):
+        """Two cells of one block must parse to different values for the arm they sweep.
+
+        The enabling-condition test below checks an arm has the partner flag it needs. This checks
+        something weaker and more general: that the block's own cells are distinguishable at all.
+        K-spread passed every other check and still produced two identical rows, because a false
+        arm omitted its flag and --hop-spread defaults to true, so both cells ran with it on.
+        """
+        from .campaign import build_parser
+        from .sweep import BLOCKS, cell_argv
+
+        parser = build_parser()
+        dest = {}
+        for action in parser._actions:
+            for opt in action.option_strings:
+                dest[opt.lstrip("-")] = action.dest
+
+        identical = []
+        for name, (arm, values, grid) in BLOCKS.items():
+            seen = {}
+            for value in values:
+                opts = parser.parse_args(cell_argv(arm, value, grid))
+                key = getattr(opts, dest.get(arm, arm.replace("-", "_")), None)
+                # --profile-flag accumulates into a list, so make it comparable.
+                key = tuple(key) if isinstance(key, list) else key
+                if key in seen:
+                    identical.append(f"{name}: {value!r} and {seen[key]!r} both give {arm}={key!r}")
+                seen[key] = value
+        self.assertEqual(identical, [], "block cells that are the same run twice")
+
     def test_no_block_sweeps_an_arm_its_grid_leaves_inert(self):
         """An arm that needs a second flag produces identical rows without it, and reads as a result.
 
