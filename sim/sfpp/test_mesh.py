@@ -1937,6 +1937,41 @@ class PacketSigning(unittest.TestCase):
         self.assertTrue(mesh._signature_policy_admits(0, packet))
 
 
+class TracerouteLegs(unittest.TestCase):
+    """RouteDiscovery keeps the way out and the way home in separate arrays."""
+
+    def test_a_reply_records_its_own_leg_not_the_outbound_one(self):
+        """A reply need not retrace the request, so its relays must not land on the forward path.
+
+        With one shared list, a return-leg relay was appended to the route the request measured,
+        and _traceroute_learn then taught it as a forward next hop under cover of the corroboration
+        guard. TraceRouteModule.cpp:377 picks the array by direction; this mirrors that.
+        """
+        mesh = small_mesh(nodes=6, seed=3)
+        request = M.Packet(1, 0, M.TRACEROUTE_PORTNUM, 20, destination=5)
+        request.route = [1, 2]
+        request.route_back = None
+        mesh._record_traceroute_hop(3, request)
+        self.assertEqual(request.route, [1, 2, 3], "an outbound relay extends the forward path")
+
+        reply = M.Packet(2, 5, M.TRACEROUTE_PORTNUM, 20, destination=0, request_id=1)
+        reply.route = [1, 2, 3]
+        reply.route_back = []
+        mesh._record_traceroute_hop(4, reply)
+        self.assertEqual(reply.route, [1, 2, 3], "the forward path is what the request measured")
+        self.assertEqual(reply.route_back, [4], "the way home is recorded separately")
+
+    def test_both_legs_are_charged_for_airtime(self):
+        """Both arrays ride the same RouteDiscovery, so both grow the packet."""
+        mesh = small_mesh(nodes=6, seed=3)
+        reply = M.Packet(2, 5, M.TRACEROUTE_PORTNUM, 20, destination=0, request_id=1)
+        reply.route = [1, 2]
+        reply.route_back = []
+        mesh._record_traceroute_hop(4, reply)
+        expected = M.TRACEROUTE_BASE_BYTES + 3 * M.TRACEROUTE_BYTES_PER_HOP
+        self.assertEqual(reply.length, expected)
+
+
 class ToolingContract(unittest.TestCase):
     """Things that break a run without failing a test, unless something checks them."""
 

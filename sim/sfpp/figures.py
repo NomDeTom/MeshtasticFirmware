@@ -227,11 +227,18 @@ def fig_loss(runs_dir, out_dir):
 
 
 def recovery(reports):
-    """Of everything an ordinary node missed, the share the archive holds. The payoff metric."""
+    """Of everything an ordinary node missed, the share the archive holds. The payoff metric.
+
+    Guarded the way analyse.py's block_table is: a cell whose baseline reception approaches 1 has
+    almost nothing left to recover, and dividing by that headroom unguarded produced a -193%
+    reading there before the guard went in. At exactly 1.0 it is a divide by zero, which until now
+    only survived because fig_topology wraps the whole chart in a broad except and skips it.
+    """
     rec = mean(reports, ("baseline", "text_reception_mean"))
     one = mean(reports, ("sfpp", "held_fraction_mean"))
     allof = mean(reports, ("sfpp", "union_fraction"))
-    return (one - rec) / (1 - rec), (allof - rec) / (1 - rec)
+    headroom = max(1e-9, 1.0 - rec)
+    return (one - rec) / headroom, (allof - rec) / headroom
 
 
 def fig_topology(runs_dir, out_dir):

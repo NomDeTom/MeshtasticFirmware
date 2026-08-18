@@ -85,6 +85,9 @@ def repetition_cost(lam, copies):
     return lam * copies * OBJECT
 
 
+MISS_RATE = 0.15  # per-transmission miss rate this comparison is drawn against
+
+
 def recovery_fraction(miss_rate, nodes):
     """Share of messages that need a repair push at all.
 
@@ -468,14 +471,22 @@ def main():
             "sfpp_today_adverts_per_message": round(12 / lam, 1),
         },
         "airtime_s_per_hour": {
+            # A push is a broadcast, so what matters is whether *anyone* in earshot missed the
+            # object, not whether a given node did. recovery_fraction saturates for exactly this,
+            # and charging the raw per-node miss rate instead understated the push cost by 6.4x at
+            # the default 20 nodes.
             "advert_push_1_per_hour": round(
                 args.nodes * radio.airtime(SMALL_ADVERT, PRESET)
-                + lam * 0.15 * radio.airtime(OBJECT, PRESET),
+                + lam
+                * recovery_fraction(MISS_RATE, args.nodes)
+                * radio.airtime(OBJECT, PRESET),
                 1,
             ),
             "advert_push_12_per_hour": round(
                 args.nodes * 12 * radio.airtime(SMALL_ADVERT, PRESET)
-                + lam * 0.15 * radio.airtime(OBJECT, PRESET),
+                + lam
+                * recovery_fraction(MISS_RATE, args.nodes)
+                * radio.airtime(OBJECT, PRESET),
                 1,
             ),
             "repeat_3x": round(lam * 3 * radio.airtime(OBJECT, PRESET), 1),

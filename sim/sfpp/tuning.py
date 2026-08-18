@@ -105,7 +105,7 @@ def derive(blocks):
     metrics = []
 
     # --- already answered well enough to state, from rounds two and three ---
-    place = _arm(blocks, "N-place") + _arm(blocks, "Q-place")
+    place = _arm(blocks, "N-place") + _arm(blocks, "G-place")
     hops = _arm(blocks, "N-hops") + _arm(blocks, "G-hops")
     servers = _arm(blocks, "N-servers") + _arm(blocks, "G-servers")
     if hops and servers:

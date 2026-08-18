@@ -257,10 +257,16 @@ class Generator:
         # The coefficient falls below 1 on the 2.5 and 2.6 models, which speed a small mesh up.
         # Thinning needs a candidate rate at least as high as anything later selected from it, so
         # candidates are generated against the most permissive coefficient the model can produce.
+        # Across every profile present, not just node zero's. On a mixed mesh a node whose own
+        # model is more permissive than the sampled floor can never be thinned - floor/coefficient
+        # exceeds 1 - while its candidates were generated at the stricter rate, so it silently sends
+        # less than its own model calls for. That is exactly the --legacy-fraction arm the parameter
+        # exists to characterise.
+        models = {node.profile.congestion_model for node in mesh.nodes} or {
+            self.congestion_model
+        }
         self.congestion_floor = (
-            min(c for _, c in SMALL_MESH_SPEEDUP)
-            if self.congestion_model == "preset"
-            else 1.0
+            min(c for _, c in SMALL_MESH_SPEEDUP) if "preset" in models else 1.0
         )
         self.congestion = (
             # getNumOnlineMeshNodes() iterates the hot store, so a node cannot count mesh members it
