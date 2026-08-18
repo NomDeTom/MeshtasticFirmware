@@ -7,6 +7,7 @@ the firmware was read correctly, and so would pin nothing.
 Run from `sim/`:  python3 -m unittest sfpp.test_mesh -v
 """
 
+import pathlib
 import random
 import unittest
 
@@ -1933,6 +1934,91 @@ class PacketSigning(unittest.TestCase):
         self.assertTrue(mesh._signature_policy_admits(0, packet))
 
 
+class ToolingContract(unittest.TestCase):
+    """Things that break a run without failing a test, unless something checks them."""
+
+    def test_the_campaign_imports_without_matplotlib(self):
+        """campaign imports autochart eagerly, so a chart library must not gate running at all.
+
+        matplotlib is not in requirements.txt, so a fresh checkout has none. autochart's own auto()
+        promises a chart never fails a run; an import at module scope broke that promise before the
+        promise could be kept.
+        """
+        import importlib
+
+        import sfpp.autochart as autochart
+
+        importlib.reload(autochart)
+        self.assertTrue(hasattr(autochart, "auto"))
+        # Whatever the environment has, acquiring it must be a call rather than an import.
+        source = pathlib.Path(autochart.__file__).read_text()
+        top_level = [
+            line
+            for line in source.splitlines()
+            if line.startswith("import matplotlib") or line.startswith("from matplotlib")
+        ]
+        self.assertEqual(top_level, [], "matplotlib must be imported inside a function")
+
+    def test_every_sweep_block_name_is_unique(self):
+        """A dict literal silently keeps the last of a duplicated key, so the first block vanishes."""
+        import ast
+        import collections
+
+        from . import sweep
+
+        tree = ast.parse(pathlib.Path(sweep.__file__).read_text())
+        keys = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "BLOCKS":
+                keys = [k.value for k in node.value.keys]
+        self.assertTrue(keys)
+        duplicated = [k for k, n in collections.Counter(keys).items() if n > 1]
+        self.assertEqual(duplicated, [], "a duplicated block name loses one of the two blocks")
+        self.assertEqual(len(keys), len(sweep.BLOCKS))
+
+    def test_every_sweep_block_names_a_real_flag(self):
+        """A block whose arm is not a CLI flag fails only when someone runs it."""
+        from .campaign import build_parser
+        from .sweep import BLOCKS
+
+        known = set()
+        for action in build_parser()._actions:
+            known.update(opt.lstrip("-") for opt in action.option_strings)
+        unknown = sorted({arm for arm, _, _ in BLOCKS.values()} - known)
+        self.assertEqual(unknown, [], "sweep arms that no longer exist on the command line")
+
+
+class Siting(unittest.TestCase):
+    """Where a node physically is, as a gain offset on every link it takes part in."""
+
+    def test_a_mix_changes_how_well_the_mesh_connects(self):
+        """Roof to basement is 26 dB, which is a wider lever than most parameters swept here."""
+        degrees = {}
+        for mix in ("event", "uniform", "backbone"):
+            mesh = small_mesh(nodes=40, seed=7, area=6000.0, siting_mix=mix)
+            degrees[mix] = mesh.link_stats()["mean_degree"]
+        self.assertLess(degrees["event"], degrees["uniform"])
+        self.assertLess(degrees["uniform"], degrees["backbone"])
+
+    def test_naming_one_siting_gives_every_node_that_siting(self):
+        mesh = small_mesh(nodes=10, seed=7, siting_mix="roof")
+        self.assertEqual(set(mesh.sitings), {"roof"})
+        self.assertEqual(mesh.siting_gain, [M.SITINGS["roof"]] * 10)
+
+    def test_the_gain_reaches_the_link_budget(self):
+        """It has to arrive with the constructor: links are computed once, inside __init__."""
+        plain = small_mesh(nodes=10, seed=7, area=5000.0, siting_mix="desk")
+        raised = small_mesh(nodes=10, seed=7, area=5000.0, siting_mix="roof")
+        # Both ends of every link gain, so the pair is 12 dB better off than two desk nodes.
+        self.assertAlmostEqual(
+            raised.rssi[0][1] - plain.rssi[0][1], 2 * M.SITINGS["roof"], places=6
+        )
+
+    def test_an_unknown_mix_is_refused(self):
+        with self.assertRaises(ValueError):
+            M.assign_sitings(4, "penthouse", random.Random(1))
+
+
 class AdaptiveCongestion(unittest.TestCase):
     """Default::getConfiguredOrDefaultMsScaled - each node throttles on what it has heard."""
 
@@ -1967,6 +2053,52 @@ class AdaptiveCongestion(unittest.TestCase):
         self.assertEqual(
             gen.node_congestion(0), 1.0, "nothing heard inside the window is online"
         )
+
+    def test_the_input_choice_reaches_the_per_node_coefficient(self):
+        """hotstore saturates, truesize is the ceiling, utilisation ignores node counts entirely.
+
+        The arm is worthless if the choice only reaches the static coefficient: adaptive is the
+        default, so an input that stops at the mesh-wide value would leave every cell identical.
+        """
+        import random
+
+        from . import traffic as T
+
+        mesh = small_mesh(nodes=60, seed=2)
+        for node in mesh.nodes:
+            node.max_num_nodes = 10  # a store far smaller than the mesh, before it fills
+        for peer in range(1, 60):
+            heard(mesh, 0, peer)
+        self.assertEqual(len(mesh.nodes[0].nodedb), 10, "the store trimmed as it filled")
+        coefficients = {}
+        for choice in ("hotstore", "truesize", "utilisation"):
+            gen = T.Generator(
+                mesh, random.Random(1), bytes(range(16)), congestion_input=choice
+            )
+            coefficients[choice] = gen.node_congestion(0)
+        self.assertEqual(
+            coefficients["hotstore"], 1.0, "ten slots is under the 40-node pivot, so no throttle"
+        )
+        self.assertGreater(
+            coefficients["truesize"],
+            coefficients["hotstore"],
+            "the hot store cannot see a mesh larger than itself",
+        )
+        # utilisation reads 1.0 here too, because the channel is idle - see the test below, where
+        # it throttles on busy-ness with no node count involved at all.
+
+    def test_utilisation_scales_on_busy_ness_rather_than_a_node_count(self):
+        import random
+
+        from . import traffic as T
+
+        mesh = small_mesh(nodes=60, seed=2)
+        gen = T.Generator(
+            mesh, random.Random(1), bytes(range(16)), congestion_input="utilisation"
+        )
+        self.assertEqual(gen.node_congestion(0), 1.0, "an idle channel throttles nothing")
+        mesh.nodes[0].log_airtime(0.0, 0.9 * 60000.0)  # 90% busy
+        self.assertGreater(gen.node_congestion(0), 1.0)
 
     def test_static_mode_keeps_one_coefficient_for_the_whole_mesh(self):
         import random

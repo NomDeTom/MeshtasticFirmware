@@ -5,7 +5,12 @@ same bytes the firmware would put on the air. Where the two could drift, oracle.
 C++ and compares, so a divergence fails a test rather than quietly changing a result.
 
 Field: GF(2^32) modulo x^32 + x^7 + x^3 + x^2 + 1.
+
+The caches below are memoisation of pure functions, not approximations: every byte this module
+produces is unchanged, which check_oracle.py verifies against the firmware's own PinSketch.cpp.
 """
+
+from functools import lru_cache
 
 MODULUS = 0x8D
 FIELD_BITS = 32
@@ -29,6 +34,9 @@ def sqr(a):
     return mul(a, a)
 
 
+# 62 multiplications a call, and the polynomial routines below ask for the same handful of
+# leading coefficients over and over: measured 13863 hits against 281 misses in a single run.
+@lru_cache(maxsize=1 << 16)
 def inv(a):
     # a^(2^32-2), the exponent being the sum of 2^1..2^31.
     r, p = 1, a
@@ -77,7 +85,8 @@ def _divmod_poly(num, den, want_quotient=False):
         return [], []
     rem = _trim(list(num))
     dd = _deg(den)
-    lead_inv = inv(den[-1])
+    # A monic divisor is the common case here, and needs no inverse at all.
+    lead_inv = 1 if den[-1] == 1 else inv(den[-1])
     quotient = [0] * (_deg(rem) - dd + 1) if want_quotient and _deg(rem) >= dd else []
 
     while rem and _deg(rem) >= dd:
@@ -157,6 +166,20 @@ def _berlekamp_massey(s):
     return _trim(c)
 
 
+# The same short ID is added by every server that hears it, and again by decode()'s verification:
+# measured 1584 adds over 98 distinct (element, capacity) pairs in one run.
+@lru_cache(maxsize=1 << 16)
+def _odd_powers(e, capacity):
+    """e, e^3, e^5 ... e^(2*capacity-1). Returned shared and read-only - never mutate it."""
+    step = sqr(e)
+    out = []
+    power = e
+    for _ in range(capacity):
+        out.append(power)
+        power = mul(power, step)
+    return tuple(out)
+
+
 class Sketch:
     """A fixed-size digest holding the odd power sums of its members."""
 
@@ -174,11 +197,9 @@ class Sketch:
         """Toggles membership - adding a held element removes it again. Rejects zero."""
         if e == 0:
             return False
-        step = sqr(e)
-        power = e
-        for i in range(len(self.syndromes)):
-            self.syndromes[i] ^= power
-            power = mul(power, step)
+        syndromes = self.syndromes
+        for i, power in enumerate(_odd_powers(e, len(syndromes))):
+            syndromes[i] ^= power
         return True
 
     def merge(self, other):

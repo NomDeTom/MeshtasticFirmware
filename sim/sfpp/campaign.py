@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 
+from . import autochart as AC
 from . import chain as CH
 from . import mesh as M
 from . import traffic as T
@@ -370,6 +371,7 @@ class Campaign:
                 opts, "signature_policy", M.SIGNATURE_POLICY_COMPATIBLE
             ),
             platform_mix=getattr(opts, "platform_mix", "uniform"),
+            siting_mix=getattr(opts, "siting_mix", "uniform"),
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(
@@ -380,6 +382,7 @@ class Campaign:
             congestion_scaling=not opts.no_congestion_scaling,
             congestion_mode=getattr(opts, "congestion_mode", "adaptive"),
             online_cap=opts.max_num_nodes,
+            congestion_input=opts.congestion_input,
             broadcast_interval_s=opts.broadcast_interval_s,
             diurnal=opts.diurnal,
             start_hour=opts.start_hour,
@@ -404,6 +407,11 @@ class Campaign:
         # receptions measured too.
         self.heard_by_class = {}
         self.hop_stats = {}
+        # Per node, how many hops each text it received had actually travelled. The firmware keeps the
+        # same quantity per peer as NodeInfoLite.hops_away, so this is the simulator's view of the field
+        # rather than an invented metric - and a histogram rather than a mean, because the interesting
+        # nodes are the ones whose traffic all arrives at 4+ hops.
+        self.hops_away_hist = {i: {} for i in range(opts.nodes)}
         self.servers = {}
         self.db_dir = tempfile.mkdtemp(prefix="sfpp-campaign-")
         self.bucket_closed_at = {}
@@ -417,16 +425,29 @@ class Campaign:
         # Making it a cell of the protocol arm rather than a separate run turns every other cell into
         # a difference instead of a comparison.
         self.chain = CH.ChainProtocol(self) if opts.protocol == "chain" else None
-        if not opts.baseline and opts.protocol != "none":
-            self._place_servers()
+        # The same nodes are chosen whatever the protocol, including `none`. Under `none` they run no
+        # archive and behave as ordinary nodes - which is the control that separates two things this
+        # campaign had been conflating: what being a server *costs* a node in its own reception
+        # (a server transmits more, so contention and half duplex charge it), and what
+        # reconciliation then *adds* on top. Without it, "held 0.966" could not be split into
+        # "heard anyway" and "recovered".
+        self.designated = []
+        if not opts.baseline:
+            self._place_servers(archive=opts.protocol != "none")
             self._place_observers()
         self.mesh.on_receive = self._on_receive
 
     # ---- setup ------------------------------------------------------------------------
 
-    def _place_servers(self):
+    def _place_servers(self, archive=True):
+        """Choose the archive positions. With `archive=False` they are marked and instrumented but
+        run nothing, so the same nodes in the same places can be measured as ordinary nodes.
+        """
         strategy = Placement.BY_NAME[self.opts.place]
         indexes = strategy(self.mesh, self.opts.servers, self.rng, self.opts.hops_apart)
+        self.designated = sorted(indexes)
+        if not archive:
+            return
         for i in indexes:
             self.mesh.nodes[i].is_server = True
             store = SfppStore(os.path.join(self.db_dir, f"s{i}.db"), i)
@@ -484,7 +505,11 @@ class Campaign:
         )
         stats["nodes"].add(node.index)
         stats["received"] += 1
-        stats["hops"].append(packet.hops_taken())
+        hops = packet.hops_taken()
+        stats["hops"].append(hops)
+        if packet.kind == "text":
+            h = self.hops_away_hist[node.index]
+            h[hops] = h.get(hops, 0) + 1
 
     def _on_receive(self, node, packet, rssi, snr):
         self._note_class_reception(node, packet)
@@ -705,7 +730,7 @@ class Campaign:
 
         def onward():
             if lost:
-                if attempt < 2:
+                if attempt < self.opts.sr_retries:
                     self._unicast_hop(path, i, kind, payload, length, attempt + 1)
                 return
             self._unicast_hop(path, i + 1, kind, payload, length, attempt)
@@ -1347,18 +1372,20 @@ class Campaign:
                 # fold-in is indistinguishable from one after it.
                 "firmware_profile": self.mesh.profile.name,
                 "topology": getattr(self.mesh, "topology", "uniform"),
-                "diameter": max(
-                    max(self.mesh.hops_from([i]).values())
-                    for i in range(min(self.opts.nodes, 40))
-                ),
+                "diameter": self.mesh.diameter(),
             },
             "by_class": self._class_report(),
             "by_hop_limit": self._hop_report(),
+            "hops_away": self._hops_away_report(),
             "hop_scaling": self._hop_scaling_report(),
             "adaptive": self._adaptive_report(),
             "traffic": {
                 "originated": dict(self.generator.originated),
                 "congestion_coefficient": round(self.generator.congestion, 3),
+                "congestion_input": self.generator.congestion_input,
+                # What the mesh can see of its own size, unbounded by any hot store. The gap
+                # between this and the coefficient's input is the saturation round four prices.
+                "observed_senders": T.observed_senders(self.mesh),
                 "text_objects": total,
                 "airtime_ms": round(self.mesh.stats["airtime_ms"], 1),
                 "channel_utilisation": round(
@@ -1393,6 +1420,32 @@ class Campaign:
                 ),
             },
         }
+
+        if self.designated and total:
+            direct = [len(self.heard_text[i]) / total for i in self.designated]
+            others = [
+                len(self.heard_text[i]) / total
+                for i in range(self.opts.nodes)
+                if i not in self.designated
+            ]
+            report["designated"] = {
+                "nodes": self.designated,
+                "running_archive": bool(self.servers),
+                # What these nodes heard off the air themselves. Under --protocol none this is the
+                # control: the same nodes, same places, no archive.
+                "direct_reception_mean": round(statistics.mean(direct), 4),
+                "direct_reception_each": [round(x, 4) for x in direct],
+                "rest_of_mesh_reception_mean": (
+                    round(statistics.mean(others), 4) if others else 0
+                ),
+                "rest_of_mesh_reception": self._dist(others),
+            }
+            if self.servers:
+                held = [len(s.held) / total for s in self.servers.values()]
+                report["designated"]["held_mean"] = round(statistics.mean(held), 4)
+                report["designated"]["reconciled_gain_mean"] = round(
+                    statistics.mean(held) - statistics.mean(direct), 4
+                )
 
         if self.observers:
             rows = []
@@ -1458,8 +1511,119 @@ class Campaign:
                 **self.counters.as_dict(),
                 "audit_checksum_agrees_sets_differ": self.final_audit_failures,
                 **self._drift_report(),
+                **self._stretch_report(total),
             }
         return report
+
+    @staticmethod
+    def _dist(values):
+        """Min, p10, median, mean, p90, max. A mean alone hides the tail, and on a stretched mesh the
+        worst-served node is the one the archive exists for - so it gets reported, not averaged away.
+        """
+        if not values:
+            return {}
+        v = sorted(values)
+        pick = lambda q: v[min(len(v) - 1, int(q * (len(v) - 1)))]  # noqa: E731
+        return {
+            "min": round(v[0], 4),
+            "p10": round(pick(0.10), 4),
+            "median": round(statistics.median(v), 4),
+            "mean": round(statistics.mean(v), 4),
+            "p90": round(pick(0.90), 4),
+            "max": round(v[-1], 4),
+        }
+
+    def _stretch_report(self, total):
+        """On a mesh wider than any hop limit, what could only ever arrive via an archive?
+
+        This is the measurement a stretched mesh exists to make. For each node, three quantities:
+
+          heard          - it received the message off the air
+          unreachable    - no sender-to-node path within the *sender's* hop limit exists, so no amount
+                           of retry or luck would ever have delivered it
+          recoverable    - unreachable, but held by an archive that node can itself reach
+
+        `recoverable` is the addressable value of the design: text that is structurally impossible to
+        receive directly and is nonetheless sitting on a server within reach. On a mesh narrower than
+        the hop limit it is near zero by construction, which is why every earlier run understated the
+        case for an archive.
+        """
+        if not total or not self.servers:
+            return {}
+        n = self.opts.nodes
+        # Who can reach whom, bounded by the sender's own hop limit.
+        reach = {}
+        for sender in range(n):
+            depth = self.mesh.hops_from([sender])
+            limit = self.mesh.hop_limit_for(sender)
+            reach[sender] = {t for t, h in depth.items() if 0 < h <= limit}
+
+        server_holds = {i: set(sv.held) for i, sv in self.servers.items()}
+        recoverable, unreachable, delivered = [], [], []
+        for i in range(n):
+            if i in self.servers:
+                continue
+            # Servers this node could query: within its own hop limit.
+            depth_i = self.mesh.hops_from([i])
+            limit_i = self.mesh.hop_limit_for(i)
+            mine = [s for s in self.servers if 0 < depth_i.get(s, 999) <= limit_i]
+            in_reach = set()
+            for s in mine:
+                in_reach |= server_holds[s]
+            unreach = 0
+            rec = 0
+            got = 0
+            held_here = self.heard_text[i]
+            for h in self.generator.objects:
+                sender = self.generator.objects[h].sender
+                if i in reach.get(sender, ()):
+                    continue  # was reachable directly
+                unreach += 1
+                if h in in_reach:
+                    rec += 1
+                if h in held_here:
+                    # Proof of archive-delivered coverage. No path within the sender's hop limit
+                    # reaches this node, so no retry, no luck and no rebroadcast would ever have
+                    # delivered it - and the node has it. It can only have arrived as a replay.
+                    got += 1
+            unreachable.append(unreach / total)
+            recoverable.append(rec / total)
+            delivered.append(got / total)
+        if not unreachable:
+            return {}
+        # Per-node share of that node's own unreachable text which actually arrived. The worst node
+        # here is the honest headline: the mean is dragged up by nodes that had little to recover.
+        per_node_share = [
+            (delivered[k] / unreachable[k]) if unreachable[k] > 0 else None
+            for k in range(len(unreachable))
+        ]
+        share_vals = [x for x in per_node_share if x is not None]
+        return {
+            "structurally_unreachable": self._dist(unreachable),
+            "recoverable_from_reachable_archive": self._dist(recoverable),
+            "delivered_though_unreachable": self._dist(delivered),
+            "per_node_share_of_unreachable_delivered": self._dist(share_vals),
+            "nodes_with_zero_delivered": sum(
+                1
+                for k in range(len(delivered))
+                if unreachable[k] > 0 and delivered[k] == 0
+            ),
+            "nodes_measured": len(unreachable),
+            "structurally_unreachable_mean": round(statistics.mean(unreachable), 4),
+            "recoverable_from_reachable_archive_mean": round(
+                statistics.mean(recoverable), 4
+            ),
+            "share_of_unreachable_recoverable": round(
+                statistics.mean(recoverable) / max(1e-9, statistics.mean(unreachable)),
+                4,
+            ),
+            # The one unambiguous figure: text this node holds that nothing but a replay could have
+            # brought it. Not an upper bound, not an inference from what a server holds - delivered.
+            "delivered_though_unreachable_mean": round(statistics.mean(delivered), 4),
+            "share_of_unreachable_delivered": round(
+                statistics.mean(delivered) / max(1e-9, statistics.mean(unreachable)), 4
+            ),
+        }
 
     def _drift_report(self):
         """What holding both copies buys: how far apart two accounts of the same message are.
@@ -1491,10 +1655,22 @@ class Campaign:
         }
 
     def _class_report(self):
-        """Sent against heard, per class, plus the airtime each class actually spent."""
+        """Sent against heard, per class, with per-node distributions and airtime actually spent.
+
+        Distributions rather than means because a mean receiver-count hides the node that hears almost
+        nothing, and that node is the one every archive argument is about. `text` is the archived class
+        and is the one to read first; the rest are here because they set the contention text competes
+        with, and because a per-class table is the only way to see whether SF++ displaces text or
+        telemetry.
+        """
         out = {}
         for name, sent in self.generator.originated.items():
-            receipts = len(self.heard_by_class.get(name, {}))
+            seen = self.heard_by_class.get(name, {})
+            receipts = len(seen)
+            per_node = [0] * self.opts.nodes
+            for node_index, _pid in seen:
+                per_node[node_index] += 1
+            shares = [c / sent for c in per_node] if sent else []
             air = self.mesh.airtime_by_kind.get(name, 0.0)
             out[name] = {
                 "originated": sent,
@@ -1511,8 +1687,60 @@ class Campaign:
                 "airtime_share": round(
                     air / max(1.0, self.mesh.stats["airtime_ms"]), 4
                 ),
+                # Per-node share of this class each node received, as a distribution. A mean hides the
+                # node that heard almost none of it, which is the node the archive exists for.
+                "per_node_reception": self._dist(shares),
+                "nodes_receiving_none": sum(1 for c in per_node if c == 0),
+                "archived": name == "text",
             }
         return out
+
+    def _hops_away_report(self):
+        """Per-node histogram of how far the text it received had travelled, plus the topology's own.
+
+        Two distinct things, and conflating them is easy:
+
+          observed  - hops actually traversed by text this node received. What NodeInfoLite.hops_away
+                      records, and what a client would display.
+          topology  - shortest-path distance to every other node, whether or not anything arrived.
+                      The bound the observed histogram is drawn from.
+
+        A node whose observed histogram is empty above 2 hops while its topological one runs to 6 is
+        not well connected - it is deaf beyond 2 hops, and that is the node an archive is for.
+        """
+        observed, topo = {}, {}
+        for i in range(self.opts.nodes):
+            h = self.hops_away_hist.get(i) or {}
+            if h:
+                total = sum(h.values())
+                observed[str(i)] = {
+                    "counts": {str(k): v for k, v in sorted(h.items())},
+                    "mean_hops": round(sum(k * v for k, v in h.items()) / total, 2),
+                    "max_hops": max(h),
+                }
+            depth = self.mesh.hops_from([i])
+            d = {}
+            for target, hops in depth.items():
+                if hops > 0:
+                    d[hops] = d.get(hops, 0) + 1
+            if d:
+                topo[str(i)] = {str(k): v for k, v in sorted(d.items())}
+
+        # Mesh-wide rollups, so a sweep has something scalar to compare without unpacking 60 nodes.
+        agg = {}
+        for h in self.hops_away_hist.values():
+            for k, v in h.items():
+                agg[k] = agg.get(k, 0) + v
+        total = sum(agg.values()) or 1
+        return {
+            "observed_per_node": observed,
+            "topology_per_node": topo,
+            "mesh_observed_counts": {str(k): v for k, v in sorted(agg.items())},
+            "mesh_observed_share": {
+                str(k): round(v / total, 4) for k, v in sorted(agg.items())
+            },
+            "mesh_mean_hops": round(sum(k * v for k, v in agg.items()) / total, 2),
+        }
 
     def _hop_report(self):
         """Reception and traversal split by the node's own configured hop limit."""
@@ -1638,10 +1866,26 @@ class Campaign:
 
 
 def _profile_for(opts):
-    """The rule set, with the branch-only and compiled-out mechanisms the flags asked for."""
+    """The rule set, with the branch-only and compiled-out mechanisms the flags asked for.
+
+    --profile-flag stays alongside them so a specific pre-2.5 pathology can be simulated on its own
+    without pretending a whole-version reconstruction exists.
+    """
     name = getattr(opts, "profile", "2.8")
     dm_mode = getattr(opts, "dm_mode", "directed-with-late-flood")
     overrides = {}
+    for item in getattr(opts, "profile_flag", []) or []:
+        key, _, raw = item.partition("=")
+        val = raw.strip().lower()
+        if val in ("true", "1", "yes", "on"):
+            parsed = True
+        elif val in ("false", "0", "no", "off"):
+            parsed = False
+        elif val in ("none", ""):
+            parsed = None
+        else:
+            parsed = float(val) if "." in val else int(val)
+        overrides[key.strip()] = parsed
     if getattr(opts, "extra_repeats", False):
         overrides["extra_repeats"] = True
     if getattr(opts, "coding_rate_ladder", False):
@@ -1787,6 +2031,14 @@ def build_parser():
         help="share of nodes running --old-profile rather than --profile, for a mixed-version mesh",
     )
     ap.add_argument(
+        "--profile-flag",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="override one rule, repeatable. Specific pre-2.5 pathologies live here rather than as "
+        "a profile, e.g. --profile-flag clamp_cw=true for the unclamped Arduino map() window",
+    )
+    ap.add_argument(
         "--diurnal",
         default="commuter",
         choices=("flat", "sinusoid", "commuter"),
@@ -1802,6 +2054,19 @@ def build_parser():
         "--no-congestion-scaling",
         action="store_true",
         help="disable the firmware's node-count broadcast scaling (Default.h congestionScalingCoefficient)",
+    )
+    ap.add_argument(
+        "--congestion-input",
+        default="hotstore",
+        choices=("hotstore", "truesize", "utilisation"),
+        help="what drives the throttle: the hot store (what the firmware does, and saturates), "
+        "true mesh size (the unbounded ideal), or measured channel utilisation",
+    )
+    ap.add_argument(
+        "--sr-retries",
+        type=int,
+        default=2,
+        help="retries per addressed hop before a reconciliation message is given up on",
     )
     ap.add_argument(
         "--broadcast-interval-s",
@@ -1832,6 +2097,14 @@ def build_parser():
         help="board mix, which sets each node's hot store: a named mix, or one board for all. "
         "uniform = every node at the 120-entry default, as before platforms were modelled",
     )
+    ap.add_argument(
+        "--siting-mix",
+        default="uniform",
+        choices=sorted(set(M.SITING_MIXES) | set(M.SITINGS)),
+        help="where the nodes physically are, as a gain offset on every link: a named mix, or one "
+        "siting for all. Not from the firmware and not measured - a stated assumption, and a large "
+        "one, since roof and basement differ by 26 dB",
+    )
     ap.add_argument("--position-throttle", type=int, default=1)
     ap.add_argument("--telemetry-throttle", type=int, default=1)
     ap.add_argument(
@@ -1842,7 +2115,7 @@ def build_parser():
     ap.add_argument(
         "--topology",
         default="uniform",
-        choices=("uniform", "clustered", "corridor", "hub", "mixed"),
+        choices=("uniform", "clustered", "corridor", "hub", "chain", "mixed"),
         help="mesh shape; `mixed` draws the generator from the seed so a sweep samples shapes",
     )
     ap.add_argument(
@@ -1961,6 +2234,11 @@ def build_parser():
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--out", help="write the report JSON here")
     ap.add_argument("--label", default="")
+    ap.add_argument(
+        "--no-charts",
+        action="store_true",
+        help="skip the charts a run renders beside its JSON",
+    )
     return ap
 
 
@@ -1992,6 +2270,12 @@ def main(argv=None):
         with open(opts.out, "w") as f:
             json.dump(reports if len(reports) > 1 else reports[0], f, indent=2)
         print(f"wrote {opts.out}")
+        if not opts.no_charts:
+            # Rendered by the same call that produced the JSON, so a figure cannot lag a withdrawn
+            # number the way two of today's did.
+            path = AC.auto(reports, opts.out, kind="run")
+            if path:
+                print(f"wrote {path}")
     return 0
 
 

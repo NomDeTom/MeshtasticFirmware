@@ -1653,11 +1653,43 @@ def place_hub(count, area, rng, min_dist, spokes=6):
     return points
 
 
+def place_chain(count, area, rng, min_dist, towns=None, spread=0.035):
+    """Towns strung out in a line, each linked to the next. A valley, a rail line, a coast road.
+
+    The point is a mesh that is *long and connected*. Stretching a uniform field far enough to exceed
+    seven hops eventually fragments it - at 20 km with 60 nodes a fifth of them are isolated and the
+    measured diameter becomes the diameter of a surviving fragment, which is meaningless. A chain
+    stretches without breaking, because consecutive towns are placed inside each other's range.
+    """
+    towns = towns or max(3, count // 8)
+    # Span the diagonal so the chain has room; step is what keeps consecutive towns in contact.
+    step = area * 1.35 / max(1, towns - 1)
+    centres = [
+        (0.06 * area + i * step * 0.70, 0.5 * area + rng.gauss(0, 0.05 * area))
+        for i in range(towns)
+    ]
+    points, attempts = [], 0
+    while len(points) < count and attempts < count * 6000:
+        attempts += 1
+        cx, cy = (
+            centres[len(points) % towns]
+            if rng.random() < 0.92
+            else centres[rng.randrange(towns)]
+        )
+        p = (rng.gauss(cx, spread * area), rng.gauss(cy, spread * area))
+        if all(math.dist(p, q) >= min_dist for q in points):
+            points.append(p)
+    if len(points) < count:
+        raise RuntimeError("chain placement could not converge")
+    return points
+
+
 TOPOLOGIES = {
     "uniform": lambda c, a, r, m: place_nodes(c, a, r, m),
     "clustered": place_clustered,
     "corridor": place_corridor,
     "hub": place_hub,
+    "chain": place_chain,
 }
 
 
@@ -1670,6 +1702,37 @@ def place(topology, count, area, rng, min_dist=300.0):
     if topology == "mixed":
         topology = sorted(TOPOLOGIES)[rng.randrange(len(TOPOLOGIES))]
     return TOPOLOGIES[topology](count, area, rng, min_dist), topology
+
+
+# Where a node actually is, as a gain offset in dB on every link it takes part in. These are the
+# deployments people describe having, and the spread between them is larger than most parameters this
+# simulator sweeps: a roof node and a basement node differ by 26 dB, which is more than the whole span
+# from SHORT_FAST to VERY_LONG_SLOW sensitivity.
+#
+# Values are deliberately round rather than measured - they are a stated assumption, not data. A roof
+# node clears local clutter and gets height; a desk node is indoors with a window; a pocket node pays
+# body loss and no height; a basement node is below grade, which is the worst case people actually run.
+#
+# NOT FROM THE FIRMWARE, AND NOT MEASURED. The firmware has no concept of siting - it knows tx_power
+# and a GPS position, and grep for antenna_gain across src/ and the protobufs returns nothing. Even the
+# simulator's own antenna gain is a single global Config.GL, not per node. These four numbers are a
+# modelling assumption of mine, and the 26 dB between roof and basement is wide enough to move results,
+# so they want replacing with measurements rather than defending.
+SITINGS = {
+    "roof": 6.0,
+    "desk": 0.0,
+    "pocket": -10.0,
+    "basement": -20.0,
+}
+
+# Named mixes of the above. `local-typical` is the small deployment a hobbyist actually has; `event`
+# is a field of people carrying nodes; `backbone` is a line of roof-mounted routers.
+SITING_MIXES = {
+    "uniform": {"desk": 1.0},
+    "local-typical": {"roof": 0.15, "desk": 0.45, "pocket": 0.3, "basement": 0.1},
+    "event": {"roof": 0.05, "desk": 0.15, "pocket": 0.8},
+    "backbone": {"roof": 0.8, "desk": 0.2},
+}
 
 
 def make_config(preset="LONG_FAST", model=5, phy_loss=True):
@@ -1707,6 +1770,7 @@ class Mesh:
         extra_loss=0.0,
         burst_loss=0.0,
         burst_ms=60000.0,
+        siting_gain=None,
         profile="2.8",
     ):
         self.conf = conf
@@ -1733,6 +1797,11 @@ class Mesh:
         # across buckets, a burst puts a whole bucket's worth into one.
         self.burst_loss = burst_loss
         self.burst_ms = burst_ms
+        # Per-node gain offset in dB, from build()'s siting mix. Read by _build_links, so it has
+        # to arrive with the constructor rather than being set afterwards - links are computed once.
+        self.siting_gain = (
+            list(siting_gain) if siting_gain is not None else [0.0] * len(nodes)
+        )
         self._deaf_until = [0.0] * len(nodes)
         self._deaf_checked = [0.0] * len(nodes)
         self.now = 0.0
@@ -1852,6 +1921,7 @@ class Mesh:
                 base = conf.PTX + 2 * conf.GL - loss
                 # Real links are not reciprocal - antennas, height, local clutter. One draw per
                 # pair, applied with opposite sign, so the asymmetry is a property of the link.
+                siting = self.siting_gain[i] + self.siting_gain[j]
                 skew = (
                     self.rng.gauss(
                         conf.MODEL_ASYMMETRIC_LINKS_MEAN,
@@ -1860,8 +1930,8 @@ class Mesh:
                     if conf.MODEL_ASYMMETRIC_LINKS
                     else 0.0
                 )
-                self.rssi[i][j] = base + skew
-                self.rssi[j][i] = base - skew
+                self.rssi[i][j] = base + siting + skew
+                self.rssi[j][i] = base + siting - skew
 
         for i in range(n):
             for j in range(n):
@@ -1870,11 +1940,42 @@ class Mesh:
 
     def link_stats(self):
         degrees = [len(v) for v in self.neighbours]
+        comps = self.components()
+        largest = max((len(c) for c in comps), default=0)
         return {
             "links": sum(degrees) // 2,
             "mean_degree": sum(degrees) / len(degrees),
             "isolated": sum(1 for d in degrees if d == 0),
+            # A diameter measured across a fragmented graph is the diameter of whichever fragment the
+            # walk started in, which is not a diameter. Report the structure so it cannot be read as one.
+            "components": len(comps),
+            "largest_component": largest,
+            "connected": len(comps) == 1,
         }
+
+    def components(self):
+        seen, out = set(), []
+        for start in range(len(self.nodes)):
+            if start in seen:
+                continue
+            stack, comp = [start], []
+            seen.add(start)
+            while stack:
+                node = stack.pop()
+                comp.append(node)
+                for peer in self.neighbours[node]:
+                    if peer not in seen:
+                        seen.add(peer)
+                        stack.append(peer)
+            out.append(comp)
+        return out
+
+    def diameter(self):
+        """Longest shortest-path within the largest component, and None if the mesh is fragmented."""
+        comps = self.components()
+        if len(comps) != 1:
+            return None
+        return max(max(self.hops_from([i]).values()) for i in range(len(self.nodes)))
 
     def hops_from(self, sources):
         """BFS over the link graph. Used for topology placement and for reporting depth."""
@@ -3767,6 +3868,21 @@ def assign_platforms(node_count, platform_mix, rng):
     return rng.choices(names, weights=[weights[n] for n in names], k=node_count)
 
 
+def assign_sitings(node_count, siting_mix, rng):
+    """Draw a siting for every node from a named mix, or name one siting for the whole mesh.
+
+    Drawn rather than striped, for the reason assign_platforms is: a mesh whose one basement node
+    sits on the only bridge is a case striping would never produce.
+    """
+    if siting_mix in SITINGS:
+        return [siting_mix] * node_count
+    if siting_mix not in SITING_MIXES:
+        raise ValueError(f"unknown siting mix {siting_mix!r}")
+    weights = SITING_MIXES[siting_mix]
+    names = sorted(weights)
+    return rng.choices(names, weights=[weights[n] for n in names], k=node_count)
+
+
 def build(
     conf,
     node_count,
@@ -3793,6 +3909,7 @@ def build(
     warm_num_nodes=None,
     signature_policy=SIGNATURE_POLICY_COMPATIBLE,
     platform_mix="uniform",
+    siting_mix="uniform",
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -3807,6 +3924,9 @@ def build(
     # A node's hot store is a property of the board, not of where it sits. `max_num_nodes` overrides
     # the mix outright, so a sweep can hold the store fixed and vary something else.
     platforms = assign_platforms(node_count, platform_mix, rng)
+    # Where each node physically is, as a gain offset on every link it takes part in. Drawn before
+    # positions for the same reason boards are: a roof or a basement is a property of the node.
+    sitings = assign_sitings(node_count, siting_mix, rng)
     # Firmware version per node, drawn at random rather than by degree: whether an owner has updated
     # is unrelated to how well sited the node is, and assuming otherwise would decide the result.
     default_profile = profile if isinstance(profile, Profile) else Profile(profile)
@@ -3868,9 +3988,11 @@ def build(
         extra_loss=extra_loss,
         burst_loss=burst_loss,
         burst_ms=burst_ms,
+        siting_gain=[SITINGS[name] for name in sitings],
         profile=profile,
     )
     mesh.topology = resolved
+    mesh.sitings = sitings
     mesh.hop_assign = hop_assign
 
     if hop_spread:
