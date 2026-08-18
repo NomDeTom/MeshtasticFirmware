@@ -2467,6 +2467,10 @@ class Mesh:
     def _build_links(self):
         """RSSI for every ordered pair, once. 60 nodes is 3540 path-loss calls; it is not the cost."""
         import lib.phy as phy
+        from lib.clutter import clutter_obstruction_loss
+        from lib.terrain import terrain_obstruction_loss
+
+        from . import terrain as terrain_mod
 
         conf = self.conf
         n = len(self.nodes)
@@ -2490,13 +2494,38 @@ class Mesh:
                             conf.MODEL_ASYMMETRIC_LINKS_STDDEV,
                         )
 
+        # The path is measured between antennas, not between map pins. Without terrain every
+        # altitude is zero and the 3-D distance is the 2-D one, so this is the same number the flat
+        # model computed; with terrain, two nodes 3 km apart with 400 m of ridge between them are
+        # further apart than the map says, and the obstruction terms below price the ridge itself.
+        points = [
+            terrain_mod.Point(node.x, node.y, node.altitude) for node in self.nodes
+        ]
+        # Three loss terms, three separate claims, kept apart so a result can price them apart:
+        # distance is geometry, terrain is a public elevation model, clutter is a land-cover raster.
+        # Both obstruction functions return 0.0 with their grid disabled, which is what makes a
+        # no-terrain run bit-identical to every run made before the ground existed.
+        self.loss_terms = {"terrain_db": 0.0, "clutter_db": 0.0, "pairs": 0}
+
         for i in range(n):
             for j in range(i + 1, n):
-                d = max(
-                    1.0, math.dist(self.nodes[i].position(), self.nodes[j].position())
+                d = max(1.0, points[i].euclidean_distance(points[j]))
+                # None defers to conf.HM inside the model, which is what an untouched flat run used.
+                loss = phy.estimate_path_loss(
+                    conf,
+                    d,
+                    conf.FREQ,
+                    self.nodes[i].antenna_height_m,
+                    self.nodes[j].antenna_height_m,
                 )
-                loss = phy.estimate_path_loss(conf, d, conf.FREQ)
-                base = conf.PTX + 2 * conf.GL - loss
+                # Obstruction is a property of the path, so it is computed once for the unordered
+                # pair and applied to both directions - unlike the gains and the skew below.
+                terrain_db = terrain_obstruction_loss(conf, points[i], points[j], conf.FREQ)
+                clutter_db = clutter_obstruction_loss(conf, points[i], points[j])
+                self.loss_terms["terrain_db"] += terrain_db
+                self.loss_terms["clutter_db"] += clutter_db
+                self.loss_terms["pairs"] += 1
+                base = conf.PTX + 2 * conf.GL - loss - terrain_db - clutter_db
                 # rssi[i][j] is i transmitting and j receiving, so it takes i's transmit gain and
                 # j's receive gain. Those are separate numbers per node, not one siting figure used
                 # both ways: an amplified node can run +8 or +15 dB on transmit while its receive
