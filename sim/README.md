@@ -125,6 +125,8 @@ under `--grid` carries the grid in its filename, which is the usual reason one i
 | `--role-placement`       | `degree`         | where the router-like roles go: `degree` on the best-connected nodes as an operator would, `inverse` on the worst, `random` to separate the role from its usual siting |
 | `--amplifier-mix`        | `none`           | power amplifiers as **separate transmit and receive gain**: `modest` +8/0 dB, `high` +15/0, `lossy` +15/−3. Mixes: `sprinkled`, `arms-race`. **Assumed, not measured** |
 | `--amplify-worst`        | 0.0              | fit a high amplifier to this share of the worst-connected nodes, after the links exist. The field pathology: the node nobody can hear gets a PA and is then heard by everyone while still hearing almost nobody |
+| `--admin-probes-per-hour` | 0.0             | attempt this many admin sessions per hour, spread over 1..N hops of separation. A session is a PKI DM out and a reply back, and **both legs must land** |
+| `--admin-max-hops`       | 5                | the largest separation admin sessions are attempted at |
 | `--favourite-routers`    | off              | router-like nodes favourite each other, so relays between them keep their hop limit                                   |
 
 ### 4.2 Hop limits
@@ -313,6 +315,35 @@ Three things worth knowing before using these:
   because there is no mesh left. Use `local-typical` for a hard-but-alive mesh; `worst-case` is a
   connectivity floor, not a traffic experiment.
 
+### 5.1b Can an operator actually administer this mesh?
+
+A configuration change is not a broadcast some nodes may miss - it is a round trip that has to
+complete. `--admin-probes-per-hour` sends a PKI-encrypted AdminMessage to a node at a chosen hop
+distance and has the target answer; **either leg failing means the session failed**. At 60 nodes,
+8 h, seed 5:
+
+| hops | tried | no key | addressable | completed | overall | given key |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 54 | 21 | 33 | 17 | 31% | **52%** |
+| 2 | 65 | 31 | 34 | 13 | 20% | 38% |
+| 3 | 67 | 34 | 33 | 4 | 6% | 12% |
+| 4 | 71 | 40 | 31 | 8 | 11% | 26% |
+| 5 | 52 | 26 | 26 | 4 | 8% | 15% |
+
+Two failures, and they want reading apart. **Roughly half of all attempts are never composed at
+all** - PKI needs the target's public key, and a node the source has never heard from, or has
+evicted, cannot be addressed however well connected it is. That is `no_key_for_target`, and it gets
+worse as the mesh outgrows the hot store. `success_given_key` removes it and leaves what the mesh's
+reach alone costs: even one hop away and holding the key, only about half of round trips complete.
+
+The probe picks targets by *topological* distance, not by what the source has heard of, so it asks
+nodes to administer strangers. That is deliberate - it is the case an operator hits - but it means
+`success_rate` is a floor and `success_given_key` the more comparable number across arms.
+
+**SIMPLIFICATION:** the firmware's admin flow also carries a session key with its own expiry and a
+nonce exchange, and real config payloads span several packets. This measures whether the round trip
+is deliverable, not whether the whole session protocol completes.
+
 ### 5.2 Archive placement - `--place`
 
 | Value               | Where the archives go                                                   |
@@ -367,6 +398,7 @@ diameter column reads fragmented rather than a number.
 | `designated`   | the archive-sited nodes' own reception, with the archive off or on, plus held and the reconciled gain                                                                                                                 |
 | `observers`    | per-observer direct against overheard, and replay placement error                                                                                                                                                     |
 | `sfpp`         | held, union, adverts, objects moved, bytes and airtime by message type, decode failures, misdecodes, escalations, bystander pickups, **`silent_losses`**, the at-rest audit, drift telemetry, and the stretch metrics |
+| `admin`        | per hop of separation: `attempts`, `no_key_for_target` (never composed - PKI needs the target's key), `addressable`, `request_delivered`, `session_completed`, and two rates - `success_rate` over everything tried, `success_given_key` over the ones that could be addressed. Present only with `--admin-probes-per-hour` |
 | `link_quality` | every directed link graded by margin over sensitivity: `comfortable` (≥10 dB), `adequate` (5-10), **`fragile`** (<5, so a little fading removes it), plus **`one_way_links`** (heard one way only - the amplifier signature) and `near_miss` (pairs within 6 dB *below* sensitivity, i.e. what the cliff hides) |
 | `hops_away`    | how far away each node's NodeDB believes its peers are, against the topology's own answer - the belief and the truth side by side                                                                                    |
 | `hop_scaling`  | the firmware's hop histogram: truth, what a node observed, and what its estimator inferred per hop, plus the recommendation it would make                                                                            |
@@ -518,7 +550,7 @@ the mechanism is not modelled at all and any question about it has no answer her
 | ------------------------------ | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | **Siting gain** (`--siting-mix`) | roof +6, desk 0, pocket −10, basement −20 dB   | **Not from the firmware and not measured.** The firmware has no concept of siting at all. 26 dB between roof and basement is wide enough to move any result. The default `uniform` is all-desk, i.e. 0 dB, so a run that does not set this flag is unaffected |
 | Link asymmetry                 | per-node transmit and receive gain, plus a per-pair Gaussian σ 2 dB | `rssi[i][j]` takes `tx_gain[i] + rx_gain[j]`, so an amplified node is heard where it cannot hear. Siting moves both directions together (a basement is bad to transmit from and to receive in); amplification does not. The amplifier figures are **assumed, not measured** - the firmware knows `tx_power` and nothing about what is bolted to the antenna port |
-| **No marginal link**           | a pair either clears sensitivity or is not a link | The vendored PER curve puts success at 96% *at* sensitivity, and `neighbours` is thresholded there, so every link the mesh uses is already reliable and everything genuinely marginal falls below the cliff. Real meshes are full of links that work a third of the time and **nothing here reproduces one.** `link_quality.fragile` (margin under 5 dB) and `near_miss` (within 6 dB below) bound what the cliff is hiding; on a stock 60-node mesh that is 207 fragile links against 342 near misses |
+| **No marginal link** - but delivery *is* probabilistic | every reception draws against `payload_success_probability(rssi, cr, length)`; only pairs above sensitivity are ever attempted | The draw is real and the coding rate reaches it, so a retransmission at a higher CR genuinely is more likely to land. What is missing is the *range*: `neighbours` is thresholded at sensitivity, where the vendored curve already sits at 96%, and it saturates at 99.5% by +3 dB of margin. So the whole probabilistic band is 0.96-0.995, and **a link that works a third of the time cannot exist here at all**. Consequences worth knowing: PHY loss is around 0.7% of reception attempts against 28% to collisions, so contention dominates weak links by a factor of ~56; and raising the coding rate from 5 to 8 buys +0.030 at zero margin, +0.004 at +2 dB and **exactly nothing at +3 dB or more**, which bounds what any CR-ladder result can show. `link_quality.fragile` (margin under 5 dB) and `near_miss` (within 6 dB below sensitivity) size what the threshold hides: 207 against 342 on a stock 60-node mesh. Letting sub-sensitivity pairs deliver probabilistically is the fix, and it is a change to the vendored physics |
 | Path loss                      | 3GPP Suburban Macro (`MODEL = 5`)                | one propagation environment for every run. No terrain, no clutter, no per-link environment                                         |
 | Diurnal shape                  | `commuter`, 17:1 peak-to-trough                  | invented, not measured. It sets when the mesh is busy, which the whole congestion story rests on                                    |
 | Role and board census          | `baymesh-2026-08`, 1769 real nodes               | measured, but from one metro mesh on one day. Not a global distribution                                                            |
