@@ -206,6 +206,7 @@ def render_block(reports, out_dir, name):
     axes[0].legend(frameon=False, fontsize=8.5)
 
     axes[1].bar(labels, air, color=WARN)
+    axes[1].set_xticks(range(len(labels)))
     axes[1].set_xticklabels(labels, fontsize=8.5, rotation=20, ha="right")
     _style(axes[1], "Reconciliation's share of channel airtime", "", "% of airtime")
 

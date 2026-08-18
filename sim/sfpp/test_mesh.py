@@ -2026,6 +2026,57 @@ print(",".join(failed))
         unknown = sorted({arm for arm, _, _ in BLOCKS.values()} - known)
         self.assertEqual(unknown, [], "sweep arms that no longer exist on the command line")
 
+    def test_no_block_sweeps_an_arm_its_grid_leaves_inert(self):
+        """An arm that needs a second flag produces identical rows without it, and reads as a result.
+
+        Each of these was found by running both sides of the arm and diffing the reports, not by
+        reading the code: `--hop-limit` is never consulted while `--hop-spread` assigns per-node
+        limits from centrality, and the retry-ladder arms have nothing to retransmit until SR
+        traffic is routed through the transport with routes to address it to.
+        """
+        from .sweep import BLOCKS
+
+        needs = {
+            "hop-limit": ("--no-hop-spread", "hop-spread assigns per-node limits and wins"),
+            "dm-mode": ("--dm-transport", "a DM only exists once SR routes through the transport"),
+            "coding-rate-ladder": (
+                "--dm-transport",
+                "nothing is retransmitted without addressed messages",
+            ),
+            "window-size": ("--bucket-mode", "only read under --bucket-mode window"),
+            "time-bucket-s": ("--bucket-mode", "only read under --bucket-mode time"),
+            "hops-apart": ("--place", "only read under --place hops-apart"),
+            "old-profile": ("--legacy-fraction", "no node runs it at a zero share"),
+        }
+        wrong = []
+        for name, (arm, _values, grid) in BLOCKS.items():
+            enabler = needs.get(arm)
+            if enabler and enabler[0] not in grid:
+                wrong.append(f"{name} sweeps --{arm} without {enabler[0]}: {enabler[1]}")
+        self.assertEqual(wrong, [], "blocks whose arm cannot do anything as configured")
+
+    def test_the_report_carries_both_tails_for_text_and_all_packets(self):
+        """p10 and p90 are the pair conclusions are drawn from, and `all` is the row that shows a trade."""
+        from .campaign import build_parser, run_once
+
+        opts = build_parser().parse_args(
+            ["--hours", "2", "--nodes", "18", "--no-charts", "--protocol", "none"]
+        )
+        report = run_once(opts, seed=5)
+        for name in ("text", "all"):
+            self.assertIn(name, report["by_class"], f"{name} row missing")
+            dist = report["by_class"][name]["per_node_reception"]
+            for stat in ("min", "p10", "median", "mean", "p90", "max"):
+                self.assertIn(stat, dist, f"{name}.{stat} missing")
+            self.assertLessEqual(dist["p10"], dist["median"])
+            self.assertLessEqual(dist["median"], dist["p90"])
+        # The aggregate counts every class, so it cannot be smaller than any single one.
+        total = report["by_class"]["all"]["originated"]
+        self.assertEqual(
+            total,
+            sum(v["originated"] for k, v in report["by_class"].items() if k != "all"),
+        )
+
     def test_every_command_line_flag_is_documented(self):
         """The README is the operating manual, so a flag it does not name cannot be found.
 

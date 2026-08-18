@@ -82,24 +82,41 @@ def report_one(r, indent=""):
         a("")
         a(
             f"{indent}  {'class':<11}{'port':>5}{'sent':>7}{'recv':>9}"
-            f"{'  min':>7}{'p10':>7}{'med':>7}{'mean':>7}{'max':>7}  {'none':>5}  {'air':>6}  shape"
+            f"{'  min':>7}{'p10':>7}{'med':>7}{'mean':>7}{'p90':>7}{'max':>7}  {'none':>5}  {'air':>6}  shape"
         )
-        order = sorted(by, key=lambda k: (not by[k].get("archived"), k))
-        for name in order:
+        # Archived class first, then the rest, then the all-portnum aggregate last as a rule-off.
+        order = sorted(
+            (k for k in by if k != "all"), key=lambda k: (not by[k].get("archived"), k)
+        )
+        for name in order + (["all"] if "all" in by else []):
             c = by[name]
             d = c.get("per_node_reception") or {}
             mark = "»" if c.get("archived") else " "
+            if name == "all":
+                a(f"{indent}  {'-' * 78}")
+                mark = "Σ"
             a(
                 f"{indent}{mark} {name:<11}{PORTNUMS.get(name,'-'):>5}{c['originated']:>7}"
                 f"{c['receptions']:>9}"
                 f"{d.get('min',0):>7.3f}{d.get('p10',0):>7.3f}{d.get('median',0):>7.3f}"
-                f"{d.get('mean',0):>7.3f}{d.get('max',0):>7.3f}"
+                f"{d.get('mean',0):>7.3f}{d.get('p90',0):>7.3f}{d.get('max',0):>7.3f}"
                 f"{c.get('nodes_receiving_none',0):>6}"
                 f"{c['airtime_share']:>7.1%}  {sparkline(d)}"
             )
         a(
-            f"{indent}  » = the archived class. 'none' = nodes that received not one packet of it."
+            f"{indent}  » = the archived class · Σ = every portnum together · "
+            f"'none' = nodes that received not one packet of it."
         )
+        # p10 against p90 is the pair to read: an arm that lifts p90 and leaves p10 alone has helped
+        # the nodes that were already fine.
+        for name in ("text", "all"):
+            if name in by:
+                d = by[name].get("per_node_reception") or {}
+                a(
+                    f"{indent}  {name.upper():<5} tail        p10 {d.get('p10',0):.3f}  "
+                    f"median {d.get('median',0):.3f}  p90 {d.get('p90',0):.3f}  "
+                    f"(spread {d.get('p90',0) - d.get('p10',0):.3f})"
+                )
 
     b = r["baseline"]
     a("")
