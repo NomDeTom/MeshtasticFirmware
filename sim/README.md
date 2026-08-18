@@ -299,7 +299,7 @@ diameter column reads fragmented rather than a number.
 | Section        | Contains                                                                                                                                                                                                              |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mesh`         | nodes, area, degree, `diameter` (`None` if fragmented), components, routers, topology                                                                                                                                 |
-| `traffic`      | the largest section, and the one that grows. Offered load and airtime (originated per class, channel utilisation, transmissions, **`queue_drops`**, `dropped_to_backoff_cap`, receptions, collision, half-duplex and PHY losses, congestion coefficient), then one family per mechanism: next-hop routing (`next_hop_*`, `route_expired_*`, `routes_lost_to_eviction`), the NodeDB tiers (`nodedb_evictions`, `warm_*`, `dm_blocked_no_key`), signing (`packets_signed`, `dropped_unsigned_strict`, `dropped_unverifiable`, `dropped_downgrade`, `signature_bootstraps`), traceroute (`traceroutes_sent`, `traceroute_routes_learned`, `traceroute_uncorroborated`, `route_cache_*`), hop scaling (`hop_samples`, `hop_rolls`, `hop_limit_lowered`), and the unreleased mechanisms (`extra_repeats_*`, `early_floods`) |
+| `traffic`      | the largest section, and the one that grows. Offered load and airtime (originated per class, **`channel_utilisation`** and **`node_channel_util_percent`** - two different things, see below - transmissions, **`queue_drops`**, `dropped_to_backoff_cap`, receptions, collision, half-duplex and PHY losses, congestion coefficient), then one family per mechanism: next-hop routing (`next_hop_*`, `route_expired_*`, `routes_lost_to_eviction`), the NodeDB tiers (`nodedb_evictions`, `warm_*`, `dm_blocked_no_key`), signing (`packets_signed`, `dropped_unsigned_strict`, `dropped_unverifiable`, `dropped_downgrade`, `signature_bootstraps`), traceroute (`traceroutes_sent`, `traceroute_routes_learned`, `traceroute_uncorroborated`, `route_cache_*`), hop scaling (`hop_samples`, `hop_rolls`, `hop_limit_lowered`), and the unreleased mechanisms (`extra_repeats_*`, `early_floods`) |
 | `by_class`     | per portnum: sent, received, **per-node reception distribution**, `nodes_receiving_none`, airtime share, `archived`                                                                                                   |
 | `by_hop_limit` | reception and hops traversed, split by the node's own limit                                                                                                                                                           |
 | `baseline`     | text reach min/median/mean/max, routing ceiling, and the loss split into beyond-hop-limit against lost-within-reach                                                                                                   |
@@ -311,7 +311,21 @@ diameter column reads fragmented rather than a number.
 | `adaptive`     | the per-node time series `--trace-interval-s` collects. Empty unless that flag is set                                                                                                                                |
 | `opts`         | every resolved option, so a report can be replayed without the command line that made it                                                                                                                            |
 
-`seed`, `label` and `wall_seconds` sit at the top level beside these.
+`seed`, `label`, `transport` (the commit that produced the run) and `wall_seconds` sit at the top
+level beside these.
+
+**Two utilisation figures, and they answer different questions.** Confusing them overstates
+congestion badly, because spatial reuse means most transmissions never overlap at any one receiver.
+
+| Field | Is | Range |
+| --- | --- | --- |
+| `channel_utilisation` | every node's transmit time summed, over elapsed time - **aggregate demand**, not a busy fraction. 1.0 is one channel-second asked for per second | unbounded; above 1 is normal on a mesh with spatial reuse |
+| `node_channel_util_percent` | `AirTime::channelUtilizationPercent` per node, as a distribution: six ten-second buckets charging every packet the node could hear above the CAD floor, decoded or not, plus its own transmissions. **What a real device reports, and what sizes its contention window** | 0-100 |
+
+On one 60-node 8 km mesh the two read 1.9x and a 25% median respectively. Quote the second when
+asking whether a mesh is busy; quote the first when asking what a change did to total airtime.
+Sampled on a cadence during the run, because the ring covers sixty seconds and a single read after
+the last packet returns zero.
 
 **Stretch metrics** - the ones that answer "was this worth it on a wide mesh":
 
