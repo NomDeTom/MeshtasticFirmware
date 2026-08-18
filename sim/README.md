@@ -279,11 +279,31 @@ Measured at 60 nodes, 8 km, seed 9, 6 h, against `baymesh-2026-08` with `uniform
 
 Three things worth knowing before using these:
 
-- **Removing `CLIENT_MUTE` improves reception here**, it does not degrade it. More relays means more
-  copies, and at 26% channel utilisation this mesh can absorb them. It is adversarial for *airtime*,
-  and only becomes adversarial for delivery on a mesh already near saturation. The same is true of
-  `all-routers`: nearly the same reception as `no-mute` for 2.6x the transmissions and 67% node
-  utilisation.
+- **`CLIENT_MUTE` is decided by density, not by siting.** Crossed at 80 nodes, 8 h, seed 9:
+
+  | siting | roles | degree | text p10 | median | p90 | cancellations |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `uniform` | with mute | 12.7 | **0.768** | 0.848 | 0.900 | 44 359 |
+  | `uniform` | no mute | 12.7 | 0.757 | 0.867 | 0.921 | 57 893 |
+  | `local-typical` | with mute | 9.4 | 0.361 | 0.691 | 0.754 | 36 509 |
+  | `local-typical` | no mute | 9.4 | **0.458** | 0.759 | 0.803 | 41 468 |
+
+  On the dense mesh removing mute costs p10 while raising median and p90 - the well-placed gain and
+  the badly-placed lose. On the sparser one it gains p10 outright, and by a lot. Bad siting makes
+  the mesh sparser, and a sparse mesh needs every relay it can get, so **`local-typical` does not
+  make muting more attractive; it makes it less**. The crossover here sits between degree 9.4 and
+  12.7.
+
+- **Duplicate suppression does backfire, and it is measurable.** A relay heard by fewer nodes than
+  the one whose rebroadcast it cancels suppresses a broadcast that would have travelled further than
+  its own. `cancelled_by_weaker_relay` counts those and `cancelled_reach_lost` sums the neighbours
+  given up: on 80 nodes with `local-typical` siting and no mute, **43% of all cancellations are of
+  this kind, each costing about 4.8 nodes of onward reach**.
+
+  That is a large number and it is still not decisive - the coverage those relays add outweighs the
+  suppression they cause everywhere except the dense mesh above. Read the counters to understand
+  *why* an arm moved, not to predict which way it will. `all-routers` is the same trade once more:
+  nearly `no-mute`'s reception for 2.6x the transmissions and 67% node utilisation.
 - **`inverse` levels rather than lowers**: p10 rises to 0.635 while p90 falls to 0.783. A router on
   a fringe node helps the fringe and stops helping the core. Adversarial for the well-connected.
 - **`basement-heavy` does not stress the mesh, it kills it.** Siting gain applies at both ends of a
@@ -338,7 +358,7 @@ diameter column reads fragmented rather than a number.
 | Section        | Contains                                                                                                                                                                                                              |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mesh`         | nodes, area, degree, `diameter` (`None` if fragmented), components, routers, topology                                                                                                                                 |
-| `traffic`      | the largest section, and the one that grows. Offered load and airtime (originated per class, **`channel_utilisation`** and **`node_channel_util_percent`** - two different things, see below - transmissions, **`queue_drops`**, `dropped_to_backoff_cap`, receptions, collision, half-duplex and PHY losses, congestion coefficient), then one family per mechanism: next-hop routing (`next_hop_*`, `route_expired_*`, `routes_lost_to_eviction`), the NodeDB tiers (`nodedb_evictions`, `warm_*`, `dm_blocked_no_key`), signing (`packets_signed`, `dropped_unsigned_strict`, `dropped_unverifiable`, `dropped_downgrade`, `signature_bootstraps`), traceroute (`traceroutes_sent`, `traceroute_routes_learned`, `traceroute_uncorroborated`, `route_cache_*`), hop scaling (`hop_samples`, `hop_rolls`, `hop_limit_lowered`), and the unreleased mechanisms (`extra_repeats_*`, `early_floods`) |
+| `traffic`      | the largest section, and the one that grows. Includes **`cancelled_by_weaker_relay`** and **`cancelled_reach_lost`** - duplicate suppression backfiring, where the relay heard by fewer nodes silences the one heard by more. Offered load and airtime (originated per class, **`channel_utilisation`** and **`node_channel_util_percent`** - two different things, see below - transmissions, **`queue_drops`**, `dropped_to_backoff_cap`, receptions, collision, half-duplex and PHY losses, congestion coefficient), then one family per mechanism: next-hop routing (`next_hop_*`, `route_expired_*`, `routes_lost_to_eviction`), the NodeDB tiers (`nodedb_evictions`, `warm_*`, `dm_blocked_no_key`), signing (`packets_signed`, `dropped_unsigned_strict`, `dropped_unverifiable`, `dropped_downgrade`, `signature_bootstraps`), traceroute (`traceroutes_sent`, `traceroute_routes_learned`, `traceroute_uncorroborated`, `route_cache_*`), hop scaling (`hop_samples`, `hop_rolls`, `hop_limit_lowered`), and the unreleased mechanisms (`extra_repeats_*`, `early_floods`) |
 | `by_class`     | per portnum: sent, received, **per-node reception distribution**, `nodes_receiving_none`, airtime share, `archived`                                                                                                   |
 | `by_hop_limit` | reception and hops traversed, split by the node's own limit                                                                                                                                                           |
 | `baseline`     | text reach min/median/mean/max, routing ceiling, and the loss split into beyond-hop-limit against lost-within-reach                                                                                                   |
@@ -494,7 +514,7 @@ the mechanism is not modelled at all and any question about it has no answer her
 | Assumption                     | Value                                            | Why it matters                                                                                                                     |
 | ------------------------------ | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | **Siting gain** (`--siting-mix`) | roof +6, desk 0, pocket −10, basement −20 dB   | **Not from the firmware and not measured.** The firmware has no concept of siting at all. 26 dB between roof and basement is wide enough to move any result. The default `uniform` is all-desk, i.e. 0 dB, so a run that does not set this flag is unaffected |
-| Link asymmetry                 | Gaussian, mean 0, σ 2 dB, one draw per pair      | vendored default. Real asymmetry comes from antennas and height, which are not modelled                                            |
+| Link asymmetry                 | Gaussian, mean 0, σ 2 dB, one draw per pair      | vendored default. Real asymmetry comes from antennas and height, which are not modelled. **Siting gain is symmetric per link** (`siting[i] + siting[j]` both ways), so a badly-sited node here is equally deaf and quiet. The real case - receives fine, transmits poorly - is not represented, which means `cancelled_by_weaker_relay` is a floor on the real pathology rather than an estimate of it. Separate per-node TX and RX gain is the honest fix and would be a physics-layer change |
 | Path loss                      | 3GPP Suburban Macro (`MODEL = 5`)                | one propagation environment for every run. No terrain, no clutter, no per-link environment                                         |
 | Diurnal shape                  | `commuter`, 17:1 peak-to-trough                  | invented, not measured. It sets when the mesh is busy, which the whole congestion story rests on                                    |
 | Role and board census          | `baymesh-2026-08`, 1769 real nodes               | measured, but from one metro mesh on one day. Not a global distribution                                                            |
