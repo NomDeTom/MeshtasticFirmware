@@ -2106,6 +2106,16 @@ print(",".join(failed))
         self.assertIn("transport", report)
         self.assertTrue(report["transport"], "the commit must not be empty")
 
+    def test_a_swept_report_records_the_code_too(self):
+        """sweep calls run_once directly, so stamping the commit in main() missed every block."""
+        from .campaign import build_parser, run_once
+
+        opts = build_parser().parse_args(
+            ["--hours", "1", "--nodes", "12", "--no-charts", "--protocol", "none"]
+        )
+        report = run_once(opts, seed=3)
+        self.assertTrue(report.get("transport"), "run_once must stamp the commit")
+
     def test_the_report_carries_both_tails_for_text_and_all_packets(self):
         """p10 and p90 are the pair conclusions are drawn from, and `all` is the row that shows a trade."""
         from .campaign import build_parser, run_once

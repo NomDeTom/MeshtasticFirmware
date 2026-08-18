@@ -2315,7 +2315,11 @@ def build_parser():
 def run_once(opts, seed):
     campaign = Campaign(opts, seed)
     try:
-        return campaign.run()
+        report = campaign.run()
+        # Here rather than in main(): sweep.py calls run_once directly and writes its own JSON, so
+        # stamping the commit further out left every swept result - which is all of them - unstamped.
+        report["transport"] = AC.transport_pin()
+        return report
     finally:
         campaign.close()
 
@@ -2333,9 +2337,6 @@ def main(argv=None):
             seed = opts.seed + repeat
         report = run_once(opts, seed)
         report["label"] = opts.label
-        # The commit that produced the numbers, in the numbers. Only the charts carried it before,
-        # so a saved JSON could not be told apart from one measured on different rules.
-        report["transport"] = AC.transport_pin()
         reports.append(report)
         summarise(report)
     if opts.out:
