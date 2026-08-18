@@ -116,6 +116,7 @@ under `--grid` carries the grid in its filename, which is the usual reason one i
 | `--area`                 | 8000             | side of the placement square, metres                                                                                  |
 | `--scale-area`           | off              | grow the area as √(n/60) so **density is held constant**. Without it, a size sweep measures density and calls it size |
 | `--topology`             | `uniform`        | see §5                                                                                                                |
+| `--stretch`              | 1.0              | scale every distance by this factor, about the centroid, **after** placement. Unlike `--area` it keeps the same nodes in the same arrangement, so an arm is paired with its own control. Read `report["stretch"]` and see §5.1e |
 | `--router-fraction`      | 0.1              | share promoted to ROUTER, chosen by degree                                                                            |
 | `--router-late-fraction` | 0.0              | share as ROUTER_LATE                                                                                                  |
 | `--client-base-fraction` | 0.0              | share as CLIENT_BASE                                                                                                  |
@@ -141,7 +142,7 @@ under `--grid` carries the grid in its filename, which is the usual reason one i
 
 | Flag                        | Default      | Meaning                                                                                          |
 | --------------------------- | ------------ | -------------------------------------------------------------------------------------------------- |
-| `--preset`                  | `LONG_FAST`  | modem preset. **Changes reception, not just airtime** - see §6. Two are ours, not upstream: `EXTRA_LONG_TURBO` (SF12/500 kHz) and `EXTRA_SHORT_TURBO` (SF5/500 kHz), with **extrapolated** sensitivity |
+| `--preset`                  | `LONG_FAST`  | modem preset, **one per mesh**. **Changes reception, not just airtime** - see §6 and §5.1c. Seven the firmware ships were missing from the vendored table and are now present; two more are ours and not upstream |
 | `--tx-power`                | region limit | transmit power in dBm. The region limit is a ceiling an operator may use, not one they must    |
 | `--profile`                 | `2.8`        | which release series' rules to obey: `2.4` … `2.8`, or `legacy`. See §9.1                        |
 | `--old-profile`             | `legacy`     | the rules the `--legacy-fraction` share runs instead. Inert at `--legacy-fraction 0`             |
@@ -191,6 +192,29 @@ thirds of rebroadcast attempts.
 | `--extra-loss` | 0.0     | flat loss floor on every reception                                                                                    |
 | `--burst-loss` | 0.0     | chance a node is deaf for a whole window                                                                              |
 | `--burst-ms`   | 60000   | length of that window. A 60 s outage is nothing to a bucket that takes an hour to fill; 1800000 is the one that bites |
+
+**A noise floor that moves** (§5.1f). `--noise-model` sets the *static* floor; these vary it in time.
+
+| Flag                        | Default | Meaning                                                                                          |
+| --------------------------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `--noise-profile`           | `none`  | `temporal` (smooth field, coherence time), `transient` (episodic and spatial), `periodic` (a regular emitter that wipes whatever is in flight), `both` = temporal+transient, `all` adds periodic |
+| `--noise-sigma-db`          | 3.0     | standard deviation of the temporal field                                                          |
+| `--noise-tau-ms`            | 500     | coherence time of the temporal field. **This is the knob that sets how much longer frames suffer** - a frame spanning many τ meets the worst of many excursions; one inside a single τ meets a flat offset |
+| `--noise-transient-per-hour`| 6.0     | transient excursions per hour, mesh-wide. Inert unless the profile includes `transient`            |
+| `--noise-transient-db`      | 8.0     | depth of one transient excursion, before its own 0.5-1.5x spread                                  |
+| `--noise-transient-ms`      | 30000   | how long one transient excursion lasts                                                            |
+| `--noise-transient-radius`  | 0.35    | radius of one excursion as a fraction of the area's side, before its spread                        |
+| `--noise-lift-share`        | 0.0     | share of *transient* excursions that are negative - a quieter band. See §5.1f on why this is only half a lift |
+| `--noise-pulse-interval-ms` | 10000   | period of the `periodic` emitter                                                                   |
+| `--noise-pulse-ms`          | 200     | how long it holds the channel each time it fires                                                    |
+
+**Tropospheric ducting** (§5.1g). Not noise - the propagation path improving.
+
+| Flag              | Default | Meaning                                                                                            |
+| ----------------- | ------- | -------------------------------------------------------------------------------------------------- |
+| `--duct-per-hour` | 0.0     | ducting episodes per hour. **Not a free gain**: read `ducted_receptions` beside `lost_to_collision` |
+| `--duct-gain-db`  | 20.0    | signal a duct adds at its peak; each episode draws half to full of this                             |
+| `--duct-ms`       | 1800000 | how long one episode lasts                                                                           |
 
 `mesh.break_mesh(mode, count)` offers `bridge`/`routers`/`degree`/`random`/`split`, and `take_down`
 deliberately does **not** remove the node from anyone else's NodeDB - failure is not broadcast, so the
@@ -370,6 +394,69 @@ costs, and CR8 then makes it slightly longer. Worth knowing before reading the b
 Also: **SF5 and SF6 need an SX126x or SX128x.** An SX127x cannot do them at all, so
 `EXTRA_SHORT_TURBO` is not a setting every board could take even if the firmware offered it.
 
+### 5.1c-2 The presets the firmware ships, and the range meshes actually run
+
+A mesh runs **one preset at a time**, so `--preset` is a global and a preset comparison is between
+runs, never a mix within one.
+
+The vendored table carried ten presets. `src/mesh/MeshRadio.h`'s `modemPresetToParams` offers
+seventeen, and seven of the missing ones are now here - **real, not extrapolated**. Bandwidth,
+spreading factor and coding rate are read straight out of that switch; sensitivity is derived as
+kTB + 6 dB NF + the demodulator limit for the spreading factor, which reproduces all ten vendored rows
+to within **0.041 dB** and is what licenses deriving the rest the same way.
+
+| preset | SF | BW | CR | sensitivity | 60 B | 237 B | note |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `SHORT_TURBO` | 7 | 500k | 5 | −118.50 | 0.060 s | 0.175 s | |
+| `MEDIUM_TURBO` | 9 | 500k | 5 | −123.51 | 0.195 s | 0.554 s | **added** |
+| `LONG_TURBO` | 11 | 500k | 8 | −128.50 | 0.804 s | 2.377 s | |
+| `SHORT_FAST` | 7 | 250k | 5 | −121.50 | 0.120 s | 0.351 s | the fast end of deployed |
+| `LONG_FAST` | 11 | 250k | 5 | −131.50 | 1.264 s | 3.623 s | the default |
+| `LONG_MODERATE` | 11 | 125k | 8 | −134.50 | 3.805 s | 11.670 s | the slow end of deployed |
+| `LITE_FAST` | 9 | 125k | 5 | −129.53 | 0.779 s | 2.217 s | **added** - the `EU_866` default |
+| `LITE_SLOW` | 10 | 125k | 5 | −132.03 | 1.411 s | 3.992 s | **added** |
+| `NARROW_FAST` | 7 | 62.5k | 6 | −127.54 | 0.529 s | 1.553 s | **added** |
+| `NARROW_SLOW` | 8 | 62.5k | 6 | −130.04 | 0.935 s | 2.737 s | **added** - the `EU_N_868` default |
+| `TINY_FAST` / `TINY_SLOW` | 7 / 8 | 15.6k | 5 / 6 | −133.6 / −136.1 | | 4.1 s / 11.0 s | **added** |
+
+**Which of these a result should be about:**
+
+- **Deployed meshes run `SHORT_FAST` through `LONG_MODERATE`**, with `LONG_FAST` the default and the
+  middle. That is the range `P-preset` sweeps.
+- **Above about 30 nodes nothing slower than `LONG_MODERATE` is used**, and meshes that do use one
+  suffer for it. `LONG_SLOW` holds the channel for 21 s at a full payload; §5.1f's periodic profile
+  shows `LONG_MODERATE` already losing 100% of full payloads to a 10 s interferer.
+- **North America is heading for 500 kHz across the board** - `P-bw500` holds bandwidth there and
+  varies spreading factor.
+- **Europe stays on 250 kHz and adds the narrow presets.** `EU_866` defaults to `LITE_FAST` and
+  `EU_N_868` to `NARROW_SLOW` (`src/mesh/RadioInterface.cpp:144-145`), so a European result covering
+  only the 250 kHz presets is a result about the past. That is `P-eu-presets`.
+- `LONG_SLOW`, `VERY_LONG_SLOW` and the two `EXTRA_` presets remain available to `--preset`. A result
+  on them is a result about a mesh nobody runs.
+
+The wideLora (2.4 GHz) bandwidths in the same switch - 1625, 812.5, 406.25 kHz - are **not** here,
+because the vendored region table has no 2.4 GHz entry to run them against.
+
+**The overlap window is now derived from the preset, not a constant.** It was `MAX_AIRTIME_MS =
+20000.0`, justified by a comment claiming "LONG_SLOW at a full payload is about 6 s". It is **21.0 s**;
+6 s is what a 45 B payload costs, and a 0 B frame already costs 2.50 s. So 20 s was not a wide margin -
+it sat *under* LONG_SLOW's longest frame and far under `VERY_LONG_SLOW`'s 35.7 s, and a transmission
+still in flight past the window was dropped from the interferer scan. Over 8 h at 30 nodes, LONG_SLOW's
+longest frame was 19.80 s (about 1% of headroom, nothing over) but **`VERY_LONG_SLOW` put 130 of 5669
+transmissions past it** - the longest ones, and so the likeliest to overlap something.
+
+One constant cannot be right here: the span across presets is two orders of magnitude. `Mesh` now
+sizes its own window at one maximum-length frame plus a fifth, which fixes the slow end and makes the
+fast end much cheaper - a `SHORT_TURBO` delivery used to scan 20 s of history to find overlaps with a
+0.175 s frame:
+
+| preset | max frame | overlap window |
+| --- | --- | --- |
+| `SHORT_TURBO` | 0.18 s | 0.21 s |
+| `LONG_FAST` | 3.62 s | 4.35 s |
+| `LONG_MODERATE` | 11.67 s | 14.00 s |
+| `VERY_LONG_SLOW` | 35.67 s | 42.80 s |
+
 ### 5.1d The noise floor, and why there were no marginal links
 
 Two questions worth answering together, because one bug caused both.
@@ -410,6 +497,119 @@ delivery changes.
 
 **Everything measured before this defaulted to `fixed`**, including all of round five, and is
 optimistic about weak-link delivery by the margin above. The turbo presets are the worst affected.
+
+### 5.1e Stretch: distance as its own variable
+
+`--stretch k` multiplies every distance in the mesh by `k`, about the centroid, after the points are
+drawn. `--area` cannot do this: changing the area redraws the placement, so an 8 km mesh and a 16 km
+mesh at one seed are two different meshes and the difference between them is a different draw as much
+as a longer link. A stretch keeps node *k* the same node in the same arrangement. It consumes no
+randomness, so every arm of `X-stretch` carries the identical traffic schedule.
+
+**Quote the result against the unstretched link set, not the live one.** The share of live links that
+are bad *improves* at high stretch, because the worst links stop being links:
+
+| stretch | live links | below 50% delivery | share of live links | per 1000 ordered pairs |
+| --- | --- | --- | --- | --- |
+| 1.00 | 545 | 29 | 0.053 | 8.19 |
+| 1.50 | 249 | 16 | 0.064 | 4.52 |
+| 2.00 | 128 | 10 | 0.078 | 2.83 |
+| 3.00 | 51 | 3 | **0.059** | 0.85 |
+
+Neither column is readable across those rows. `report["stretch"]` fixes the denominator at the link
+set the mesh had at stretch 1.0, recovered exactly rather than re-drawn - the per-pair skew is stored
+for the life of the mesh, so scaling the distance back reproduces the unstretched RSSI to the bit:
+
+| stretch | links at 1.0 | still links | lost to the cliff | marginal now | total cost |
+| --- | --- | --- | --- | --- | --- |
+| 1.00 | 545 | 545 | 0 (0.000) | 182 (0.334) | 0.334 |
+| 1.25 | 545 | 377 | 168 (0.308) | 158 (0.290) | 0.598 |
+| 1.50 | 545 | 249 | 296 (0.543) | 104 (0.191) | 0.734 |
+| 2.00 | 545 | 128 | 417 (0.765) | 59 (0.108) | 0.873 |
+| 3.00 | 545 | 51 | 494 (0.906) | 16 (0.029) | 0.936 |
+
+**`lost_to_cliff` dominates, and that is the finding, not an artefact.** This model degrades a link
+until it reaches sensitivity and then deletes it, so most of what stretching costs is invisible to the
+delivery curve. A third of links are already marginal at rest under the thermal floor (0.334 at
+stretch 1.0). Letting sub-sensitivity pairs deliver probabilistically would move the balance from
+`lost_to_cliff` toward `marginal_now`, and it is a change to the vendored physics.
+
+### 5.1f Noise profiles: a floor that moves
+
+`--noise-model` sets the static floor (§5.1d). `--noise-profile` varies it in time. All three are
+hashed from the seed rather than drawn from the RNG, so switching one on leaves every other draw in
+the run exactly where it was - the arms of a noise sweep differ in the field and in nothing else - and
+the field does not depend on the order the event loop happens to run in.
+
+**`temporal`** is a smooth field with a coherence time τ, and a packet is judged on the **worst**
+excursion its own airtime spans, not the mean. A frame is decoded as one unit: a single deep fade
+anywhere inside it corrupts enough coded symbols to fail the frame. The length penalty that falls out
+is superlinear, where the vendored curve's is a flat 0.8 dB per 100 bytes. At σ=3 dB, τ=500 ms, the
+mean worst excursion a full payload meets:
+
+| preset | airtime at 237 B | mean worst excursion |
+| --- | --- | --- |
+| `SHORT_TURBO` | 0.175 s | +0.27 dB |
+| `LONG_FAST` | 3.62 s | +3.21 dB |
+| `LONG_SLOW` | 20.98 s | +5.77 dB |
+
+τ is the knob that controls this. Set it near a short packet's airtime and the length effect
+disappears; measured over a 6 h run, τ=500 ms costs 7992 receptions to excursions and τ=30 s costs
+3345, because at 30 s a packet sees a flat offset it is as likely to gain from as to lose to.
+
+**`periodic`** is a regular emitter that **wipes out whatever is in flight when it fires** - not an
+SNR penalty, a hard loss. The chance of being caught is `(airtime + pulse) / interval`, so it needs no
+coefficient and it is the hardest length penalty of the three. At a 10 s interval and a 200 ms pulse:
+
+| preset | airtime at 237 B | frames wiped |
+| --- | --- | --- |
+| `SHORT_TURBO` | 0.175 s | 3.7% |
+| `SHORT_FAST` | 0.351 s | 5.3% |
+| `LITE_FAST` | 2.22 s | 23.2% |
+| `LONG_FAST` | 3.62 s | 37.4% |
+| `LONG_MODERATE` | 11.67 s | **100%** |
+
+A frame longer than the interval cannot dodge it. This is the measurement that decides whether a
+preset is usable near an interferer at all, and it is why the slow presets are not a free choice.
+Mesh-wide and perfectly regular: one emitter every receiver hears, with no jitter, because that is the
+adversarial case - a mesh cannot average it away.
+
+**`transient`** is episodic and spatial: a window of raised floor over part of the map. Nothing extra
+is needed to make it bite the stretched links first, because a fixed dB excursion removes the least
+margin first.
+
+`--noise-lift-share` makes that share of transient events **negative** - a quieter band. Note the
+asymmetry: **a lift here can improve a link that exists and cannot create one that does not**, because
+`neighbours` is thresholded on static RSSI. Degradation is modelled fully and lift only partly. For
+lift that extends reach, use ducting.
+
+### 5.1g Tropospheric ducting - `--duct-per-hour`
+
+Episodes when links far beyond normal range come alive: over water, under a temperature inversion, on
+a still evening, signal arrives 10-30 dB stronger than the path loss says it should. Kept separate
+from the noise profiles because it is the propagation path improving, not the floor moving, and unlike
+`--noise-lift-share` it **does** extend the link graph - a candidate set of sub-sensitivity pairs is
+built at construction and filtered by the lift in force.
+
+**A duct is not a gift, and reading it as extra reach misses the result.** Over 12 h, 30 nodes:
+
+| | receptions | collisions | ducted receptions | median node channel util | quietest node |
+| --- | --- | --- | --- | --- | --- |
+| no duct | 107063 | 34452 | 0 | 19.5% | 0.4% |
+| 1/hour at 25 dB | 133036 | 40896 | 19985 | 30.4% | **16.0%** |
+| 2/hour at 30 dB | 343407 | 56609 | 231177 | | |
+
+Receptions rise 24% and collisions rise 19% with them. The quietest node in the mesh goes from 0.4%
+to 16.0% channel utilisation - it now hears the whole mesh, and the congestion machinery is being fed
+a node count that is not really there. Interferers carry the same lift, so the extra audience contends
+and collides rather than arriving into a channel that has gone magically quiet.
+
+The interesting result is what happens **after**. A duct is learned: NodeDB entries, relay bytes and
+`next_hop` records written through links that exist for half an hour and then do not. Read
+`ducted_receptions` beside `lost_to_collision`, and `next_hop` staleness after the episode closes.
+
+One lift figure for the whole mesh, which is the simplification - a real duct has a geometry and
+favours paths along it, usually over water.
 
 ### 5.2 Archive placement - `--place`
 

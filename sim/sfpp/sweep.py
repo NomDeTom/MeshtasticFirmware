@@ -148,8 +148,23 @@ BLOCKS = {
         ["", "02-06", "00-08"],
         ["--diurnal", "commuter", "--trigger", "bucket+interval"],
     ),
-    # Slow presets scale device intervals far harder, so an archive should be cheaper to run there.
-    "P-preset": ("preset", ["SHORT_FAST", "LONG_FAST", "LONG_SLOW"], []),
+    # The presets deployed meshes actually run. LONG_FAST is the default and the middle of the range;
+    # SHORT_FAST is the fast end. LONG_MODERATE is the slow end that is still used, and above about
+    # 30 nodes nothing slower than it is: LONG_SLOW at a full payload holds the channel for 21 s, so a
+    # mesh of that size on it spends its whole airtime budget on a handful of packets. LONG_SLOW and
+    # VERY_LONG_SLOW remain available to --preset, and a result on them is a result about a mesh
+    # nobody runs.
+    "P-preset": ("preset", ["SHORT_FAST", "LONG_FAST", "LONG_MODERATE"], []),
+    # North America is heading for 500 kHz across the board. All three of these are BW500, so the arm
+    # varies spreading factor with the bandwidth held at where the region is going.
+    "P-bw500": ("preset", ["SHORT_TURBO", "MEDIUM_TURBO", "LONG_TURBO"], []),
+    # Europe stays on 250 kHz and adds the narrow presets: EU_866 defaults to LITE_FAST and EU_N_868
+    # to NARROW_SLOW. A European result that covers only the 250 kHz presets is already incomplete.
+    "P-eu-presets": (
+        "preset",
+        ["SHORT_FAST", "LONG_FAST", "LITE_FAST", "NARROW_SLOW"],
+        [],
+    ),
     # Congestion scaling on against off, to size what the firmware's own throttling is worth.
     "P-congestion": ("no-congestion-scaling", [False, True], ["--nodes", "120"]),
     # Nothing, the incumbent chain walk, and the sketch - all at one seed, so `none`
@@ -313,6 +328,23 @@ BLOCKS = {
     "X-amplifiers": ("amplifier-mix", ["none", "sprinkled", "arms-race"], []),
     # The field pathology: a PA fitted to exactly the nodes that hear worst.
     "X-amplify-worst": ("amplify-worst", [0.0, 0.1, 0.3], []),
+    # Distance as its own variable, with the mesh otherwise identical. Read report["stretch"], which
+    # is quoted against the link set at stretch 1.0 - the share against live links is not readable
+    # across these arms, because the worst links leave the graph as the mesh is pulled apart.
+    "X-stretch": ("stretch", [1.0, 1.25, 1.5, 2.0], []),
+    # A noise floor that moves. `periodic` is the adversarial one and the one with real teeth on a
+    # slow preset: a frame in flight when the emitter fires is gone regardless of link budget.
+    "X-noise": (
+        "noise-profile",
+        ["none", "temporal", "transient", "periodic"],
+        [],
+    ),
+    # The interferer's period against a fixed preset. The chance of being caught is (airtime + pulse)
+    # / interval, so this arm is really asking how long a frame this mesh can afford to send.
+    "X-pulse": ("noise-pulse-interval-ms", [30000, 10000, 4000, 2000], ["--noise-profile", "periodic"]),
+    # Tropospheric ducting. The reach is not the result - the contention and the routes learned
+    # through links that then disappear are.
+    "X-duct": ("duct-per-hour", [0.0, 0.25, 1.0], ["--duct-gain-db", "25"]),
     # Position and telemetry turned up, which is what an operator does when the map looks stale.
     "X-chatty": ("broadcast-interval-s", [3600, 900, 300], []),
     # The same, with the hop limit raised too - the other half of that instinct.
@@ -430,6 +462,10 @@ BATCHES = {
     # Each arm deletes an improver rather than adding a stressor, so the loss is attributable.
     "adversarial": ["X-nomute", "X-badrouters", "X-siting", "X-worst"],
     "adversarial-radio": ["X-amplifiers", "X-amplify-worst"],
+    # Distance, a moving floor, and a duct: the three that decide what a link is worth.
+    "propagation": ["X-stretch", "X-noise", "X-pulse", "X-duct"],
+    # Where the deployed meshes are and where the two big regions are going.
+    "presets": ["P-preset", "P-bw500", "P-eu-presets"],
     "adversarial-load": ["X-chatty", "X-chatty-hops"],
     # ---- FUTURE: beyond any release, to find where the design stops working -------------------
     "future-hops": ["F-hoplimit", "F-flooding"],

@@ -450,9 +450,19 @@ NEXTHOP_NEIGHBOR_FRESH_MSEC = 60 * 60 * 2 * 1000.0
 # interferer, or loses if the interferer locked the preamble first and is not this much weaker.
 CAPTURE_DB = 6.0
 
-# Longest a packet can hold the channel at the slowest preset, so a scan back this far cannot miss
-# an overlap. LONG_SLOW at a full payload is about 6 s, so this leaves a wide margin.
-MAX_AIRTIME_MS = 20000.0
+# Fallback lookback for the overlap scan, used only before a Mesh has computed its own. Every live
+# scan uses `mesh.max_airtime_ms`, derived from the preset actually in use - see _set_airtime_window.
+#
+# It used to be this constant alone, justified by a comment claiming "LONG_SLOW at a full payload is
+# about 6 s". A full LONG_SLOW payload is 21.0 s; 6 s is what a 45 B payload costs, and a 0 B frame
+# already costs 2.50 s. So 20 s was not a wide margin - it sat under LONG_SLOW's longest frame and far
+# under VERY_LONG_SLOW's 35.7 s, and a transmission still in flight past the window was dropped from
+# the interferer scan. Measured over 8 h at 30 nodes, VERY_LONG_SLOW put 130 of 5669 transmissions
+# past it, the longest ones and so the likeliest to overlap something.
+MAX_AIRTIME_MS = 40000.0
+
+# The longest payload a Meshtastic frame carries, which sizes the overlap window above.
+MAX_PAYLOAD_BYTES = 237
 
 # The firmware's TX queue is finite, and overflow is its only drop: setTransmitDelay reschedules a
 # blocked packet indefinitely, so congestion shows up as a full queue and as latency rather than as a
@@ -1787,6 +1797,7 @@ class NoiseField:
         seed,
         temporal=False,
         transient=False,
+        periodic=False,
         sigma_db=3.0,
         tau_ms=500.0,
         transient_rate_per_hour=0.0,
@@ -1794,11 +1805,16 @@ class NoiseField:
         transient_ms=30000.0,
         transient_radius_frac=0.35,
         lift_share=0.0,
+        pulse_interval_ms=10000.0,
+        pulse_ms=200.0,
         area=8000.0,
     ):
         self.seed = int(seed) & 0xFFFFFFFF
         self.temporal = temporal
         self.transient = transient
+        self.periodic = periodic
+        self.pulse_interval_ms = max(1.0, pulse_interval_ms)
+        self.pulse_ms = max(0.0, pulse_ms)
         self.sigma_db = sigma_db
         self.tau_ms = max(1.0, tau_ms)
         self.transient_rate = transient_rate_per_hour
@@ -1856,6 +1872,39 @@ class NoiseField:
                 worst = amp
         return worst
 
+    def wiped(self, start_ms, end_ms):
+        """Was this packet in flight when a periodic emitter fired? Then it is simply gone.
+
+        Not a probability and not an SNR penalty - a hard loss. This is the shape real periodic
+        interference takes: a switching supply, a radar sweep, a pager transmitter, something on the
+        band with a duty cycle of its own. It does not degrade a link, it removes whatever was in the
+        air at the time.
+
+        The length effect falls out of the geometry and needs no coefficient: the chance of being
+        caught is (airtime + pulse) / interval, so at a 10 s interval a 175 ms SHORT_TURBO frame is
+        hit under 4% of the time and an 11.7 s LONG_MODERATE frame cannot avoid it at all. This is a
+        far harder length penalty than the PER curve's, and it is the one that actually decides
+        whether a preset is usable near an interferer.
+
+        Mesh-wide, which is the SIMPLIFICATION: one emitter every receiver can hear. A real one has a
+        location and a radius, which is what the transient profile already models; the two compose.
+        Perfectly regular, with no jitter, because that is the adversarial case - a mesh cannot
+        average it away, and a packet length that resonates with the interval fails every time.
+        """
+        if not self.periodic or self.pulse_ms <= 0:
+            return False
+        interval = self.pulse_interval_ms
+        first = int(math.floor(start_ms / interval))
+        last = int(math.floor(end_ms / interval))
+        # A frame longer than the interval always spans a whole pulse.
+        if last > first + 1:
+            return True
+        for k in (first, last):
+            pulse_start = k * interval
+            if start_ms < pulse_start + self.pulse_ms and end_ms > pulse_start:
+                return True
+        return False
+
     def excursion_db(self, lane, pos, start_ms, end_ms):
         """dB to add to the floor for a packet occupying [start_ms, end_ms] at a receiver."""
         total = 0.0
@@ -1864,6 +1913,63 @@ class NoiseField:
         if self.transient:
             total += self._transient_db(pos, start_ms, end_ms)
         return total
+
+
+class Ducting:
+    """Tropospheric ducting: episodes when links far beyond normal range come alive.
+
+    Not noise, and kept separate from NoiseField for that reason - this is the propagation path
+    improving, not the floor moving. Over water, under a temperature inversion, on a still evening, a
+    duct forms and signal that normally disappears into the ground arrives 10 to 30 dB stronger than
+    the path loss says it should. Operators see their node lists fill with names from a hundred
+    kilometres away.
+
+    IT IS NOT A GIFT, and modelling it as one would miss the point. A duct hands the mesh:
+
+      * far more audible neighbours, so more transmissions collide and more contend for the channel;
+      * links that appear, get learned, get written into a NodeDB and a next_hop - and then vanish
+        when the duct closes, leaving routes pointing at nodes that cannot be heard;
+      * an apparent densification the congestion machinery reacts to, scaling intervals for a node
+        count that is not really there.
+
+    So the interesting result from a ducting run is rarely the extra reach. It is what the mesh does
+    afterwards, and whether the design copes with a neighbour count that moved under it.
+
+    Hashed on a window lattice like NoiseField, for the same two reasons: it draws no randomness, and
+    it does not depend on the order the event loop happens to run in.
+    """
+
+    def __init__(
+        self,
+        seed,
+        rate_per_hour=0.0,
+        gain_db=20.0,
+        duration_ms=1800000.0,
+        area=8000.0,
+    ):
+        self.seed = int(seed) & 0xFFFFFFFF
+        self.rate_per_hour = rate_per_hour
+        self.gain_db = gain_db
+        self.duration_ms = max(1.0, duration_ms)
+        self.area = area
+
+    def gain_db_at(self, t_ms):
+        """The lift in dB in force at this instant, or 0.0 outside an episode.
+
+        One figure for the whole mesh: a duct is a property of the atmosphere over the region, not of
+        a pair of nodes. That is a simplification - a real duct has a geometry and favours paths along
+        it, often over water - and it is the conservative direction for the question being asked,
+        because a uniform lift densifies the mesh everywhere at once.
+        """
+        if self.rate_per_hour <= 0 or self.gain_db == 0:
+            return 0.0
+        window = int(math.floor(t_ms / self.duration_ms))
+        chance = min(1.0, self.rate_per_hour * self.duration_ms / 3600_000.0)
+        if _unit(self.seed, 0x7D, window) >= chance:
+            return 0.0
+        # Episodes are not all alike: half strength to full, so the marginal cases are represented
+        # rather than every duct being the same textbook one.
+        return self.gain_db * (0.5 + 0.5 * _unit(self.seed, 0x7E, window))
 
 
 def stretch_points(points, factor):
@@ -1993,6 +2099,60 @@ def thermal_noise_floor(bw_hz, noise_figure_db=RECEIVER_NOISE_FIGURE_DB):
     return THERMAL_NOISE_DBM_PER_HZ + 10.0 * math.log10(bw_hz) + noise_figure_db
 
 
+# The LoRa demodulator's SNR limit by spreading factor: -7.5 dB at SF7 and 2.5 dB per step down.
+DEMOD_SNR_LIMIT_DB = {
+    5: -2.5,
+    6: -5.0,
+    7: -7.5,
+    8: -10.0,
+    9: -12.5,
+    10: -15.0,
+    11: -17.5,
+    12: -20.0,
+}
+
+
+def derived_sensitivity(bw_hz, sf):
+    """Sensitivity as kTB + 6 dB NF + the demodulator limit for this spreading factor.
+
+    This is not a model of the vendored table - it IS the vendored table. All ten of its rows come
+    back to within 0.041 dB, which is what licenses deriving the missing presets the same way instead
+    of extrapolating a slope through them.
+    """
+    return round(thermal_noise_floor(bw_hz) + DEMOD_SNR_LIMIT_DB[sf], 2)
+
+
+def _preset(bw_hz, cr, sf):
+    sens = derived_sensitivity(bw_hz, sf)
+    return {"bw": bw_hz, "cr": cr, "sf": sf, "sensitivity": sens, "cad_threshold": sens - 3.0}
+
+
+# Presets this firmware ships and the vendored table does not have. REAL, not extrapolated: the
+# bandwidth, coding rate and spreading factor of each are read straight out of
+# src/mesh/MeshRadio.h's modemPresetToParams, and the sensitivity is derived on the same basis as
+# every row already in the table.
+#
+# These matter because they are where the deployed meshes are going. EU_866 defaults to LITE_FAST and
+# EU_N_868 to NARROW_SLOW (src/mesh/RadioInterface.cpp:144-145), so a European result that only covers
+# the 250 kHz presets is about to be a result about the past. Without them this simulator could not
+# express half the presets its own firmware offers.
+#
+# The wideLora (2.4 GHz) bandwidths in the same switch - 1625, 812.5, 406.25 kHz - are not here,
+# because the vendored region table has no 2.4 GHz entry to run them against.
+FIRMWARE_PRESETS = {
+    "MEDIUM_TURBO": _preset(500e3, 5, 9),
+    # 125 kHz at CR5. The EU_866 default.
+    "LITE_FAST": _preset(125e3, 5, 9),
+    "LITE_SLOW": _preset(125e3, 5, 10),
+    # 62.5 kHz at CR6. The EU_N_868 default, and the ITU ham 100 kHz default.
+    "NARROW_FAST": _preset(62.5e3, 6, 7),
+    "NARROW_SLOW": _preset(62.5e3, 6, 8),
+    # 15.6 kHz. Legal in places nothing else is; unusable for anything but the shortest text.
+    "TINY_FAST": _preset(15.6e3, 5, 7),
+    "TINY_SLOW": _preset(15.6e3, 6, 8),
+}
+
+
 def make_config(
     preset="LONG_FAST", model=5, phy_loss=True, tx_power=None, noise_model="thermal"
 ):
@@ -2000,6 +2160,7 @@ def make_config(
 
     conf = Config()
     conf.MODEM_PRESETS = dict(conf.MODEM_PRESETS)
+    conf.MODEM_PRESETS.update(FIRMWARE_PRESETS)
     conf.MODEM_PRESETS.update(EXTRA_PRESETS)
     conf.MODEM_PRESET = preset
     conf.MODEL = model
@@ -2053,6 +2214,7 @@ class Mesh:
         siting_gain=None,
         amplifier_gain=None,
         noise=None,
+        ducting=None,
         profile="2.8",
     ):
         self.conf = conf
@@ -2093,8 +2255,11 @@ class Mesh:
         self.rx_gain = [
             self.siting_gain[i] + (amp[i][1] if amp else 0.0) for i in range(len(nodes))
         ]
+        self._set_airtime_window()
         # A moving noise floor, or None for the static one. See NoiseField.
         self.noise = noise
+        # Tropospheric ducting, or None. See Ducting.
+        self.ducting = ducting
         # Drawn on the first _build_links and kept, so a rebuild is deterministic. See _build_links.
         self._skew = None
         self._deaf_until = [0.0] * len(nodes)
@@ -2121,6 +2286,12 @@ class Mesh:
             # off the same single draw, so neither costs a extra random number.
             "lost_to_noise_excursion": 0,
             "saved_by_noise_lift": 0,
+            # Periodic interference caught the frame in flight: a hard loss, not a probability.
+            "wiped_by_periodic": 0,
+            # Receptions that happened only because a duct was open - the pair is not a link at rest.
+            # The other side of the same coin is in lost_to_collision, which ducting also raises.
+            "ducted_receptions": 0,
+            "ducted_transmissions": 0,
             "lost_to_half_duplex": 0,
             "lost_to_phy": 0,
             "bytes_on_air": 0,
@@ -2251,10 +2422,19 @@ class Mesh:
                 self.rssi[i][j] = base + self.tx_gain[i] + self.rx_gain[j] + skew
                 self.rssi[j][i] = base + self.tx_gain[j] + self.rx_gain[i] - skew
 
+        # The widest lift any configured duct can produce, so the candidate set is built once and a
+        # delivery only has to filter it. Without this a ducted reception would mean scanning all n
+        # receivers per transmission instead of the handful that could ever come into range.
+        headroom = self.ducting.gain_db if self.ducting else 0.0
+        self.duct_reach = [[] for _ in range(n)]
         for i in range(n):
             for j in range(n):
-                if i != j and self.rssi[i][j] >= sensitivity:
+                if i == j:
+                    continue
+                if self.rssi[i][j] >= sensitivity:
                     self.neighbours[i].append(j)
+                elif headroom and self.rssi[i][j] >= sensitivity - headroom:
+                    self.duct_reach[i].append(j)
 
     def delivery_probability(self, i, j, length=60, coding_rate=None):
         """P(the payload decodes) on the directed link i->j, at a reference length.
@@ -2683,8 +2863,8 @@ class Mesh:
 
     def _channel_busy(self, node):
         """CAD: is anything audible at this node on the air right now?"""
-        threshold = self.conf.current_preset["sensitivity"] - 3
-        for t in self._recent(self.now - MAX_AIRTIME_MS):
+        threshold = self.conf.current_preset["sensitivity"] - 3 - self.lift_db(self.now)
+        for t in self._recent(self.now - self.max_airtime_ms):
             if t.end <= self.now:
                 continue
             if t.tx_node != node and self.rssi[t.tx_node][node] >= threshold:
@@ -2952,9 +3132,13 @@ class Mesh:
         """Every other transmission sharing air with this one. All of them started before it ended."""
         return [
             o
-            for o in self._recent(tx.start - MAX_AIRTIME_MS)
+            for o in self._recent(tx.start - self.max_airtime_ms)
             if o is not tx and o.start < tx.end and o.end > tx.start
         ]
+
+    def lift_db(self, t_ms):
+        """The ducting lift in force at an instant. Zero unless a duct is configured and open."""
+        return self.ducting.gain_db_at(t_ms) if self.ducting else 0.0
 
     def _deliver(self, tx):
         """Decide, at end of transmission, who actually received it."""
@@ -2968,16 +3152,32 @@ class Mesh:
         # relays - is the better listener.
         transmitting = {o.tx_node for o in interferers}
 
+        # One lift for the whole transmission, taken at its start: a duct does not open or close
+        # inside a single frame. Above zero it does two things at once - it brings pairs that are not
+        # links into range, and it makes every existing link louder, which is what turns the extra
+        # reach into extra contention rather than a free gain.
+        lift = self.lift_db(tx.start)
+        audience = self.neighbours[tx.tx_node]
+        if lift:
+            self.stats["ducted_transmissions"] += 1
+            audience = audience + [
+                j
+                for j in self.duct_reach[tx.tx_node]
+                if self.rssi[tx.tx_node][j] + lift >= sensitivity
+            ]
+
         # AirTime charges every packet a receiver could hear against its channel utilisation,
         # decoded or not, and that figure is what sizes the contention window for our own traffic.
+        # Under a duct that figure rises for everyone, which is how an operator's mesh gets slower on
+        # the evening it appears to get bigger.
         duration = tx.end - tx.start
         cad_floor = sensitivity - 3
-        for rx in self.neighbours[tx.tx_node]:
-            if self.rssi[tx.tx_node][rx] >= cad_floor:
+        for rx in audience:
+            if self.rssi[tx.tx_node][rx] + lift >= cad_floor:
                 self.nodes[rx].log_airtime(self.now, duration)
 
-        for rx in self.neighbours[tx.tx_node]:
-            rssi = self.rssi[tx.tx_node][rx]
+        for rx in audience:
+            rssi = self.rssi[tx.tx_node][rx] + lift
             if rssi < sensitivity:
                 continue
             if not self.nodes[rx].online:
@@ -2985,8 +3185,13 @@ class Mesh:
             if rx in transmitting:
                 self.stats["lost_to_half_duplex"] += 1
                 continue
-            if not self._survives_capture(tx, rx, rssi, interferers, sensitivity):
+            if not self._survives_capture(tx, rx, rssi, interferers, sensitivity, lift):
                 self.stats["lost_to_collision"] += 1
+                continue
+            if self.noise is not None and self.noise.wiped(tx.start, tx.end):
+                # Periodic interference does not care what the link budget is.
+                self.stats["wiped_by_periodic"] += 1
+                self.stats["lost_to_phy"] += 1
                 continue
             if (
                 self._deaf(rx)
@@ -2998,13 +3203,20 @@ class Mesh:
                 self.stats["lost_to_phy"] += 1
                 continue
             self.stats["receptions"] += 1
+            if lift and self.rssi[tx.tx_node][rx] < sensitivity:
+                # This pair is not a link at rest. Everything the mesh learns from this reception -
+                # the NodeDB entry, the relay byte, a next_hop - outlives the duct that carried it.
+                self.stats["ducted_receptions"] += 1
             self._receive(rx, packet, rssi)
 
-    def _survives_capture(self, tx, rx, rssi, interferers, sensitivity):
+    def _survives_capture(self, tx, rx, rssi, interferers, sensitivity, lift=0.0):
+        # The interferers are on the air at the same instant, so the same duct lifts them too. Leaving
+        # them unlifted would have ducting deliver distant packets into a channel that had gone
+        # magically quiet, which is the opposite of what a duct does to a mesh.
         audible = [
             o
             for o in interferers
-            if o.tx_node != rx and self.rssi[o.tx_node][rx] >= sensitivity - 3
+            if o.tx_node != rx and self.rssi[o.tx_node][rx] + lift >= sensitivity - 3
         ]
         if not audible:
             return True
@@ -3012,8 +3224,11 @@ class Mesh:
         # margin to break that lock; an earlier one keeps it unless something much louder arrives.
         earliest = min(audible, key=lambda o: o.start)
         if earliest.start < tx.start:
-            return rssi >= self.rssi[earliest.tx_node][rx] + CAPTURE_DB
-        return all(rssi >= self.rssi[o.tx_node][rx] + CAPTURE_DB for o in audible)
+            # Both sides carry the same lift, so the margin comparison is unchanged by it.
+            return rssi >= self.rssi[earliest.tx_node][rx] + lift + CAPTURE_DB
+        return all(
+            rssi >= self.rssi[o.tx_node][rx] + lift + CAPTURE_DB for o in audible
+        )
 
     def _deaf(self, node):
         """Is this node inside a loss burst? Redrawn once per burst window, not per packet."""
@@ -4340,11 +4555,21 @@ class Mesh:
             )
         return report
 
+    def _set_airtime_window(self):
+        """How far back an overlap scan has to look: one maximum-length frame at this preset, plus a
+        fifth. Derived rather than constant, because the span across presets is two orders of
+        magnitude - 0.175 s at SHORT_TURBO against 35.7 s at VERY_LONG_SLOW - and one number cannot
+        be both correct at the slow end and cheap at the fast end. A fixed 20 s was neither: it
+        dropped in-flight frames on the slow presets, and on the fast ones it made every delivery
+        scan a hundred times more history than could possibly still be on the air.
+        """
+        self.max_airtime_ms = self.airtime_ms(MAX_PAYLOAD_BYTES) * 1.2
+
     def _prune(self):
         """Keep the transmission list bounded; nothing this old can overlap anything new."""
         if len(self.transmissions) < 4000:
             return
-        cutoff = self.now - MAX_AIRTIME_MS
+        cutoff = self.now - self.max_airtime_ms
         self.transmissions = [t for t in self.transmissions if t.start > cutoff]
 
     def hop_limit_for(self, node):
@@ -4512,6 +4737,7 @@ def build(
     amplify_worst=0.0,
     stretch=1.0,
     noise=None,
+    ducting=None,
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -4595,6 +4821,7 @@ def build(
         siting_gain=[SITINGS[name] for name in sitings],
         amplifier_gain=amplifiers,
         noise=noise,
+        ducting=ducting,
         profile=profile,
     )
     mesh.topology = resolved
