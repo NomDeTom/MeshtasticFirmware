@@ -1759,6 +1759,31 @@ SITING_MIXES = {
     "worst-case": {"pocket": 0.2, "basement": 0.8},
 }
 
+# (transmit dB, receive dB) on top of siting. NOT FROM THE FIRMWARE and not measured - the firmware
+# knows tx_power and nothing about what is bolted to the antenna port. These are the shapes of the
+# amplified modules people actually fit: a PA gives 8 to 15 dB out, and the receive path is at best
+# unchanged and often slightly worse, because the amplifier's insertion loss sits ahead of the LNA
+# and few of these boards switch cleanly.
+#
+# The asymmetry is the whole point. A node heard far further than it hears relays into places whose
+# replies cannot reach it, and its rebroadcast cancels copies queued by nodes that could have taken
+# the packet further. `cancelled_by_weaker_relay` is the counter that shows it.
+AMPLIFIERS = {
+    "none": (0.0, 0.0),
+    "modest": (8.0, 0.0),
+    "high": (15.0, 0.0),
+    # The bad one: a PA with a lossy front end, so it shouts and is slightly deafer than stock.
+    "lossy": (15.0, -3.0),
+}
+
+AMPLIFIER_MIXES = {
+    "none": {"none": 1.0},
+    # A few enthusiasts on an otherwise stock mesh.
+    "sprinkled": {"none": 0.9, "modest": 0.07, "high": 0.03},
+    # The arms race: a third of the mesh amplified once one node starts.
+    "arms-race": {"none": 0.65, "modest": 0.2, "high": 0.1, "lossy": 0.05},
+}
+
 
 def make_config(preset="LONG_FAST", model=5, phy_loss=True):
     from lib.config import Config
@@ -1796,6 +1821,7 @@ class Mesh:
         burst_loss=0.0,
         burst_ms=60000.0,
         siting_gain=None,
+        amplifier_gain=None,
         profile="2.8",
     ):
         self.conf = conf
@@ -1824,9 +1850,18 @@ class Mesh:
         self.burst_ms = burst_ms
         # Per-node gain offset in dB, from build()'s siting mix. Read by _build_links, so it has
         # to arrive with the constructor rather than being set afterwards - links are computed once.
+        # Siting moves both directions together - a basement is a bad place to transmit from and to
+        # receive in. Amplification does not, so it is carried separately.
         self.siting_gain = (
             list(siting_gain) if siting_gain is not None else [0.0] * len(nodes)
         )
+        amp = list(amplifier_gain) if amplifier_gain is not None else None
+        self.tx_gain = [
+            self.siting_gain[i] + (amp[i][0] if amp else 0.0) for i in range(len(nodes))
+        ]
+        self.rx_gain = [
+            self.siting_gain[i] + (amp[i][1] if amp else 0.0) for i in range(len(nodes))
+        ]
         self._deaf_until = [0.0] * len(nodes)
         self._deaf_checked = [0.0] * len(nodes)
         self.now = 0.0
@@ -1946,9 +1981,16 @@ class Mesh:
                 )
                 loss = phy.estimate_path_loss(conf, d, conf.FREQ)
                 base = conf.PTX + 2 * conf.GL - loss
-                # Real links are not reciprocal - antennas, height, local clutter. One draw per
-                # pair, applied with opposite sign, so the asymmetry is a property of the link.
-                siting = self.siting_gain[i] + self.siting_gain[j]
+                # rssi[i][j] is i transmitting and j receiving, so it takes i's transmit gain and
+                # j's receive gain. Those are separate numbers per node, not one siting figure used
+                # both ways: an amplified node can run +8 or +15 dB on transmit while its receive
+                # path is unchanged or worse, because the PA sits after the LNA and a cheap module
+                # often adds insertion loss on the way in. Such a node is heard much further than it
+                # hears - it relays into places whose replies never reach it, and it cancels
+                # rebroadcasts from nodes that could have carried the packet further than it can.
+                #
+                # The per-pair Gaussian skew is kept on top, for the asymmetry that is a property of
+                # the link rather than of either radio.
                 skew = (
                     self.rng.gauss(
                         conf.MODEL_ASYMMETRIC_LINKS_MEAN,
@@ -1957,13 +1999,77 @@ class Mesh:
                     if conf.MODEL_ASYMMETRIC_LINKS
                     else 0.0
                 )
-                self.rssi[i][j] = base + siting + skew
-                self.rssi[j][i] = base + siting - skew
+                self.rssi[i][j] = base + self.tx_gain[i] + self.rx_gain[j] + skew
+                self.rssi[j][i] = base + self.tx_gain[j] + self.rx_gain[i] - skew
 
         for i in range(n):
             for j in range(n):
                 if i != j and self.rssi[i][j] >= sensitivity:
                     self.neighbours[i].append(j)
+
+    def link_quality(self, length=60):
+        """Every directed link graded by how much margin it has, and how many are one-way.
+
+        Graded on margin over sensitivity rather than on delivery probability, because in this model
+        those are nearly the same question. A link becomes a neighbour the moment its RSSI clears
+        sensitivity, and the vendored PER curve puts success at 96% exactly there - so every link the
+        mesh will use is already reliable, and everything genuinely marginal sits below the threshold
+        and is not a link at all.
+
+        SIMPLIFICATION, and a real one: this transport has no marginal link. A pair either carries
+        ~96%+ of what it is offered or does not exist. Real meshes are full of links that work a
+        third of the time, and nothing here reproduces one. What margin does show is which links are
+        close enough to the cliff that a few dB of fading, a wet tree or a body in the way would
+        remove them, which is the nearest available proxy.
+
+        `near_miss` counts the other side of the cliff: pairs within 6 dB below sensitivity, which a
+        real radio would sometimes hear and this one never does.
+        """
+        conf = self.conf
+        sensitivity = conf.current_preset["sensitivity"]
+        bands = {"comfortable": 0, "adequate": 0, "fragile": 0}
+        per_node_fragile = [0] * len(self.nodes)
+        one_way = 0
+        near_miss = 0
+        for i in range(len(self.nodes)):
+            for j in range(len(self.nodes)):
+                if i == j:
+                    continue
+                margin = self.rssi[i][j] - sensitivity
+                if margin < 0:
+                    if margin >= -6.0:
+                        near_miss += 1
+                    continue
+                if margin >= 10.0:
+                    bands["comfortable"] += 1
+                elif margin >= 5.0:
+                    bands["adequate"] += 1
+                else:
+                    bands["fragile"] += 1
+                    per_node_fragile[i] += 1
+                if self.rssi[j][i] < sensitivity:
+                    one_way += 1
+        total = max(1, sum(bands.values()))
+        return {
+            "directed_links": sum(bands.values()),
+            "comfortable": bands["comfortable"],
+            "adequate": bands["adequate"],
+            # Under 5 dB of margin: a little fading and the link is gone.
+            "fragile": bands["fragile"],
+            "fragile_share": round(bands["fragile"] / total, 4),
+            # Heard one way only. Zero unless transmit and receive gain differ, so this is the
+            # amplifier signature: a node relaying into places whose replies cannot reach it.
+            "one_way_links": one_way,
+            "one_way_share": round(one_way / total, 4),
+            # Within 6 dB below sensitivity: a link a real radio would sometimes make and this one
+            # never does. The size of what the sensitivity cliff is hiding.
+            "near_miss": near_miss,
+            "nodes_mostly_fragile": sum(
+                1
+                for i, n in enumerate(per_node_fragile)
+                if self.neighbours[i] and n >= 0.5 * len(self.neighbours[i])
+            ),
+        }
 
     def link_stats(self):
         degrees = [len(v) for v in self.neighbours]
@@ -3950,6 +4056,18 @@ def assign_sitings(node_count, siting_mix, rng):
     return rng.choices(names, weights=[weights[n] for n in names], k=node_count)
 
 
+def assign_amplifiers(node_count, amplifier_mix, rng):
+    """Draw an amplifier for every node from a named mix, or name one for the whole mesh."""
+    if amplifier_mix in AMPLIFIERS:
+        return [AMPLIFIERS[amplifier_mix]] * node_count
+    if amplifier_mix not in AMPLIFIER_MIXES:
+        raise ValueError(f"unknown amplifier mix {amplifier_mix!r}")
+    weights = AMPLIFIER_MIXES[amplifier_mix]
+    names = sorted(weights)
+    drawn = rng.choices(names, weights=[weights[n] for n in names], k=node_count)
+    return [AMPLIFIERS[n] for n in drawn]
+
+
 def build(
     conf,
     node_count,
@@ -3978,6 +4096,8 @@ def build(
     platform_mix="uniform",
     siting_mix="uniform",
     role_placement="degree",
+    amplifier_mix="none",
+    amplify_worst=0.0,
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -3995,6 +4115,7 @@ def build(
     # Where each node physically is, as a gain offset on every link it takes part in. Drawn before
     # positions for the same reason boards are: a roof or a basement is a property of the node.
     sitings = assign_sitings(node_count, siting_mix, rng)
+    amplifiers = assign_amplifiers(node_count, amplifier_mix, rng)
     # Firmware version per node, drawn at random rather than by degree: whether an owner has updated
     # is unrelated to how well sited the node is, and assuming otherwise would decide the result.
     default_profile = profile if isinstance(profile, Profile) else Profile(profile)
@@ -4057,6 +4178,7 @@ def build(
         burst_loss=burst_loss,
         burst_ms=burst_ms,
         siting_gain=[SITINGS[name] for name in sitings],
+        amplifier_gain=amplifiers,
         profile=profile,
     )
     mesh.topology = resolved
@@ -4088,6 +4210,18 @@ def build(
     # control - the router is the node in the basement with three neighbours, which is what actually
     # happens when someone flashes ROUTER onto the node they already own. `random` separates the
     # role's own effect from the siting that usually comes with it.
+    if amplify_worst > 0:
+        # The pathology in the field: the node nobody can hear gets an amplifier bolted on, which
+        # fixes its outbound reach and nothing else. It is now heard by everyone and still hears
+        # almost nobody - so it relays into a mesh it cannot receive replies from, and its
+        # rebroadcasts cancel copies queued by nodes that could have carried them further. Fitted
+        # after the links exist, because "hears worst" is a property of the mesh, not the node.
+        worst = sorted(range(node_count), key=lambda i: len(mesh.neighbours[i]))
+        for i in worst[: int(round(node_count * amplify_worst))]:
+            mesh.tx_gain[i] += AMPLIFIERS["high"][0]
+            mesh.rx_gain[i] += AMPLIFIERS["high"][1]
+        mesh._build_links()
+
     by_degree = sorted(range(node_count), key=lambda i: -len(mesh.neighbours[i]))
     if role_placement == "inverse":
         by_degree = list(reversed(by_degree))
