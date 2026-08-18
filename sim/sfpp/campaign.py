@@ -344,7 +344,7 @@ class Campaign:
         self.opts = opts
         self.seed = seed
         self.rng = random.Random(seed)
-        self.conf = M.make_config(preset=opts.preset, phy_loss=not opts.no_phy_loss)
+        self.conf = M.make_config(preset=opts.preset, phy_loss=not opts.no_phy_loss, tx_power=getattr(opts, 'tx_power', None))
         # 150 nodes in the same 8 x 8 km as 60 is two and a half times the density, so a size sweep
         # that holds area fixed measures density and calls it size. Scaling the side by sqrt(n/60)
         # keeps nodes per square kilometre constant and lets the two be separated.
@@ -2349,6 +2349,14 @@ def build_parser():
         type=int,
         default=5,
         help="the largest separation admin sessions are attempted at",
+    )
+    ap.add_argument(
+        "--tx-power",
+        type=float,
+        default=None,
+        help="transmit power in dBm, overriding the region's limit. The limit is a ceiling an "
+        "operator may use, not one they must; turning it down with the geometry unchanged asks what "
+        "a polite mesh costs",
     )
     ap.add_argument("--position-throttle", type=int, default=1)
     ap.add_argument("--telemetry-throttle", type=int, default=1)

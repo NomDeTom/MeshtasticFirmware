@@ -1786,13 +1786,51 @@ AMPLIFIER_MIXES = {
 }
 
 
-def make_config(preset="LONG_FAST", model=5, phy_loss=True):
+# Presets that no release has, for asking what a different point on the SF/bandwidth curve would
+# buy. NOT UPSTREAM and not in any firmware build - the vendored MODEM_PRESETS table is the shipped
+# set, and these are added on top of it here so the vendored tree stays a clean copy.
+#
+# Sensitivity is EXTRAPOLATED, not calculated: the vendored figures come from an external
+# calculator, and across the 500 kHz rows they fall about 2.5 dB per spreading factor (SF7 -118.5 to
+# SF11 -128.5). These continue that slope one step past each end. Treat them as indicative of the
+# direction, not as a link budget.
+#
+# SF5 and SF6 also need an SX126x or SX128x - an SX127x cannot do them at all - so EXTRA_SHORT_TURBO
+# is not a setting every board could take even if the firmware offered it.
+EXTRA_PRESETS = {
+    # SF12 at 500 kHz: the slowest spreading on the widest channel. Reach of a long preset with the
+    # airtime penalty spread over four times the bandwidth.
+    "EXTRA_LONG_TURBO": {
+        "bw": 500e3,
+        "cr": 8,
+        "sf": 12,
+        "sensitivity": -131.0,
+        "cad_threshold": -134.0,
+    },
+    # SF5 at 500 kHz: the fastest thing the silicon will do, and the shortest range.
+    "EXTRA_SHORT_TURBO": {
+        "bw": 500e3,
+        "cr": 5,
+        "sf": 5,
+        "sensitivity": -113.5,
+        "cad_threshold": -116.5,
+    },
+}
+
+
+def make_config(preset="LONG_FAST", model=5, phy_loss=True, tx_power=None):
     from lib.config import Config
 
     conf = Config()
+    conf.MODEM_PRESETS = dict(conf.MODEM_PRESETS)
+    conf.MODEM_PRESETS.update(EXTRA_PRESETS)
     conf.MODEM_PRESET = preset
     conf.MODEL = model
     conf.PHY_LOSS_MODEL_ENABLED = phy_loss
+    if tx_power is not None:
+        # The region's power limit is the ceiling an operator may use, not one they must. Turning it
+        # down while leaving the geometry alone asks what the mesh costs when everyone is polite.
+        conf.PTX = tx_power
     # FREQ is derived from the preset's bandwidth at construction, so changing the preset afterwards
     # leaves it stale. phy.py binds a module-level config at import, which must be this same object.
     conf.FREQ = conf.REGION["freq_start"] + conf.current_preset["bw"] * conf.CHANNEL_NUM
