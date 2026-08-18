@@ -31,6 +31,7 @@ from . import autochart as AC
 from . import report as R
 from . import chain as CH
 from . import mesh as M
+from . import terrain as TR
 from . import traffic as T
 from .sketchindex import BUCKET_OBJECTS, bucket_of, checksum_contribution, short_id
 from .store import SfppStore
@@ -393,6 +394,33 @@ class Campaign:
         self.area = (
             opts.area * math.sqrt(opts.nodes / 60.0) if opts.scale_area else opts.area
         )
+        # The ground, resolved before the mesh is built because it decides the conf the link budget
+        # is computed against - and, for a real snapshot, the geometry and the node count too. It is
+        # applied here rather than inside build() so an explicit --noise-model still wins over the
+        # floor a calibrated scenario carries; see terrain.apply().
+        self.scenario = TR.load(
+            getattr(opts, "scenario", None),
+            area=self.area,
+            seed=seed,
+            bbox=getattr(opts, "bbox", None),
+            limit=getattr(opts, "scenario_limit", None),
+            offline=getattr(opts, "offline", False),
+        )
+        self.terrain = TR.apply(
+            self.conf,
+            self.scenario,
+            terrain=not getattr(opts, "no_terrain", False),
+            clutter=not getattr(opts, "no_clutter", False),
+            link_calibration=not getattr(opts, "no_link_calibration", False),
+        )
+        if self.scenario is not None and self.scenario.fixed_geometry:
+            # The place decides the count and the extent; a --nodes that disagrees is a mistake, not
+            # a preference. `opts.nodes` is overwritten rather than merely ignored because every
+            # per-node structure below is sized from it, and because the report records opts as the
+            # description of the run - leaving 60 there while 92 nodes transmit would be a lie in
+            # the one place a reader checks.
+            opts.nodes = self.scenario.node_count
+            self.area = max(self.area, 2.0 * self.scenario.extent())
         self.mesh = M.build(
             self.conf,
             opts.nodes,
@@ -427,6 +455,8 @@ class Campaign:
             stretch=getattr(opts, "stretch", 1.0),
             noise=_noise_field(opts, seed, self.area),
             ducting=_ducting(opts, seed, self.area),
+            scenario=self.scenario,
+            terrain=self.terrain,
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(
@@ -2437,6 +2467,47 @@ def build_parser():
         type=float,
         default=200.0,
         help="how long the periodic emitter holds the channel each time it fires",
+    )
+    ap.add_argument(
+        "--scenario",
+        default=None,
+        help="ground under the mesh, and for a real snapshot its geometry too. A landform "
+        "(flat, rolling, ridge, valleys, coastal, alpine) puts terrain under a generated mesh; "
+        "a preset name (batumi) is a real mesh over real ground and decides its own node count; "
+        "`map` cuts --bbox out of the public map. Omit for the flat world",
+    )
+    ap.add_argument(
+        "--bbox",
+        default=None,
+        help="min_lat,min_lon,max_lat,max_lon, required by --scenario map",
+    )
+    ap.add_argument(
+        "--scenario-limit",
+        type=int,
+        default=None,
+        help="keep at most this many nodes from a --scenario map fetch",
+    )
+    ap.add_argument(
+        "--no-terrain",
+        action="store_true",
+        help="keep a scenario's geometry but flatten its ground - the paired run that prices "
+        "terrain on its own",
+    )
+    ap.add_argument(
+        "--no-clutter",
+        action="store_true",
+        help="ignore the scenario's land-cover raster, keeping terrain",
+    )
+    ap.add_argument(
+        "--no-link-calibration",
+        action="store_true",
+        help="drop the fitted RSSI correction. It is a ridge fit over one city's observed links, "
+        "so a run asking what the ground alone does should say so",
+    )
+    ap.add_argument(
+        "--offline",
+        action="store_true",
+        help="refuse network fetches for SRTM tiles and OSM land cover; use only what is cached",
     )
     ap.add_argument(
         "--duct-per-hour",

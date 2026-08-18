@@ -4856,6 +4856,8 @@ def build(
     stretch=1.0,
     noise=None,
     ducting=None,
+    scenario=None,
+    terrain=None,
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -4863,8 +4865,21 @@ def build(
     and choosing them randomly would understate how much a flood depends on a few well-sited nodes.
     ROUTER_LATE and CLIENT_BASE are drawn from the same ranking, below the plain routers.
     """
-    points, resolved = place(topology, node_count, area, rng, min_dist)
-    points = stretch_points(points, stretch)
+    # A scenario carrying real geometry decides where the nodes are, and therefore how many there
+    # are: the place is the input, not a shape to fit a requested count into. Stretching it is
+    # refused rather than silently ignored - moving Batumi's nodes apart makes it somewhere else,
+    # and a result labelled `batumi` would no longer be about Batumi.
+    if scenario is not None and scenario.fixed_geometry:
+        if stretch != 1.0:
+            raise ValueError(
+                f"--stretch {stretch} cannot apply to `{scenario.name}`: it is real geometry"
+            )
+        points = list(scenario.points)
+        node_count = len(points)
+        resolved = f"scenario:{scenario.name}"
+    else:
+        points, resolved = place(topology, node_count, area, rng, min_dist)
+        points = stretch_points(points, stretch)
     # Real node numbers, so two nodes can share a last byte as they do on a real mesh; sequential
     # ids would hide the ambiguity path entirely.
     node_nums = [rng.randrange(1, 1 << 32) for _ in range(node_count)]
@@ -4941,7 +4956,18 @@ def build(
         noise=noise,
         ducting=ducting,
         profile=profile,
+        terrain=terrain,
     )
+    # Antenna heights the scenario measured, before the mesh is lifted onto the ground: a real
+    # snapshot knows which nodes are on a mast and which are on a windowsill, and that difference
+    # decides more links than any of the generated mixes do.
+    if scenario is not None and scenario.antenna_height:
+        for node, height in zip(mesh.nodes, scenario.antenna_height):
+            if height is not None:
+                node.antenna_height_m = float(height)
+        mesh._lift_to_terrain()
+        mesh._build_links()
+    mesh.scenario = scenario
     mesh.topology = resolved
     mesh.stretch = stretch
     mesh.sitings = sitings
