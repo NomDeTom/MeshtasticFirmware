@@ -21,7 +21,7 @@ if [ "$OUT_ROOT" = "--status" ]; then
 	echo "== $DIR =="
 	if [ -f "$DIR/.manifest" ]; then
 		while read -r blk; do
-			if ls "$DIR/$blk"*.json >/dev/null 2>&1; then
+			if [ -f "$DIR/$blk.json" ]; then
 				echo "  done      $blk"
 			else echo "  PENDING   $blk"; fi
 		done <"$DIR/.manifest"
@@ -125,7 +125,10 @@ runner() {
 		echo "started $(date -Is) · transport $PIN · seed base $SEED_BASE"
 		echo "blocks: $*"
 		for blk in "$@"; do
-			if ls "$OUT_ROOT/$blk"*.json >/dev/null 2>&1; then
+			# Exact name, not a prefix glob: R-signing*.json also matches R-signing-cost.json,
+			# which silently skipped R-signing entirely. This runner never passes --grid, so the
+			# block always writes exactly $blk.json and there is no suffix to glob for.
+			if [ -f "$OUT_ROOT/$blk.json" ]; then
 				echo "skip $blk (already present)"
 				continue
 			fi
