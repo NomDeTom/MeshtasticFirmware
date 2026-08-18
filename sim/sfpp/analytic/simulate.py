@@ -540,6 +540,8 @@ def main():
     ap.add_argument("--outdir", default=os.path.dirname(os.path.abspath(__file__)))
     ap.add_argument("--json-out")
     args = ap.parse_args()
+    # Charts are written straight into it, so a directory that is only named must be made.
+    os.makedirs(args.outdir, exist_ok=True)
 
     rng = random.Random(20260816)
     size_pool = text_sizes_from(args.packetlog)

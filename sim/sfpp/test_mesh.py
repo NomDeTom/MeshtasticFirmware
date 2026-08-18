@@ -7,7 +7,9 @@ the firmware was read correctly, and so would pin nothing.
 Run from `sim/`:  python3 -m unittest sfpp.test_mesh -v
 """
 
+import os
 import pathlib
+import sys
 import random
 import unittest
 
@@ -1958,6 +1960,43 @@ class ToolingContract(unittest.TestCase):
             if line.startswith("import matplotlib") or line.startswith("from matplotlib")
         ]
         self.assertEqual(top_level, [], "matplotlib must be imported inside a function")
+
+    def test_no_module_fails_to_import_without_matplotlib(self):
+        """A missing chart library must not stop a module loading, whatever the module is for.
+
+        The drawing tools cannot do their job without it, but they say so and return non-zero
+        rather than raising an import traceback at whoever ran them. Run in a subprocess: blocking
+        an import in this one would leave sys.modules in a state the other tests read.
+        """
+        import subprocess
+
+        probe = """
+import importlib, pkgutil, sys
+class Blocked:
+    def find_module(self, name, path=None):
+        if name == "matplotlib" or name.startswith("matplotlib."):
+            return self
+    def load_module(self, name):
+        raise ImportError("matplotlib blocked")
+sys.meta_path.insert(0, Blocked())
+import sfpp
+failed = []
+for m in sorted(x.name for x in pkgutil.iter_modules(sfpp.__path__)):
+    try:
+        importlib.import_module("sfpp." + m)
+    except ImportError as exc:
+        failed.append(m)
+print(",".join(failed))
+"""
+        sim = pathlib.Path(__file__).resolve().parents[1]
+        env = dict(os.environ, PYTHONPATH=f"{sim}:{sim / 'meshtasticator'}")
+        out = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, env=env, cwd=sim
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(
+            out.stdout.strip(), "", "modules that need matplotlib to load at all"
+        )
 
     def test_every_sweep_block_name_is_unique(self):
         """A dict literal silently keeps the last of a duplicated key, so the first block vanishes."""

@@ -7,11 +7,16 @@ import os
 import random
 import statistics
 
-import matplotlib
+# This module exists only to draw, so it cannot degrade the way a run does - but it can say why it
+# will not work instead of raising an import traceback at somebody.
+try:
+    import matplotlib
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.lines import Line2D  # noqa: E402
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+except ImportError:  # pragma: no cover - exercised by running without matplotlib
+    plt = Line2D = None
 
 from . import mesh as M  # noqa: E402
 from .campaign import Placement  # noqa: E402
@@ -248,6 +253,9 @@ def main(argv=None):
     ap.add_argument("--runs", default=RUNS, help="directory holding the sweep JSON")
     ap.add_argument("--out", default=OUT, help="directory to write the figures into")
     opts = ap.parse_args(argv)
+    if plt is None:
+        print("matplotlib is not installed - see requirements.txt; drawing nothing")
+        return 1
     RUNS, OUT = opts.runs, opts.out
     os.makedirs(OUT, exist_ok=True)
     draw_mesh_shapes()

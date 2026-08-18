@@ -8,14 +8,19 @@ Usage, from sim/:
 """
 
 import argparse
+import glob
 import json
 import os
 import statistics
 
-import matplotlib
+# Drawing is all this module does, so it reports the missing library rather than raising at import.
+try:
+    import matplotlib
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except ImportError:  # pragma: no cover - exercised by running without matplotlib
+    plt = None
 
 INK = "#1b1b1b"
 MUTED = "#8a8a8a"
@@ -39,8 +44,20 @@ def style(ax, title, xlabel, ylabel):
 
 
 def load(runs_dir, block):
+    """One block's saved cells, or None with a line saying which file was wanted.
+
+    A block run under --grid is written with the grid in its name, so a run directory can hold
+    `D-cadence-hours-24.json` and not `D-cadence.json`. Silently drawing nothing in that case was
+    indistinguishable from having no data at all.
+    """
     path = os.path.join(runs_dir, f"{block}.json")
     if not os.path.exists(path):
+        near = sorted(
+            os.path.basename(p)
+            for p in glob.glob(os.path.join(runs_dir, f"{block}-*.json"))
+        )
+        hint = f" (found {', '.join(near)} - rename or re-run without --grid)" if near else ""
+        print(f"skipped: no {block}.json in {runs_dir}{hint}")
         return None
     with open(path) as f:
         return json.load(f)
@@ -278,12 +295,15 @@ def fig_topology(runs_dir, out_dir):
     save(fig, out_dir, "topology")
 
 
-def fig_baseline(runs_dir, out_dir):
-    path = os.path.join(runs_dir, "C-baseline.json")
-    if not os.path.exists(path):
+def fig_baseline(runs_dir, out_dir, block="Q-control"):
+    """Reach against the routing ceiling, per seed.
+
+    Reads only the `baseline` section, which every report carries, so any block will do. It was
+    pinned to `C-baseline`, a block that no longer exists, and so had stopped drawing entirely.
+    """
+    reports = load(runs_dir, block)
+    if reports is None:
         return
-    with open(path) as f:
-        reports = json.load(f)
     if isinstance(reports, dict):
         reports = [reports]
 
@@ -410,11 +430,19 @@ def main(argv=None):
     ap.add_argument(
         "--placements", action="store_true", help="draw the placement strategies"
     )
+    ap.add_argument(
+        "--baseline-block",
+        default="Q-control",
+        help="which block's `baseline` section the reach figure is drawn from; any block will do",
+    )
     opts = ap.parse_args(argv)
+    if plt is None:
+        print("matplotlib is not installed - see requirements.txt; drawing nothing")
+        return 1
     if opts.placements:
         fig_placements(opts.out)
+    fig_baseline(opts.runs, opts.out, opts.baseline_block)
     for fn in (
-        fig_baseline,
         fig_cadence,
         fig_resolve,
         fig_capacity,

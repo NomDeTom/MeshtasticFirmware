@@ -433,6 +433,8 @@ def main():
     ap.add_argument("--nodes", type=int, default=20)
     ap.add_argument("--outdir", default=os.path.dirname(os.path.abspath(__file__)))
     args = ap.parse_args()
+    # Charts are written straight into it, so a directory that is only named must be made.
+    os.makedirs(args.outdir, exist_ok=True)
 
     charts = [
         chart_push_vs_pull(args.outdir),
