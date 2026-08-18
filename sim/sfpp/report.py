@@ -68,8 +68,17 @@ def report_one(r, indent=""):
     a(f"{indent}{scenario_line(r)}")
     t = r["traffic"]
     a(
-        f"{indent}  channel utilisation {t['channel_utilisation']:.0%} · "
+        f"{indent}  aggregate demand {t['channel_utilisation']:.2f}x"
+        + (
+            f" · node channel util median {t['node_channel_util_percent']['median']:.0f}%"
+            f" p90 {t['node_channel_util_percent']['p90']:.0f}%"
+            if t.get("node_channel_util_percent")
+            else ""
+        )
+        + " · "
+        + (
         f"{t['transmissions']} transmissions · {t['queue_drops']} queue drops"
+        )
         + (
             "  ← CHECK: drops are a large share of transmissions"
             if t["queue_drops"] > 0.2 * max(1, t["transmissions"])
