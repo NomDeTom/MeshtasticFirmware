@@ -54,7 +54,7 @@ PIN=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # The gate: a transport that fails its own tests does not get to produce results.
 #
 # Both test modules, and pytest only when it is installed. The tests are unittest.TestCase either
-# way, so unittest runs the same 239; pytest is preferred when present only because its output is
+# way, so unittest runs the same suite; pytest is preferred when present only because its output is
 # shorter. A checkout without pytest must still be able to launch a block.
 if python3 -c "import pytest" >/dev/null 2>&1; then
 	GATE=(python3 -m pytest sfpp/test_mesh.py sfpp/test_knowledge.py -q)
