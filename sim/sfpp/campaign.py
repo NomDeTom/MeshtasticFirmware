@@ -1253,9 +1253,38 @@ class Campaign:
 
     # ---- run --------------------------------------------------------------------------
 
+    def _schedule_traceroutes(self):
+        """Route discovery on a Poisson timer per node, to whoever it has heard of.
+
+        A traceroute is what seeds next-hop routing on a mesh that has not been talking: its reply
+        teaches a route for every node beyond the learner, where an ACK teaches one hop. It is not
+        free - the request grows five bytes per hop it records - so the rate is a swept parameter.
+        """
+        rate = getattr(self.opts, "traceroute_per_hour", 0.0)
+        if rate <= 0:
+            return
+        count = self.opts.nodes
+        mean_gap_ms = 3600_000.0 / rate
+        for node in range(count):
+            when = self.rng.expovariate(1.0 / mean_gap_ms)
+            while when < self.duration_ms:
+
+                def probe(src=node, at=when):
+                    known = [
+                        peer
+                        for peer in self.mesh.nodes[src].nodedb
+                        if peer != src and self.mesh.nodes[peer].online
+                    ]
+                    if known:
+                        self.mesh.send_traceroute(src, self.rng.choice(known))
+
+                self.mesh.at(when, probe)
+                when += self.rng.expovariate(1.0 / mean_gap_ms)
+
     def run(self):
         started = time.time()
         self.generator.schedule(self.duration_ms)
+        self._schedule_traceroutes()
         if self.chain is not None:
             for server in self.servers.values():
                 start = self.rng.uniform(0, server.interval_ms)
@@ -1588,6 +1617,13 @@ def build_parser():
         default="legacy",
         choices=M.VERSIONS + ("legacy",),
         help="the rules the --legacy-fraction share of nodes runs instead of --profile",
+    )
+    ap.add_argument(
+        "--traceroute-per-hour",
+        type=float,
+        default=0.0,
+        help="route discoveries per node per hour. A reply teaches a next hop for every node "
+        "beyond the learner in the route, so this is what next-hop routing costs to seed",
     )
     ap.add_argument(
         "--dm-transport",

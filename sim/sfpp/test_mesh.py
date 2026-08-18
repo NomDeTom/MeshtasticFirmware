@@ -1108,6 +1108,176 @@ class WarmTier(unittest.TestCase):
         self.assertFalse(M.Profile("2.7").warm_store)
 
 
+class Traceroute(unittest.TestCase):
+    """TraceRouteModule: a reply teaches a route, and this tree refuses to be told a lie."""
+
+    def request(self, mesh, src=0, dst=5, route=None, request_id=0, relay=None):
+        packet = M.Packet(
+            11, src, M.TRACEROUTE_PORTNUM, 12, hop_limit=4, destination=dst,
+            request_id=request_id,
+        )
+        packet.hop_start = 4
+        packet.route = [] if route is None else list(route)
+        if relay is not None:
+            packet.relay_node = mesh.nodes[relay].relay_byte
+        return packet
+
+    def test_a_relay_writes_itself_into_the_route(self):
+        mesh = small_mesh(nodes=8)
+        relay = self.request(mesh)
+        mesh._record_traceroute_hop(3, relay)
+        self.assertEqual(relay.route, [3])
+        mesh._record_traceroute_hop(4, relay)
+        self.assertEqual(relay.route, [3, 4])
+        self.assertEqual(
+            relay.length,
+            M.TRACEROUTE_BASE_BYTES + 2 * M.TRACEROUTE_BYTES_PER_HOP,
+            "a traceroute grows with every hop it records",
+        )
+
+    def test_the_route_array_is_bounded(self):
+        mesh = small_mesh(nodes=12)
+        relay = self.request(mesh)
+        for hop in range(M.TRACEROUTE_MAX_HOPS + 3):
+            mesh._record_traceroute_hop(hop % 12, relay)
+        self.assertEqual(len(relay.route), M.TRACEROUTE_MAX_HOPS)
+
+    def test_the_destination_replies_with_the_accumulated_route(self):
+        mesh = small_mesh(nodes=8)
+        request = self.request(mesh, src=0, dst=5, route=[3, 4])
+        reply = mesh._perhaps_traceroute_reply(5, request)
+        self.assertIsNotNone(reply)
+        self.assertEqual(reply.route, [3, 4])
+        self.assertEqual(reply.destination, 0)
+        self.assertEqual(reply.request_id, request.id)
+
+    def test_nobody_else_replies(self):
+        mesh = small_mesh(nodes=8)
+        request = self.request(mesh, src=0, dst=5, route=[3])
+        self.assertIsNone(mesh._perhaps_traceroute_reply(3, request), "a relay is not the addressee")
+        already = self.request(mesh, src=0, dst=5, route=[3], request_id=99)
+        self.assertIsNone(mesh._perhaps_traceroute_reply(5, already), "a reply is not re-answered")
+
+    def test_a_node_in_the_route_learns_everything_beyond_it(self):
+        """A->B->C->D: B learns C as the next hop for C and for D."""
+        mesh = small_mesh(nodes=8)
+        a, b, c, d = 0, 3, 4, 5
+        for peer in (b, c, d):
+            heard(mesh, b, peer)
+        reply = self.request(mesh, src=d, dst=a, route=[b, c], request_id=11, relay=c)
+        mesh._traceroute_learn(b, reply)
+        self.assertEqual(mesh.nodes[b].nodedb[c].next_hop, mesh.nodes[c].relay_byte)
+        self.assertEqual(mesh.nodes[b].nodedb[d].next_hop, mesh.nodes[c].relay_byte)
+
+    def test_the_sender_learns_from_the_first_hop(self):
+        mesh = small_mesh(nodes=8)
+        a, b, c, d = 0, 3, 4, 5
+        for peer in (b, c, d):
+            heard(mesh, a, peer)
+        reply = self.request(mesh, src=d, dst=a, route=[b, c], request_id=11, relay=b)
+        mesh._traceroute_learn(a, reply)
+        self.assertEqual(mesh.nodes[a].nodedb[b].next_hop, mesh.nodes[b].relay_byte)
+        self.assertEqual(mesh.nodes[a].nodedb[d].next_hop, mesh.nodes[b].relay_byte)
+
+    def test_the_corroboration_guard_refuses_an_uncorroborated_route(self):
+        """The route array is unauthenticated payload; only an RF relay byte corroborates it."""
+        mesh = small_mesh(nodes=8)
+        a, b, c, d = 0, 3, 4, 5
+        for peer in (b, c, d):
+            heard(mesh, b, peer)
+        # The route claims C is our next hop, but the reply was relayed by D.
+        reply = self.request(mesh, src=d, dst=a, route=[b, c], request_id=11, relay=d)
+        mesh._traceroute_learn(b, reply)
+        self.assertEqual(mesh.nodes[b].nodedb[c].next_hop, M.NO_NEXT_HOP_PREFERENCE)
+        self.assertEqual(mesh.stats["traceroute_uncorroborated"], 1)
+
+    def test_a_packet_with_no_relay_byte_is_unlearnable(self):
+        """NO_RELAY_NODE means MQTT-sourced: no RF hop corroborates anything it claims."""
+        mesh = small_mesh(nodes=8)
+        a, b, c, d = 0, 3, 4, 5
+        for peer in (b, c, d):
+            heard(mesh, b, peer)
+        reply = self.request(mesh, src=d, dst=a, route=[b, c], request_id=11)
+        reply.relay_node = M.NO_NEXT_HOP_PREFERENCE
+        mesh._traceroute_learn(b, reply)
+        self.assertEqual(mesh.nodes[b].nodedb[c].next_hop, M.NO_NEXT_HOP_PREFERENCE)
+        self.assertEqual(mesh.stats["traceroute_uncorroborated"], 1)
+
+    def test_2_7_learns_the_same_route_without_checking(self):
+        """v2.7.13 has the learning and not the guard, so it learns more, and some of it is wrong."""
+        mesh = small_mesh(nodes=8, profile="2.7")
+        a, b, c, d = 0, 3, 4, 5
+        for peer in (b, c, d):
+            heard(mesh, b, peer)
+        reply = self.request(mesh, src=d, dst=a, route=[b, c], request_id=11, relay=d)
+        mesh._traceroute_learn(b, reply)
+        self.assertEqual(
+            mesh.nodes[b].nodedb[c].next_hop,
+            mesh.nodes[c].relay_byte,
+            "2.7 takes the payload's word for it",
+        )
+        self.assertEqual(mesh.stats["traceroute_uncorroborated"], 0)
+
+    def test_no_series_before_2_7_learns_from_a_traceroute(self):
+        for version, learns in (("2.5", False), ("2.6", False), ("2.7", True), ("2.8", True)):
+            self.assertEqual(M.Profile(version).traceroute_learning, learns, version)
+            self.assertEqual(
+                M.Profile(version).traceroute_corroboration, version == "2.8", version
+            )
+
+    def test_a_request_on_its_way_out_teaches_nobody(self):
+        mesh = small_mesh(nodes=8)
+        heard(mesh, 3, 4)
+        request = self.request(mesh, src=0, dst=5, route=[3], relay=0)
+        mesh._traceroute_learn(3, request)
+        self.assertEqual(mesh.stats["traceroute_routes_learned"], 0)
+
+
+class OverflowRouteCache(unittest.TestCase):
+    """The TrafficManagement cache: a route for a node the hot store cannot hold."""
+
+    def test_a_route_is_held_for_a_node_the_hot_store_never_admitted(self):
+        mesh = small_mesh(nodes=8)
+        node = mesh.nodes[0]
+        node.cold_cache_size = 32
+        neighbour = next(iter(mesh.neighbours[0]))
+        heard(mesh, 0, neighbour, hops_away=0)
+        far = next(i for i in range(1, 8) if i != neighbour)
+        mesh._maybe_set_next_hop(0, far, mesh.nodes[neighbour].relay_byte)
+        self.assertNotIn(far, node.nodedb, "not in the hot store at all")
+        self.assertEqual(node.route_cache[far], mesh.nodes[neighbour].relay_byte)
+        self.assertEqual(
+            mesh.get_next_hop(0, far, M.NO_NEXT_HOP_PREFERENCE),
+            mesh.nodes[neighbour].relay_byte,
+        )
+        self.assertEqual(mesh.stats["route_cache_hits"], 1)
+
+    def test_a_cached_hint_still_has_to_resolve_to_a_reachable_neighbour(self):
+        mesh = small_mesh(nodes=8)
+        node = mesh.nodes[0]
+        node.cold_cache_size = 32
+        node.route_cache[5] = 0x77  # a byte nobody in our store answers to
+        self.assertIsNone(mesh.get_next_hop(0, 5, M.NO_NEXT_HOP_PREFERENCE))
+
+    def test_a_stale_cached_hint_is_cleared_rather_than_tried(self):
+        mesh = small_mesh(nodes=8)
+        node = mesh.nodes[0]
+        node.cold_cache_size = 32
+        neighbour = next(iter(mesh.neighbours[0]))
+        heard(mesh, 0, neighbour, hops_away=0)
+        far = next(i for i in range(1, 8) if i != neighbour)
+        mesh._maybe_set_next_hop(0, far, mesh.nodes[neighbour].relay_byte)
+        mesh.note_route_learned(0, far, mesh.nodes[neighbour].relay_byte)
+        mesh.now += M.ROUTE_TTL_MSEC
+        self.assertIsNone(mesh.get_next_hop(0, far, M.NO_NEXT_HOP_PREFERENCE))
+        self.assertNotIn(far, node.route_cache)
+
+    def test_no_series_before_this_tree_has_the_cache(self):
+        for version in ("2.5", "2.6", "2.7"):
+            self.assertFalse(M.Profile(version).route_cache, version)
+        self.assertTrue(M.Profile("2.8").route_cache)
+
+
 class Acknowledgements(unittest.TestCase):
     """ReliableRouter: the destination answers, which is what makes a route learnable."""
 
