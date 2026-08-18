@@ -1,8 +1,8 @@
 """Pins the transport's MAC and routing to what the firmware in this tree actually does.
 
-Every expected value here was computed by hand from the C++ named in the test, not from a previous
-run of this simulator. That is the only way a test like this is worth anything: a regression test
-against my own output would pass just as happily if I had read RadioInterface wrong.
+Every expected value here is computed by hand from the C++ named in the test, never from a previous
+run of this simulator. A test written against the simulator's own output would pass whether or not
+the firmware was read correctly, and so would pin nothing.
 
 Run from `sim/`:  python3 -m unittest sfpp.test_mesh -v
 """
@@ -257,11 +257,11 @@ class QueueOrder(unittest.TestCase):
         self.assertFalse(mesh._replace_lower_priority(radio, newcomer))
 
     def test_the_backoff_cap_exists_only_under_legacy(self):
-        """The pre-fold-in defect, restored so `legacy` carries the rule it was named for.
+        """The firmware has no backoff cap - setTransmitDelay reschedules indefinitely - so no
+        release series carries one, and only `legacy` does.
 
-        The firmware has no such cap - setTransmitDelay reschedules indefinitely - so 2.8 must not
-        have one. Reproducing the *rate* at which it fired before the fold-in is a different
-        matter: see test_the_cap_alone_does_not_reproduce_pre_fold_in_drops.
+        The rate at which it fired is a separate question: see
+        test_the_cap_alone_does_not_reproduce_pre_fold_in_drops.
         """
         self.assertIsNone(M.Profile("2.8").max_backoffs)
         self.assertEqual(M.Profile("legacy").max_backoffs, 400)
@@ -507,6 +507,58 @@ class RebroadcastMode(unittest.TestCase):
 
 class LastByteResolution(unittest.TestCase):
     """NodeDB::resolveLastByte - unique, ambiguous, or unknown."""
+
+    def test_a_zero_low_byte_is_sent_as_ff(self):
+        """getLastByteOfNodeNum: `(num & 0xFF) ? (num & 0xFF) : 0xFF`, because 0 is the sentinel."""
+        node = M.Node(0, 0.0, 0.0, node_num=0x1234AB00)
+        self.assertEqual(node.relay_byte, 0xFF)
+        self.assertEqual(M.Node(0, 0.0, 0.0, node_num=0x1234AB07).relay_byte, 0x07)
+
+    def test_the_three_outcomes_are_distinguished(self):
+        """resolveLastByte returns a status, not just a node: NONE and AMBIGUOUS differ."""
+        mesh = small_mesh()
+        byte = mesh.nodes[3].relay_byte
+        self.assertEqual(
+            mesh.resolve_last_byte(0, byte), (M.RESOLUTION_NONE, None)
+        )
+        heard(mesh, 0, 3)
+        self.assertEqual(mesh.resolve_last_byte(0, byte), (M.RESOLUTION_UNIQUE, 3))
+        mesh.nodes[4].node_num = (mesh.nodes[4].node_num & ~0xFF) | byte
+        heard(mesh, 0, 4)
+        self.assertEqual(
+            mesh.resolve_last_byte(0, byte), (M.RESOLUTION_AMBIGUOUS, None)
+        )
+        self.assertEqual(mesh.stats["next_hop_ambiguous"], 1)
+        self.assertEqual(mesh.stats["next_hop_unresolved"], 1)
+
+    def test_the_sentinel_byte_resolves_to_nothing(self):
+        """0 is NO_RELAY_NODE, and getLastByteOfNodeNum never yields it."""
+        mesh = small_mesh()
+        heard(mesh, 0, 3)
+        self.assertEqual(mesh.resolve_last_byte(0, 0), (M.RESOLUTION_NONE, None))
+
+    def test_an_ignored_node_is_not_a_candidate(self):
+        """The candidate gate drops ignored nodes, so they cannot collide with anyone."""
+        mesh = small_mesh()
+        byte = mesh.nodes[3].relay_byte
+        mesh.nodes[4].node_num = (mesh.nodes[4].node_num & ~0xFF) | byte
+        heard(mesh, 0, 3)
+        heard(mesh, 0, 4)
+        self.assertIsNone(mesh.resolve_unique_last_byte(0, byte))
+        mesh.nodes[0].nodedb[4].is_ignored = True
+        self.assertEqual(mesh.resolve_unique_last_byte(0, byte), 3)
+
+    def test_pre_2_8_takes_the_first_match_without_checking(self):
+        """resolveLastByte is new here; 2.6 and 2.7 resolve a colliding byte to whoever comes first."""
+        mesh = small_mesh(profile="2.7")
+        byte = mesh.nodes[3].relay_byte
+        mesh.nodes[4].node_num = (mesh.nodes[4].node_num & ~0xFF) | byte
+        heard(mesh, 0, 3)
+        heard(mesh, 0, 4)
+        status, peer = mesh.resolve_last_byte(0, byte)
+        self.assertEqual(status, M.RESOLUTION_UNIQUE)
+        self.assertIn(peer, (3, 4))
+        self.assertEqual(mesh.stats["next_hop_ambiguous"], 0)
 
     def test_unique_byte_resolves(self):
         mesh = small_mesh()
@@ -967,6 +1019,713 @@ class ForkExtras(unittest.TestCase):
         self.assertEqual(mesh.nodes[0].queue[0].packet.hop_limit, 2)
 
 
+class WarmTier(unittest.TestCase):
+    """WarmNodeStore - what an evicted node keeps, and what it loses."""
+
+    def small(self, slots=3, warm=4, profile="2.8"):
+        mesh = small_mesh(nodes=10, profile=profile)
+        for node in mesh.nodes:
+            node.max_num_nodes = slots
+            node.warm_num_nodes = warm
+            node.cold_cache_size = 0
+        return mesh
+
+    def test_eviction_demotes_rather_than_forgetting(self):
+        mesh = self.small()
+        for peer in (1, 2, 3, 4):
+            heard(mesh, 0, peer, at=peer * 1000.0)
+        node = mesh.nodes[0]
+        self.assertEqual(len(node.nodedb), 3)
+        self.assertIn(1, node.warm, "the stalest record is the one demoted")
+        self.assertEqual(mesh.stats["warm_demotions"], 1)
+
+    def test_re_admission_empties_the_warm_slot(self):
+        """A node lives in hot or warm, never both."""
+        mesh = self.small()
+        for peer in (1, 2, 3, 4):
+            heard(mesh, 0, peer, at=peer * 1000.0)
+        node = mesh.nodes[0]
+        self.assertIn(1, node.warm)
+        heard(mesh, 0, 1, at=9000.0)
+        self.assertIn(1, node.nodedb)
+        self.assertNotIn(1, node.warm)
+        self.assertEqual(mesh.stats["warm_promotions"], 1)
+        for peer in node.nodedb:
+            self.assertNotIn(peer, node.warm)
+
+    def test_the_key_survives_demotion_but_the_route_does_not(self):
+        """The tier exists for the key; next_hop and hops_away are hot-store fields."""
+        mesh = self.small()
+        node = mesh.nodes[0]
+        record = heard(mesh, 0, 1, hops_away=0, at=1000.0)
+        record.has_key = True
+        record.next_hop = 0x42
+        for peer in (2, 3, 4):
+            heard(mesh, 0, peer, at=peer * 1000.0)
+        self.assertNotIn(1, node.nodedb)
+        self.assertTrue(node.warm[1].has_key)
+        self.assertTrue(node.knows_key(1), "a warm key is still authoritative")
+        # Re-admitted without a usable hop count, so nothing but the key comes back: the route and
+        # the hop distance start again from what the next packets show.
+        mesh.now = 9000.0
+        readmitted = mesh.note_heard(0, 1, hops_away=None)
+        self.assertTrue(readmitted.has_key)
+        self.assertEqual(readmitted.next_hop, M.NO_NEXT_HOP_PREFERENCE)
+        self.assertIsNone(readmitted.hops_away)
+
+    def test_a_keyless_entry_never_displaces_a_keyed_one(self):
+        """absorb(): keyless candidates never displace keyed entries."""
+        mesh = self.small(slots=2, warm=1)
+        node = mesh.nodes[0]
+        keyed = heard(mesh, 0, 1, at=1000.0)
+        keyed.has_key = True
+        heard(mesh, 0, 2, at=2000.0)
+        heard(mesh, 0, 3, at=3000.0)  # evicts 1, which is keyed, into the warm slot
+        self.assertTrue(node.warm[1].has_key)
+        heard(mesh, 0, 4, at=4000.0)  # evicts 2, keyless, against a full keyed tier
+        self.assertIn(1, node.warm, "the keyed identity is kept")
+        self.assertNotIn(2, node.warm)
+        self.assertEqual(mesh.stats["warm_evictions"], 0)
+
+    def test_last_heard_is_quantised_to_128_seconds(self):
+        """The low seven bits of last_heard carry role, protection and the signed flag."""
+        self.assertEqual(M.warm_quantise(0.0), 0.0)
+        self.assertEqual(M.warm_quantise(127_999.0), 0.0)
+        self.assertEqual(M.warm_quantise(128_000.0), 128_000.0)
+        self.assertEqual(M.warm_quantise(200_000.0), 128_000.0)
+        entry = M.WarmEntry(200_000.0)
+        self.assertEqual(entry.last_heard, 128_000.0)
+
+    def test_no_warm_tier_before_this_tree_or_on_the_smallest_board(self):
+        mesh = self.small(profile="2.7")
+        for node in mesh.nodes:
+            node.warm_num_nodes = 0
+        for peer in (1, 2, 3, 4):
+            heard(mesh, 0, peer, at=peer * 1000.0)
+        self.assertEqual(mesh.nodes[0].warm, {})
+        self.assertEqual(mesh.stats["warm_demotions"], 0)
+        self.assertEqual(M.PLATFORM_WARM_STORE["stm32wl"], 0)
+        self.assertFalse(M.Profile("2.7").warm_store)
+
+
+class Acknowledgements(unittest.TestCase):
+    """ReliableRouter: the destination answers, which is what makes a route learnable."""
+
+    def test_the_destination_acks_a_request_that_asked_for_it(self):
+        mesh = small_mesh(nodes=8, seed=9)
+        peer = next(iter(mesh.neighbours[0]))
+        mesh.originate(0, 1, 40, destination=peer, want_ack=True)
+        mesh.run(60000.0)
+        self.assertGreaterEqual(mesh.stats["acks_sent"], 1)
+        self.assertGreaterEqual(mesh.stats["acks_delivered"], 1)
+
+    def test_nothing_acks_a_broadcast_or_a_packet_addressed_elsewhere(self):
+        mesh = small_mesh(nodes=8, seed=9)
+        mesh.originate(0, 1, 40, want_ack=True)
+        mesh.run(60000.0)
+        self.assertEqual(mesh.stats["acks_sent"], 0)
+
+    def test_an_ack_answers_over_the_distance_the_request_came(self):
+        """getHopLimitForResponse: hops used plus a margin, not the sender's whole budget."""
+        mesh = small_mesh(nodes=8)
+        packet = M.Packet(1, 3, 1, 40, hop_limit=1)
+        packet.hop_start = 3  # two hops used
+        self.assertEqual(mesh.hop_limit_for_response(0, packet), 3)
+        direct = M.Packet(2, 3, 1, 40, hop_limit=0)
+        direct.hop_start = 0
+        self.assertEqual(
+            mesh.hop_limit_for_response(0, direct), 0, "a direct request is answered directly"
+        )
+
+    def test_an_ack_is_priority_ack_and_two_bytes(self):
+        mesh = small_mesh(nodes=8, seed=9)
+        peer = next(iter(mesh.neighbours[0]))
+        request = M.Packet(5, 0, 1, 40, hop_limit=3, want_ack=True, destination=peer)
+        request.hop_start = 3
+        ack = mesh._perhaps_ack(peer, request)
+        self.assertIsNotNone(ack)
+        self.assertEqual(ack.priority, M.PRIORITY_ACK)
+        self.assertEqual(ack.length, M.ACK_PAYLOAD_BYTES)
+        self.assertEqual(ack.request_id, request.id)
+        self.assertEqual(ack.destination, 0)
+
+    def test_an_ack_lets_the_sender_learn_a_route(self):
+        """The whole point: without a reply coming back, next_hop is never learned at all."""
+        mesh = small_mesh(nodes=14, seed=9, router_fraction=0.15)
+        for index in range(14):
+            mesh.originate(index, M.NODEINFO_PORTNUM, 40, kind="nodeinfo")
+            mesh.run(mesh.now + 5000.0)
+        for step in range(12):
+            mesh.originate(
+                step % 14, 1, 40, destination=(step * 5 + 3) % 14, want_ack=True
+            )
+            mesh.run(mesh.now + 30000.0)
+        self.assertGreater(mesh.stats["acks_sent"], 0)
+        self.assertGreater(mesh.stats["next_hop_learned"], 0)
+
+
+class RouteHealthLifetimes(unittest.TestCase):
+    """NextHopRouter's health table: what refreshes a route, what forgives it, and what does not."""
+
+    def test_relearning_the_same_hop_keeps_the_failure_count(self):
+        """noteRouteLearned clears failures only when the hop itself changes."""
+        mesh = small_mesh(nodes=8)
+        mesh.note_route_learned(0, 3, 0x40)
+        mesh.note_route_failure(0, 3)
+        mesh.note_route_failure(0, 3)
+        self.assertEqual(mesh.nodes[0].route_health[3].consecutive_failures, 2)
+        mesh.note_route_learned(0, 3, 0x40)
+        self.assertEqual(
+            mesh.nodes[0].route_health[3].consecutive_failures,
+            2,
+            "a dead hop taught again is still the same dead hop",
+        )
+        mesh.note_route_learned(0, 3, 0x55)
+        self.assertEqual(mesh.nodes[0].route_health[3].consecutive_failures, 0)
+
+    def test_an_ack_refreshes_a_route_but_does_not_invent_one(self):
+        mesh = small_mesh(nodes=8)
+        mesh.note_route_success(0, 3)
+        self.assertNotIn(3, mesh.nodes[0].route_health, "nothing to refresh")
+        mesh.note_route_learned(0, 3, 0x40)
+        mesh.note_route_failure(0, 3)
+        mesh.now = 1000.0
+        mesh.note_route_success(0, 3)
+        self.assertEqual(mesh.nodes[0].route_health[3].consecutive_failures, 0)
+        self.assertEqual(mesh.nodes[0].route_health[3].learned_at, 1000.0)
+
+    def test_verified_means_learned_fresh_and_never_since_failed(self):
+        mesh = small_mesh(nodes=8)
+        self.assertFalse(mesh.route_is_verified(0, 3), "no route at all")
+        mesh.note_route_learned(0, 3, 0x40)
+        self.assertTrue(mesh.route_is_verified(0, 3))
+        mesh.note_route_failure(0, 3)
+        self.assertFalse(mesh.route_is_verified(0, 3))
+        mesh.note_route_success(0, 3)
+        self.assertTrue(mesh.route_is_verified(0, 3))
+        mesh.now += M.ROUTE_TTL_MSEC
+        self.assertFalse(mesh.route_is_verified(0, 3), "stale, however healthy")
+
+
+class CodingRateLadder(unittest.TestCase):
+    """Branch CRCRRCRRR: base, then one step slower, then 4/8."""
+
+    def test_the_ladder_steps_by_attempt(self):
+        mesh = small_mesh(nodes=6)
+        base = mesh.conf.current_preset["cr"]
+        self.assertEqual(mesh._ladder_coding_rate(0), base)
+        self.assertEqual(mesh._ladder_coding_rate(1), base + 1)
+        self.assertEqual(mesh._ladder_coding_rate(2), 8)
+        self.assertEqual(mesh._ladder_coding_rate(3), 8)
+
+    def test_a_slower_rate_is_a_longer_packet(self):
+        mesh = small_mesh(nodes=6)
+        base = mesh.conf.current_preset["cr"]
+        self.assertGreater(
+            mesh.airtime_ms(60, 8),
+            mesh.airtime_ms(60, base),
+            "more redundancy takes longer to send",
+        )
+
+    def test_no_release_carries_the_ladder(self):
+        for version in M.VERSIONS:
+            self.assertFalse(M.Profile(version).coding_rate_ladder, version)
+
+
+class EarlyFloodM4(unittest.TestCase):
+    """NEXTHOP_EARLY_FLOOD_ON_UNVERIFIED, written and compiled out."""
+
+    def test_it_is_off_in_every_release(self):
+        for version in M.VERSIONS:
+            self.assertFalse(M.Profile(version).early_flood_on_unverified, version)
+
+    def test_an_unverified_route_floods_a_retry_early(self):
+        mesh = small_mesh(
+            nodes=8, profile=M.Profile("2.8", early_flood_on_unverified=True)
+        )
+        heard(mesh, 0, 3, hops_away=1)
+        neighbour = next(iter(mesh.neighbours[0]))
+        heard(mesh, 0, neighbour, hops_away=0)
+        mesh.nodes[0].nodedb[3].next_hop = mesh.nodes[neighbour].relay_byte
+        mesh.note_route_learned(0, 3, mesh.nodes[neighbour].relay_byte)
+        mesh.note_route_failure(0, 3)  # so the route is no longer verified
+        packet = mesh.originate(0, 1, 40, destination=3, want_ack=True)
+        self.assertIsNotNone(packet)
+        mesh._do_retransmission(0, packet.id)
+        self.assertEqual(mesh.stats["early_floods"], 1)
+        self.assertEqual(mesh.nodes[0].nodedb[3].next_hop, M.NO_NEXT_HOP_PREFERENCE)
+
+    def test_a_verified_route_keeps_its_directed_retry(self):
+        mesh = small_mesh(
+            nodes=8, profile=M.Profile("2.8", early_flood_on_unverified=True)
+        )
+        neighbour = next(iter(mesh.neighbours[0]))
+        heard(mesh, 0, neighbour, hops_away=0)
+        heard(mesh, 0, 3, hops_away=1)
+        mesh.nodes[0].nodedb[3].next_hop = mesh.nodes[neighbour].relay_byte
+        mesh.note_route_learned(0, 3, mesh.nodes[neighbour].relay_byte)
+        packet = mesh.originate(0, 1, 40, destination=3, want_ack=True)
+        mesh._do_retransmission(0, packet.id)
+        self.assertEqual(mesh.stats["early_floods"], 0)
+
+
+class ExtraRepeats(unittest.TestCase):
+    """RepeatScalingModule - tolerate a heard copy of a text before cancelling our own relay."""
+
+    def mesh(self, extra=True, nodes=6):
+        mesh = small_mesh(nodes=nodes, profile=M.Profile("2.8", extra_repeats=extra))
+        for node in mesh.nodes:
+            node.util_ring = [0.0] * len(node.util_ring)
+            node.tx_ring = [0.0] * len(node.tx_ring)
+        return mesh
+
+    def text(self, packet_id=5, portnum=1):
+        packet = M.Packet(packet_id, 3, portnum, 40, hop_limit=3)
+        packet.hop_start = 4
+        return packet
+
+    def test_text_tolerates_one_duplicate_and_cancels_on_the_second(self):
+        mesh = self.mesh()
+        packet = self.text()
+        self.assertFalse(mesh._should_cancel_dupe(0, packet))
+        self.assertEqual(mesh.stats["extra_repeats_tolerated"], 1)
+        self.assertTrue(mesh._should_cancel_dupe(0, packet))
+
+    def test_everything_else_cancels_on_the_first(self):
+        mesh = self.mesh()
+        for portnum in (3, 4, 67, 70):
+            self.assertTrue(mesh._should_cancel_dupe(0, self.text(portnum=portnum)))
+        self.assertEqual(mesh.stats["extra_repeats_tolerated"], 0)
+
+    def test_an_undecodable_packet_is_classified_by_its_header(self):
+        """Flooded traffic is treated as text-like; directed traffic is not."""
+        mesh = self.mesh()
+        flooded = self.text(portnum=99)
+        flooded.opaque = True
+        self.assertFalse(mesh._should_cancel_dupe(0, flooded))
+        directed = self.text(packet_id=6, portnum=99)
+        directed.opaque = True
+        directed.next_hop = 0x40
+        self.assertTrue(mesh._should_cancel_dupe(0, directed))
+
+    def test_without_the_module_the_first_duplicate_always_cancels(self):
+        mesh = self.mesh(extra=False)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
+        self.assertEqual(mesh.stats["extra_repeats_tolerated"], 0)
+
+    def test_the_ring_holds_only_eight_conversations(self):
+        """Eight entries, replaced round-robin, so a busy mesh forgets what it was tolerating."""
+        mesh = self.mesh()
+        self.assertEqual(M.REPEAT_TRACKER_SIZE, 8)
+        first = self.text(packet_id=100)
+        self.assertFalse(mesh._should_cancel_dupe(0, first))
+        for packet_id in range(200, 208):
+            mesh._should_cancel_dupe(0, self.text(packet_id=packet_id))
+        # The first packet's count has been evicted, so its next duplicate starts again at one.
+        self.assertFalse(mesh._should_cancel_dupe(0, first))
+
+    def test_a_busy_channel_forces_the_threshold_back_to_one(self):
+        mesh = self.mesh()
+        mesh.nodes[0].log_airtime(0.0, 0.11 * 60000.0)  # 11% of the 60 s window
+        self.assertGreater(mesh.nodes[0].channel_utilization_percent(0.0), 10.0)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
+        self.assertEqual(mesh.stats["extra_repeats_suppressed"], 1)
+
+    def test_our_own_transmit_share_forces_it_too(self):
+        """utilizationTXPercent is measured over an hour, not over the 60 s channel window."""
+        mesh = self.mesh()
+        mesh.nodes[0].log_tx_airtime(0.0, 0.05 * 3600_000.0)  # 5% of the hour
+        self.assertGreater(mesh.nodes[0].utilization_tx_percent(0.0), 4.0)
+        self.assertLess(mesh.nodes[0].channel_utilization_percent(0.0), 10.0)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
+
+    def test_a_dense_neighbourhood_forces_it_too(self):
+        mesh = self.mesh(nodes=20)
+        for peer in range(1, 12):
+            heard(mesh, 0, peer, hops_away=0)
+        self.assertGreater(mesh.nodes[0].direct_neighbours, 10)
+        self.assertTrue(mesh._should_cancel_dupe(0, self.text()))
+        self.assertEqual(mesh.stats["extra_repeats_suppressed"], 1)
+
+    def test_a_router_still_never_cancels(self):
+        """The role gate runs first, so tolerating copies cannot make a router cancel one."""
+        mesh = self.mesh()
+        mesh.nodes[0].role = M.ROUTER
+        self.assertFalse(mesh.role_allows_canceling_dupe(0, self.text()))
+
+
+class PacketSigning(unittest.TestCase):
+    """Router.cpp: a 64-byte XEdDSA signature, the size gate, and the three receive policies."""
+
+    def test_the_size_gate_is_the_frame_budget(self):
+        """signedDataFits: payload + 66 + 16 <= 255, so 173 bytes is the last that signs."""
+        self.assertTrue(M.signed_data_fits(173))
+        self.assertFalse(M.signed_data_fits(174))
+
+    def test_a_broadcast_carries_the_signature_in_its_airtime(self):
+        mesh = small_mesh(nodes=6)
+        packet = mesh.originate(0, 1, 60)
+        self.assertTrue(packet.xeddsa_signed)
+        self.assertEqual(packet.length, 60 + M.XEDDSA_SIGNATURE_FIELD_BYTES)
+        self.assertEqual(mesh.stats["packets_signed"], 1)
+
+    def test_an_oversized_payload_goes_unsigned_rather_than_undelivered(self):
+        """The gate exists so a packet that would not fit signed is sent as it is."""
+        mesh = small_mesh(nodes=6)
+        packet = mesh.originate(0, 1, 200)
+        self.assertFalse(packet.xeddsa_signed)
+        self.assertEqual(packet.length, 200)
+        self.assertEqual(mesh.stats["packets_too_large_to_sign"], 1)
+
+    def test_a_dm_is_not_signed(self):
+        """Signing covers unencrypted broadcasts; a unicast only when the operator is licensed."""
+        mesh = small_mesh(nodes=6)
+        heard(mesh, 0, 1).has_key = True
+        packet = mesh.originate(0, 1, 40, destination=1, pki=True)
+        self.assertFalse(packet.xeddsa_signed)
+        self.assertTrue(packet.pki_encrypted)
+
+    def test_no_series_before_this_tree_signs(self):
+        for version in ("2.4", "2.5", "2.6", "2.7"):
+            mesh = small_mesh(nodes=6, profile=version)
+            packet = mesh.originate(0, 1, 60)
+            self.assertFalse(packet.xeddsa_signed, version)
+            self.assertEqual(packet.length, 60, version)
+
+    def _packet(self, mesh, signed=True, length=40, portnum=1):
+        packet = M.Packet(7, 3, portnum, length, hop_limit=3)
+        packet.xeddsa_signed = signed
+        return packet
+
+    def test_strict_drops_what_it_cannot_verify(self):
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_STRICT
+        signed = self._packet(mesh)
+        self.assertFalse(mesh._signature_policy_admits(0, signed))
+        self.assertEqual(mesh.stats["dropped_unverifiable"], 1)
+        heard(mesh, 0, 3).has_key = True
+        self.assertTrue(mesh._signature_policy_admits(0, signed))
+
+    def test_strict_drops_unsigned_traffic_outright(self):
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_STRICT
+        self.assertFalse(mesh._signature_policy_admits(0, self._packet(mesh, signed=False)))
+        self.assertEqual(mesh.stats["dropped_unsigned_strict"], 1)
+
+    def test_a_signed_nodeinfo_bootstraps_its_own_key(self):
+        """verifyFirstContactNodeInfo: the packet carries the key its node number is derived from."""
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_STRICT
+        info = self._packet(mesh, portnum=M.NODEINFO_PORTNUM)
+        self.assertTrue(mesh._signature_policy_admits(0, info))
+        self.assertTrue(mesh.nodes[0].nodedb[3].has_key)
+        self.assertEqual(mesh.stats["signature_bootstraps"], 1)
+
+    def test_balanced_drops_only_a_downgrade_from_a_known_signer(self):
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_BALANCED
+        plain = self._packet(mesh, signed=False)
+        self.assertTrue(mesh._signature_policy_admits(0, plain), "not a known signer yet")
+        record = heard(mesh, 0, 3)
+        record.has_key = True
+        self.assertTrue(mesh._signature_policy_admits(0, self._packet(mesh)))
+        self.assertTrue(record.xeddsa_signed, "verifying marks the sender as a signer")
+        self.assertFalse(mesh._signature_policy_admits(0, plain))
+        self.assertEqual(mesh.stats["dropped_downgrade"], 1)
+
+    def test_a_payload_too_big_to_sign_escapes_the_downgrade_rule(self):
+        """The gate an attacker inflates past, and the reason a growing signable type breaks."""
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_BALANCED
+        record = heard(mesh, 0, 3)
+        record.has_key = True
+        record.xeddsa_signed = True
+        self.assertFalse(mesh._signature_policy_admits(0, self._packet(mesh, signed=False)))
+        big = self._packet(mesh, signed=False, length=200)
+        self.assertTrue(mesh._signature_policy_admits(0, big))
+
+    def test_compatible_takes_everything(self):
+        mesh = small_mesh(nodes=6)
+        record = heard(mesh, 0, 3)
+        record.has_key = True
+        record.xeddsa_signed = True
+        self.assertTrue(mesh._signature_policy_admits(0, self._packet(mesh, signed=False)))
+        self.assertEqual(mesh.stats["dropped_downgrade"], 0)
+
+    def test_a_pki_dm_passes_every_policy_unread(self):
+        mesh = small_mesh(nodes=6)
+        mesh.nodes[0].signature_policy = M.SIGNATURE_POLICY_STRICT
+        packet = self._packet(mesh, signed=False)
+        packet.pki_encrypted = True
+        self.assertTrue(mesh._signature_policy_admits(0, packet))
+
+
+class AdaptiveCongestion(unittest.TestCase):
+    """Default::getConfiguredOrDefaultMsScaled - each node throttles on what it has heard."""
+
+    def test_the_coefficient_comes_from_this_node_s_own_store(self):
+        import random
+
+        from . import traffic as T
+
+        mesh = small_mesh(nodes=60, seed=2)
+        gen = T.Generator(mesh, random.Random(1), bytes(range(16)))
+        self.assertEqual(gen.node_congestion(0), 1.0, "a node that has heard nobody")
+        for peer in range(1, 60):
+            heard(mesh, 0, peer)
+        self.assertGreater(
+            gen.node_congestion(0),
+            1.0,
+            "having heard the mesh, the same node throttles",
+        )
+        self.assertEqual(gen.node_congestion(1), 1.0, "and node 1 has still heard nobody")
+
+    def test_the_two_hour_window_bounds_the_input(self):
+        import random
+
+        from . import traffic as T
+
+        mesh = small_mesh(nodes=60, seed=2)
+        gen = T.Generator(mesh, random.Random(1), bytes(range(16)))
+        for peer in range(1, 60):
+            heard(mesh, 0, peer)
+        self.assertGreater(gen.node_congestion(0), 1.0)
+        mesh.now = M.NUM_ONLINE_SECS * 1000.0 + 1
+        self.assertEqual(
+            gen.node_congestion(0), 1.0, "nothing heard inside the window is online"
+        )
+
+    def test_static_mode_keeps_one_coefficient_for_the_whole_mesh(self):
+        import random
+
+        from . import traffic as T
+
+        mesh = small_mesh(nodes=60, seed=2)
+        gen = T.Generator(
+            mesh, random.Random(1), bytes(range(16)), congestion_mode="static"
+        )
+        self.assertEqual(gen.node_congestion(0), gen.congestion)
+        self.assertGreater(gen.congestion, 1.0)
+
+
+class KeyEconomics(unittest.TestCase):
+    """What eviction costs: not a worse route, but no conversation until NodeInfo is heard again."""
+
+    def test_a_pki_dm_needs_a_key_from_some_tier(self):
+        mesh = small_mesh(nodes=6)
+        self.assertIsNone(
+            mesh.originate(0, 1, 40, destination=1, pki=True),
+            "no key in any tier, so nothing is composed",
+        )
+        self.assertEqual(mesh.stats["dm_blocked_no_key"], 1)
+        heard(mesh, 0, 1).has_key = True
+        self.assertIsNotNone(mesh.originate(0, 1, 40, destination=1, pki=True))
+
+    def test_nodeinfo_is_what_teaches_a_key(self):
+        mesh = small_mesh(nodes=8, seed=5)
+        peer = next(iter(mesh.neighbours[0]))
+        mesh.originate(peer, M.NODEINFO_PORTNUM, 40, kind="nodeinfo")
+        mesh.run(30000.0)
+        self.assertTrue(mesh.nodes[0].nodedb[peer].has_key)
+        self.assertTrue(mesh.nodes[0].knows_key(peer))
+
+    def test_the_cold_cache_answers_when_both_other_tiers_have_dropped_the_peer(self):
+        """A cold key is usable on the decrypt path and is never authoritative."""
+        mesh = small_mesh(nodes=6)
+        node = mesh.nodes[0]
+        node.cold_cache_size = 8
+        node.warm_num_nodes = 0
+        mesh._cache_cold_key(0, 3)
+        self.assertNotIn(3, node.nodedb)
+        self.assertTrue(node.knows_key(3))
+        self.assertFalse(node.warm_key(3), "the cold tier is not authoritative")
+        self.assertIsNone(
+            mesh.resolve_unique_last_byte(0, mesh.nodes[3].relay_byte),
+            "and nothing resolves from it",
+        )
+
+
+class FirmwareVersions(unittest.TestCase):
+    """Pins each release series' rules to the tags in this repository.
+
+    A series profile is that series' final release: 2.4 = v2.4.3, 2.5 = v2.5.23, 2.6 = v2.6.13,
+    2.7 = v2.7.21, 2.8 = this tree. Every expectation below was read off the named file at that tag.
+    """
+
+    def test_contention_window_constants_per_series(self):
+        """RadioInterface.h CWmin/CWmax, and the SNR range getCWsize maps onto them."""
+        expected = {
+            "2.4": (2, 8, 15.0),
+            "2.5": (2, 7, 15.0),
+            "2.6": (3, 8, 10.0),
+            "2.7": (3, 8, 10.0),
+            "2.8": (3, 8, 10.0),
+        }
+        for version, (cw_min, cw_max, snr_max) in expected.items():
+            profile = M.Profile(version)
+            self.assertEqual((profile.cw_min, profile.cw_max), (cw_min, cw_max), version)
+            self.assertEqual(profile.snr_min, -20.0, version)
+            self.assertEqual(profile.snr_max, snr_max, version)
+
+    def test_cw_size_at_zero_snr_differs_by_series(self):
+        """getCWsize(0) under each series' own map() arguments, worked through by hand.
+
+        2.4: (0+20)*(8-2)//(15+20) + 2 = 120//35 + 2 = 5.
+        2.5: (0+20)*(7-2)//(15+20) + 2 = 100//35 + 2 = 4.
+        2.6+: (0+20)*(8-3)//(10+20) + 3 = 100//30 + 3 = 6.
+        """
+        for version, expected in (("2.4", 5), ("2.5", 4), ("2.6", 6), ("2.8", 6)):
+            mesh = small_mesh(profile=version)
+            self.assertEqual(mesh.cw_size(0, 0.0), expected, version)
+
+    def test_the_router_offset_is_in_every_series(self):
+        """The 2 * CWmax * slot a non-early rebroadcaster waits is in 2.4 already.
+
+        It was attributed to 2.8 when the fold-in landed. getTxDelayMsecWeighted has carried it since
+        before 2.4, so only `legacy` - this transport's own earlier model - is missing it.
+        """
+        for version in M.VERSIONS:
+            mesh = small_mesh(profile=version)
+            mesh.nodes[0].role = M.CLIENT
+            floor = 2 * mesh.nodes[0].profile.cw_max * mesh.slot_time_ms()
+            for _ in range(20):
+                self.assertGreaterEqual(mesh.tx_delay_weighted(0, 0.0), floor, version)
+        self.assertFalse(M.Profile("legacy").router_offset)
+
+    def test_repeater_rebroadcasts_early_until_2_8(self):
+        """shouldRebroadcastEarlyLikeRouter dropped REPEATER; up to 2.7 the test admitted it."""
+        for version, early in (("2.4", True), ("2.6", True), ("2.7", True), ("2.8", False)):
+            mesh = small_mesh(profile=version)
+            mesh.nodes[0].role = M.REPEATER
+            self.assertEqual(mesh._rebroadcasts_early(0), early, version)
+
+    def test_client_base_rebroadcasts_early_only_in_2_7_and_only_for_favourites(self):
+        """v2.7.9's CLIENT_BASE branch returns nodeDB->isFromOrToFavoritedNode(p)."""
+        mesh = small_mesh(profile="2.7", nodes=6)
+        mesh.nodes[0].role = M.CLIENT_BASE
+        mine = M.Packet(1, 2, 1, 40, hop_limit=3)
+        self.assertFalse(mesh._rebroadcasts_early(0, mine))
+        mesh.nodes[0].favourites = {2}
+        self.assertTrue(mesh._rebroadcasts_early(0, mine))
+        # 2.8 took the branch out, so a CLIENT_BASE waits behind the offset whoever sent it.
+        modern = small_mesh(profile="2.8", nodes=6)
+        modern.nodes[0].role = M.CLIENT_BASE
+        modern.nodes[0].favourites = {2}
+        self.assertFalse(modern._rebroadcasts_early(0, mine))
+
+    def test_roles_fall_back_when_the_series_lacks_them(self):
+        """ROUTER_LATE arrived in v2.5.18 and CLIENT_BASE in v2.7.9."""
+        for version, late, base in (
+            ("2.4", False, False),
+            ("2.5", True, False),
+            ("2.6", True, False),
+            ("2.7", True, True),
+            ("2.8", True, True),
+        ):
+            profile = M.Profile(version)
+            self.assertEqual(profile.router_late_role, late, version)
+            self.assertEqual(profile.client_base_role, base, version)
+            mesh = small_mesh(
+                profile=version,
+                nodes=10,
+                router_late_fraction=0.2,
+                client_base_fraction=0.2,
+            )
+            roles = {n.role for n in mesh.nodes}
+            self.assertEqual(M.ROUTER_LATE in roles, late, version)
+            self.assertEqual(M.CLIENT_BASE in roles, base, version)
+
+    def test_queue_orders_by_priority_and_id_before_2_5(self):
+        """2.4's CompareMeshPacketFunc: priority alone, ties to the lower id, no late group."""
+        mesh = small_mesh(profile="2.4", nodes=4)
+        radio = mesh.nodes[0]
+        for packet_id, priority in ((5, M.PRIORITY_DEFAULT), (3, M.PRIORITY_DEFAULT)):
+            packet = M.Packet(packet_id, 1, 1, 40, hop_limit=3)
+            packet.priority = priority
+            mesh._enqueue(radio, M.QueueEntry(packet))
+        self.assertEqual([e.packet.id for e in radio.queue], [3, 5])
+
+    def test_a_relayed_packet_outranks_our_own_from_2_5(self):
+        """2.5's tie-break at equal priority: !isFromUs(p1) && isFromUs(p2)."""
+        mesh = small_mesh(profile="2.5", nodes=4)
+        radio = mesh.nodes[0]
+        ours = M.Packet(1, 0, 1, 40, hop_limit=3)
+        relayed = M.Packet(2, 3, 1, 40, hop_limit=3)
+        mesh._enqueue(radio, M.QueueEntry(ours))
+        mesh._enqueue(radio, M.QueueEntry(relayed))
+        self.assertEqual([e.packet.id for e in radio.queue], [2, 1])
+        # 2.4 has no such rule, so the second packet simply queues behind the first.
+        old = small_mesh(profile="2.4", nodes=4)
+        mesh._enqueue(old.nodes[0], M.QueueEntry(M.Packet(1, 0, 1, 40, hop_limit=3)))
+        mesh._enqueue(old.nodes[0], M.QueueEntry(M.Packet(2, 3, 1, 40, hop_limit=3)))
+        self.assertEqual([e.packet.id for e in old.nodes[0].queue], [1, 2])
+
+    def test_hop_preservation_starts_at_2_7_and_gains_ambiguity_checking_in_2_8(self):
+        """Router::shouldDecrementHopLimit arrived in v2.7.11 and resolves uniquely only here.
+
+        2.7 walks its store for favourited router-like nodes and preserves the hop on the first
+        matching last byte. This tree resolves the byte first and charges the hop when a second node
+        answers to it.
+        """
+        for version in ("2.4", "2.5", "2.6"):
+            self.assertFalse(M.Profile(version).preserve_hops, version)
+
+        for version, preserved in (("2.7", True), ("2.8", False)):
+            mesh = small_mesh(profile=version, nodes=6)
+            # Two favourited routers sharing a last byte: the relay byte cannot say which relayed.
+            mesh.nodes[1].node_num = 0x0000AA11
+            mesh.nodes[2].node_num = 0x0000BB11
+            for peer in (1, 2):
+                mesh.nodes[peer].role = M.ROUTER
+                heard(mesh, 0, peer)
+            mesh.nodes[0].role = M.ROUTER
+            mesh.nodes[0].favourites = {1, 2}
+            packet = M.Packet(9, 3, 1, 40, hop_limit=2)
+            packet.hop_start = 3  # one hop taken already, so the first-hop rule does not apply
+            packet.relay_node = 0x11
+            self.assertEqual(
+                mesh.should_decrement_hop_limit(0, packet), not preserved, version
+            )
+
+    def test_unicast_gets_five_attempts_only_in_this_tree(self):
+        """NUM_RELIABLE_UNICAST_ATTEMPTS is new; before it a DM had the broadcast count of 3."""
+        for version in ("2.4", "2.5", "2.6", "2.7"):
+            self.assertEqual(M.Profile(version).unicast_attempts, 3, version)
+        self.assertEqual(M.Profile("2.8").unicast_attempts, 5)
+
+    def test_next_hop_routing_starts_at_2_6(self):
+        """NextHopRouter is v2.6.0; learning a route from relay_node is v2.7.13."""
+        expected = {
+            "2.4": (False, False),
+            "2.5": (False, False),
+            "2.6": (True, False),
+            "2.7": (True, True),
+            "2.8": (True, True),
+        }
+        for version, (routing, learning) in expected.items():
+            profile = M.Profile(version)
+            self.assertEqual(profile.next_hop_routing, routing, version)
+            self.assertEqual(profile.next_hop_learning, learning, version)
+
+    def test_hot_store_size_per_series(self):
+        """mesh-pb-constants.h: a flat 100 until 2.6, nRF52 at 80 in 2.6 and 2.7, 120 here."""
+        expected = {"2.4": 100, "2.5": 100, "2.6": 80, "2.7": 80, "2.8": 120}
+        for version, slots in expected.items():
+            table = M.PLATFORM_HOT_STORE_BY_VERSION[M.Profile(version).hot_store_model]
+            self.assertEqual(table["nrf52840"], slots, version)
+            self.assertEqual(table["stm32wl"], 100 if version in ("2.4", "2.5") else 10)
+
+    def test_legacy_is_not_a_firmware_version(self):
+        profile = M.Profile("legacy")
+        self.assertIsNone(profile.version)
+        for version in M.VERSIONS:
+            self.assertFalse(profile.at_least(version), version)
+        self.assertTrue(M.Profile("2.7").at_least("2.6"))
+        self.assertFalse(M.Profile("2.6").at_least("2.7"))
+        with self.assertRaises(ValueError):
+            M.Profile("2.9")
+
+
 class EndToEnd(unittest.TestCase):
     def test_a_flood_reaches_the_mesh_and_the_counters_add_up(self):
         mesh = small_mesh(nodes=25, seed=7)
@@ -976,17 +1735,26 @@ class EndToEnd(unittest.TestCase):
         stats = mesh.stats
         self.assertGreater(stats["receptions"], 0)
         self.assertGreater(stats["transmissions"], 5)
-        # Every relay that reached the air was queued first, and everything queued either flew,
-        # was cancelled, was dropped, or is still sitting there.
+        # Every relay that reached the air was queued first, and everything queued either flew, was
+        # cancelled, was swapped out by a hop-limit upgrade, or is still sitting there. The upgrade
+        # term is the one that is easy to miss: perhapsHandleUpgradedPacket pops a queued copy that
+        # neither flew nor was cancelled, then queues the better copy in its place.
+        #
+        # This accounting is only exact while nothing overflows, because a queue-full drop counts
+        # the refused newcomer and the evicted incumbent under one counter.
         self.assertLessEqual(stats["rebroadcasts"], stats["rebroadcasts_queued"])
+        self.assertEqual(stats["queue_drops"], 0)
         still_queued = sum(len(n.queue) for n in mesh.nodes)
         self.assertEqual(
             stats["rebroadcasts_queued"],
-            stats["rebroadcasts"] + stats["rebroadcasts_cancelled"] + still_queued,
+            stats["rebroadcasts"]
+            + stats["rebroadcasts_cancelled"]
+            + stats["hop_upgrades"]
+            + still_queued,
         )
 
-    def test_both_profiles_run(self):
-        for name in ("2.8", "legacy"):
+    def test_every_profile_runs(self):
+        for name in M.VERSIONS + ("legacy",):
             mesh = small_mesh(nodes=20, seed=3, profile=name, router_fraction=0.15)
             for _ in range(4):
                 mesh.originate(0, 70, 40, kind="advert")
