@@ -17,6 +17,8 @@ import random
 import statistics
 import time
 
+from . import autochart as AC
+from . import report as RP
 from .campaign import build_parser, run_once
 
 # Everything the protocol blocks hold fixed. Servers sit two hops apart, comfortably inside the
@@ -144,6 +146,13 @@ BLOCKS = {
     # Nothing, the incumbent chain walk, and the sketch - all at one seed, so `none`
     # is a paired baseline and every other cell is a difference rather than a comparison.
     "Q-protocol": ("protocol", ["none", "chain", "sr"], []),
+    # The designated-node control: the same nodes in the same places, archive off then on, so what
+    # serving costs a node and what reconciliation adds can be separated from where it sits.
+    "Q-control": (
+        "protocol",
+        ["none", "sr"],
+        ["--place", "hops-apart", "--hops-apart", "3"],
+    ),
     # The denominator: an SF++ airtime share is a share of whatever the mesh broadcasts anyway, so
     # the device interval decides it as much as the protocol does.
     "Q-interval": ("broadcast-interval-s", [900, 3600, 10800, 43200], []),
@@ -160,6 +169,29 @@ BLOCKS = {
     "G-allrouters": ("servers", [3, 6], ["--place", "routers"]),
     # What the 2.8 fold-in is worth against the pre-fold-in transport: same seed, same mesh, same
     # traffic, only the MAC and routing rules change.
+    # --- round four: stress past the node database, and emit tuning numbers ---
+    # Mesh size against the store that has to hold it. The diagonal is where they match; every cell
+    # above it is the stressed case the firmware's throttle cannot see.
+    "R-oversubscribed": (
+        "nodes",
+        [120, 250, 500],
+        ["--scale-area", "--hours", "24"],
+    ),
+    # The same node counts against a deliberately small store, so eviction is constant.
+    "R-hotstore-stress": (
+        "max-num-nodes",
+        [10, 120, 250],
+        ["--nodes", "250", "--scale-area", "--hours", "24"],
+    ),
+    # Which quantity should drive the throttle. hotstore saturates; truesize is the ideal ceiling.
+    "R-congestion-input": (
+        "congestion-input",
+        ["hotstore", "truesize"],
+        ["--nodes", "250", "--scale-area", "--hours", "24"],
+    ),
+    # How many retries an addressed reconciliation hop needs before delivery stops improving. Named
+    # for the SF++ retry budget rather than R-repeats, which is the firmware's RepeatScalingModule.
+    "R-srretries": ("sr-retries", [0, 1, 2, 4], ["--hours", "24"]),
     "R-firmware": ("profile", ["legacy", "2.8"], []),
     # The feedback loop closed against the same loop held open: every node adopting a hop
     # recommendation derived from a histogram of what other adopting nodes sent. Needs the trace,
@@ -168,6 +200,14 @@ BLOCKS = {
         "no-adopt-hop-recommendation",
         [False, True],
         ["--nodes", "120", "--hop-spread", "--trace-interval-s", "1800"],
+    ),
+    # Where the nodes physically are. The spread between a roof node and a basement one is 26 dB,
+    # wider than most parameters here, so this is either the largest uncontrolled variable in every
+    # other block or the one that says the others were measured on an unrealistically good mesh.
+    "R-siting": (
+        "siting-mix",
+        ["uniform", "local-typical", "event", "backbone"],
+        [],
     ),
     # How far the firmware's estimator sits from the exhaustive count it approximates, as the mesh
     # outgrows its 128 entries. Reported truth / observed / estimated side by side.
@@ -312,6 +352,12 @@ def run_block(name, seeds, out_dir, grid=None):
         json.dump(results, f, indent=2)
     table(name, arm, values, results)
     print(f"wrote {path}")
+    chart = AC.auto(results, path, kind="block")
+    if chart:
+        print(f"wrote {chart}")
+    # The per-portnum statistics, text first, beside the table - so a block's output is readable
+    # without a second command and without anyone having to remember to run one.
+    print(RP.report_block(path))
     return results
 
 

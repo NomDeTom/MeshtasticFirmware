@@ -134,6 +134,13 @@ PRESET_THROTTLING_DEFAULT = 0.075
 # v2.7.17, so the 2.7 profile - which is v2.7.21 - does not have it.
 SMALL_MESH_SPEEDUP = ((10, 0.6), (20, 0.7), (30, 0.8))
 
+# `--congestion-input utilisation` has no node count to feed the coefficient, so busy-ness is mapped
+# onto the same 40-node pivot the throttle turns at. The firmware has no such mode - this is the
+# candidate input round four exists to price, not a reconstruction of anything - and the mapping is a
+# stated assumption: 40% busy reads as the 40 nodes at which throttling begins.
+UTILISATION_PIVOT_PERCENT = 40.0
+UTILISATION_PIVOT_NODES = 40
+
 
 def congestion_coefficient(
     node_count, sf, bw_hz, event_mode=False, model="sf_bw", preset="LONG_FAST"
@@ -169,6 +176,29 @@ def congestion_coefficient(
     return 1.0 + (node_count - 40) * throttling_factor
 
 
+def observed_senders(mesh, window_ms=7200_000.0):
+    """Distinct senders heard recently, mesh-wide.
+
+    What the mesh can see of its own size, as against what a hot store can hold: this is bounded by
+    the packet history rather than by MAX_NUM_NODES, so it keeps rising after the hot-store count
+    has saturated. Reported next to the congestion coefficient so that saturation is visible in the
+    output rather than inferred from it.
+
+    The sender comes from the PacketHistory record. Counting packet ids instead would count packets,
+    not senders, since every packet carries its own id.
+    """
+    now = mesh.now
+    senders = set()
+    for node in mesh.nodes:
+        for packet_id, when in node.seen.items():
+            if now - when > window_ms:
+                continue
+            record = node.history.get(packet_id)
+            if record is not None:
+                senders.add(record.sender)
+    return len(senders)
+
+
 class Generator:
     """Schedules every node's originated traffic across the run, then hands it to the mesh.
 
@@ -189,6 +219,7 @@ class Generator:
         position_throttle=1,
         telemetry_throttle=1,
         online_cap=120,
+        congestion_input="hotstore",
         broadcast_interval_s=None,
         diurnal="flat",
         start_hour=8.0,
@@ -217,6 +248,12 @@ class Generator:
         self.sf = preset["sf"]
         self.bw = preset["bw"]
         self.online_cap = online_cap
+        # Which quantity drives the throttle. `hotstore` is what the firmware does and is bounded by
+        # MAX_NUM_NODES, so it saturates on a mesh larger than the store - the pathology round four
+        # exists to price. `truesize` is the unbounded ideal, the upper bound on what a corrected
+        # input could buy. `utilisation` scales on measured channel busy-ness instead of a node count,
+        # which is what the throttle actually cares about and cannot be bounded by memory.
+        self.congestion_input = congestion_input
         # The coefficient falls below 1 on the 2.5 and 2.6 models, which speed a small mesh up.
         # Thinning needs a candidate rate at least as high as anything later selected from it, so
         # candidates are generated against the most permissive coefficient the model can produce.
@@ -229,7 +266,11 @@ class Generator:
             # getNumOnlineMeshNodes() iterates the hot store, so a node cannot count mesh members it
             # has evicted. The coefficient is bounded by MAX_NUM_NODES, not by mesh size.
             congestion_coefficient(
-                min(len(mesh.nodes), online_cap),
+                (
+                    len(mesh.nodes)
+                    if congestion_input == "truesize"
+                    else min(len(mesh.nodes), online_cap)
+                ),
                 self.sf,
                 self.bw,
                 model=self.congestion_model,
@@ -272,14 +313,30 @@ class Generator:
     def node_congestion(self, node_index):
         """The coefficient this node would apply right now, from its own view of the mesh.
 
-        getNumOnlineMeshNodes() walks the hot store, so the input is bounded twice: by the store,
-        which cannot hold more than MAX_NUM_NODES, and by the two-hour NUM_ONLINE_SECS window. The
-        node counts itself, as the firmware does by iterating a table that contains its own record.
+        `congestion_input` chooses what that view is, which is the whole point of the arm:
+
+        - `hotstore` is what the firmware does. getNumOnlineMeshNodes() walks the hot store, so the
+          input is bounded twice - by the store, which cannot hold more than MAX_NUM_NODES, and by
+          the two-hour NUM_ONLINE_SECS window - and therefore saturates on a mesh larger than the
+          store, which is exactly where the throttle is most needed. The node counts itself, as the
+          firmware does by iterating a table that contains its own record.
+        - `truesize` is the unbounded ideal: the mesh as it really is, which no device can see. The
+          upper bound on what a corrected input could buy.
+        - `utilisation` drops the node count entirely and scales on measured channel busy-ness,
+          which is what the throttle actually cares about and is the one input memory cannot bound.
+          The busy share is mapped onto the same 40-node pivot so the three are comparable: 0% busy
+          reads as an empty mesh, 100% as one saturated well past the pivot.
         """
         if self.congestion_mode != "adaptive":
             return self.congestion
         node = self.mesh.nodes[node_index]
-        online = min(node.num_online(self.mesh.now) + 1, self.online_cap)
+        if self.congestion_input == "truesize":
+            online = len(self.mesh.nodes)
+        elif self.congestion_input == "utilisation":
+            busy = node.channel_utilization_percent(self.mesh.now)
+            online = int(UTILISATION_PIVOT_NODES * busy / UTILISATION_PIVOT_PERCENT)
+        else:
+            online = min(node.num_online(self.mesh.now) + 1, self.online_cap)
         return congestion_coefficient(
             online,
             self.sf,
