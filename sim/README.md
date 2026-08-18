@@ -776,6 +776,23 @@ preset sync from PR #33. None of it is merged upstream, so vendoring it was a fo
 `sim/meshtasticator/UPSTREAM` for the exact merge, the one conflict resolved (`batchSim.py`, upstream #83's
 keyword-argument form kept), and the re-sync recipe. PR #78's Burning Man scenario is **not** included.
 
+**What of it this transport actually calls**, because vendoring is not using and the difference
+decides what a result rests on:
+
+| Komzpa module                                     | Called? | Where                                          |
+| ------------------------------------------------- | ------- | ---------------------------------------------- |
+| `lib/terrain.py`, `lib/srtm.py`                   | yes     | `--scenario`, via `sfpp/terrain.py` (§5.1h)    |
+| `lib/clutter.py`, `lib/osm_clutter.py`            | yes     | same - and the larger of the two terms on Batumi |
+| `lib/phy.py`, `lib/radio_loss.py`, `lib/config.py` | yes     | the link budget and the PER curve, throughout  |
+| link calibration (in `radio_loss`)                | yes     | scenario-carried, refusable with `--no-link-calibration` |
+| `lib/dcr.py` (dynamic coding rate)                | **no**  | `--coding-rate-ladder` is an unreleased branch's behaviour, not this |
+| `lib/dtp.py` (dynamic TX power)                   | **no**  | not modelled                                   |
+| `lib/link_model.py`                               | partly  | its decomposition is reproduced in `_build_links` so this transport's own per-node gains and per-pair skew survive; the function itself is not called |
+
+The other direction works too: a scenario composes with everything this transport added, so
+`--scenario batumi --noise-profile all --duct-per-hour 1 --profile 2.4 --legacy-fraction 0.3` is a
+single run over real geometry and real ground.
+
 `sim/sfpp/analytic/` is a fifth, independent line: a closed-form model kept deliberately separate as a
 cross-check on the event simulator rather than folded into it.
 
@@ -857,8 +874,13 @@ depend on it is not evidence.
   permits. A run can and does exceed what is legal to transmit.
 - **No MQTT, no internet-connected nodes**, and so no packets arriving without RF provenance beyond
   the one place the traceroute guard tests for them.
-- **No terrain and no clutter**, despite the vendored tree carrying Komzpa's SRTM and OSM land-cover
-  code (§9). It is present in `sim/meshtasticator/` and this simulator does not call it.
+- **No terrain and no clutter _unless `--scenario` asks for them_** (§5.1h). Without it the world is
+  flat and the link budget is distance alone, which is what every run before this assumed. With it,
+  Komzpa's SRTM terrain and OSM land-cover code is called for real. Two things to know before
+  quoting a terrain result: the packaged Batumi grid is 42 samples over a 16 km extent, which is
+  coarse enough that terrain there costs 4.3 dB per pair against clutter's 13.7 and changes which
+  pairs are links **not at all**; and a synthetic landform is a plausible shape of ground, not a
+  real place, so it prices *having terrain* rather than *having that terrain*.
 - **No mobility.** Positions are drawn once and never change.
 - **No power model**: no sleep, no battery, no duty-cycled receivers. Every node is listening at all
   times, which overstates reception on any mesh with sleeping clients.
