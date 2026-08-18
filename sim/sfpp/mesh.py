@@ -1224,6 +1224,11 @@ class Node:
         "index",
         "x",
         "y",
+        # Metres above sea level under the node, and metres of antenna above that. Zero and the
+        # model's default height on a mesh with no terrain, which is every mesh this simulator ran
+        # before the ground existed - so a flat run computes exactly what it always did.
+        "ground_m",
+        "antenna_height_m",
         "role",
         "is_server",
         "seen",
@@ -1282,6 +1287,11 @@ class Node:
         self.index = index
         self.x = x
         self.y = y
+        # Filled by `Mesh._lift_to_terrain()` when a scenario carries ground. Until then the node is
+        # at sea level with the path-loss model's own default antenna height, which is what every
+        # run before terrain existed assumed without saying so.
+        self.ground_m = 0.0
+        self.antenna_height_m = None
         self.role = role
         self.is_server = False
         self.seen = {}  # packet id -> time first heard, for duplicate suppression
@@ -1371,6 +1381,22 @@ class Node:
 
     def position(self):
         return (self.x, self.y)
+
+    def position3(self):
+        """Where the antenna is, in three dimensions. Absolute altitude, not height above ground.
+
+        Ground is zero without terrain, so this is the flat position plus an antenna height on a
+        mesh with no elevation - and the extra 1.5 m over a kilometre of separation is nothing any
+        path-loss model can see. On a mesh with terrain it is the number that matters: two nodes
+        3 km apart with 400 m of ridge between them are further apart than the map says.
+        """
+        return (self.x, self.y, self.altitude)
+
+    @property
+    def altitude(self):
+        return self.ground_m + (
+            self.antenna_height_m if self.antenna_height_m is not None else 0.0
+        )
 
     def is_router_like(self):
         return self.role in ROUTER_LIKE
@@ -2250,12 +2276,18 @@ class Mesh:
         noise=None,
         ducting=None,
         profile="2.8",
+        terrain=None,
     ):
         self.conf = conf
         self.nodes = nodes
         self.rng = rng
         self.hop_limit = hop_limit
         self.area = area
+        # The ground under the mesh, or None for the flat world every earlier run assumed. It is a
+        # grid, not a per-node height: the link budget asks what is BETWEEN two nodes, and a node's
+        # own elevation answers only half of that. See `sfpp/terrain.py`.
+        self.terrain = terrain
+        self._lift_to_terrain()
         # The mesh-wide default. Individual nodes carry their own and may disagree with it; this
         # is what a node gets when nothing said otherwise, and what the report labels the run with.
         self.profile = profile if isinstance(profile, Profile) else Profile(profile)
@@ -2409,6 +2441,28 @@ class Mesh:
         self._build_links()
 
     # ---- link layer -------------------------------------------------------------------
+
+    def _lift_to_terrain(self):
+        """Put every node on the ground, and its antenna above that ground.
+
+        A no-op without terrain: the nodes keep the sea-level default they were built with, every
+        obstruction term the vendored code computes returns 0.0 with the grid disabled, and a flat
+        run therefore computes exactly the link budget it always did.
+
+        With terrain, two separate numbers. `ground_m` is what the grid says is under the node.
+        `antenna_height_m` stays height ABOVE that ground and is filled from the model's own default
+        where a scenario did not carry one - the path-loss formulas take an antenna height term, and
+        handing them metres above sea level would silently make every node a mountaintop.
+        """
+        if self.terrain is None:
+            return
+        from . import terrain as terrain_mod
+
+        default_height = getattr(self.conf, "HM", 1.0)
+        for node in self.nodes:
+            node.ground_m = terrain_mod.ground_elevation(self.terrain, node.x, node.y)
+            if node.antenna_height_m is None:
+                node.antenna_height_m = default_height
 
     def _build_links(self):
         """RSSI for every ordered pair, once. 60 nodes is 3540 path-loss calls; it is not the cost."""
