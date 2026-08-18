@@ -120,6 +120,7 @@ def render_run(report, out_dir, label="run"):
 
     shares = [by[k]["airtime_share"] for k in order]
     axes[1].bar(order, shares, color=[ACCENT if k == "text" else COOL for k in order])
+    axes[1].set_xticks(range(len(order)))
     axes[1].set_xticklabels(order, fontsize=8.5, rotation=20, ha="right")
     _style(axes[1], "Share of channel airtime, by class", "", "fraction of airtime")
 

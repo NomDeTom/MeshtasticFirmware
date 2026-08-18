@@ -1,0 +1,12 @@
+# The simulator itself runs on the standard library. `python3 -m sfpp.campaign --no-charts` and
+# `python3 -m unittest discover -s sfpp -t . -p 'test_*.py'` need nothing installed at all: the three
+# vendored modules it imports (lib.config, lib.phy, lib.radio_loss) are pure stdlib too.
+#
+# Both entries below are optional, and the code degrades rather than fails without them:
+# a run without matplotlib writes its JSON and skips the charts; the test gate falls back to
+# unittest when pytest is absent.
+matplotlib>=3.5   # charts (autochart.py, figures3.py, diagram.py)
+pytest>=7         # nicer test runner; unittest runs the same suite
+
+# The vendored tree's own tooling - its interactive simulator, protobuf plumbing and dataset
+# fetchers - needs more than this. See meshtasticator/requirements.txt; nothing under sfpp/ uses it.

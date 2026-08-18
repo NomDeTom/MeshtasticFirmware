@@ -356,8 +356,16 @@ def run_block(name, seeds, out_dir, grid=None):
     if chart:
         print(f"wrote {chart}")
     # The per-portnum statistics, text first, beside the table - so a block's output is readable
-    # without a second command and without anyone having to remember to run one.
-    print(RP.report_block(path))
+    # without a second command and without anyone having to remember to run one. Written to disk as
+    # well as printed: an unattended run's stdout is not always kept, and the block's own directory
+    # is where anyone looks afterwards.
+    text = RP.report_block(path)
+    print(text)
+    text_path = os.path.join(out_dir, "reports", f"{name}{suffix}.txt")
+    os.makedirs(os.path.dirname(text_path), exist_ok=True)
+    with open(text_path, "w") as f:
+        f.write(text + "\n")
+    print(f"wrote {text_path}")
     return results
 
 
