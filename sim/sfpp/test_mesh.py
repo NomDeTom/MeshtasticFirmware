@@ -2027,6 +2027,22 @@ print(",".join(failed))
         unknown = sorted({arm for arm, _, _ in BLOCKS.values()} - known)
         self.assertEqual(unknown, [], "sweep arms that no longer exist on the command line")
 
+    def test_tuning_survives_a_block_whose_arm_is_not_a_number(self):
+        """The tuning pass sorted arm values with float(), which no boolean survives.
+
+        It crashed after every block had run and been pushed, so the results were safe and the
+        summary was lost. Exercised against a boolean arm because that is what broke it.
+        """
+        from .tuning import _arm, _sortable
+
+        self.assertEqual(
+            sorted(["False", "True", "2", "10"], key=_sortable), ["2", "10", "False", "True"]
+        )
+        # And the block lookup must not pull in a longer name, as the runner's did.
+        blocks = {"R-repeats": 1, "R-repeats-busy": 1, "R-signing": 1, "R-signing-cost": 1}
+        self.assertEqual(_arm(blocks, "R-repeats"), ["R-repeats"])
+        self.assertEqual(_arm(blocks, "R-signing"), ["R-signing"])
+
     def test_the_runner_checks_for_a_block_by_exact_name(self):
         """Seven block names are a prefix of another, so a glob skips the shorter one.
 

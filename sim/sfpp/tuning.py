@@ -65,9 +65,26 @@ def load_all(runs_dir):
     return out
 
 
-def _arm(blocks, prefix):
-    """Every block whose name starts with prefix, newest-looking last."""
-    return [k for k in blocks if k.startswith(prefix)]
+def _arm(blocks, name):
+    """The named block, plus any grid variant of it.
+
+    Matched on the exact name or on `name-<grid>`, never on a bare prefix: `R-repeats` would
+    otherwise pull in `R-repeats-busy`, and seven block names are a prefix of another.
+    """
+    return [k for k in blocks if k == name or k.startswith(name + "-hours")]
+
+
+def _sortable(value):
+    """Order arm values numerically where they are numbers, lexically where they are not.
+
+    Sorting on float() crashed the whole tuning pass the first time a block with a boolean arm was
+    present, after every block had run and been pushed - so the results survived and the summary
+    did not.
+    """
+    try:
+        return (0, float(value), "")
+    except (TypeError, ValueError):
+        return (1, 0.0, str(value))
 
 
 def _cells(runs):
@@ -172,11 +189,11 @@ def derive(blocks):
                 )
             )
 
-    rp = _arm(blocks, "R-repeats")
+    rp = _arm(blocks, "R-srretries")
     if rp:
         cells = _cells(blocks[rp[0]])
         best, best_v = None, -1
-        for v, rs in sorted(cells.items(), key=lambda kv: float(kv[0])):
+        for v, rs in sorted(cells.items(), key=lambda kv: _sortable(kv[0])):
             held = _mean(rs, ("sfpp", "held_fraction_mean")) or 0
             if held > best_v + 0.005:
                 best, best_v = v, held
@@ -234,7 +251,7 @@ def report(runs_dir, markdown=False):
             for b in (
                 "R-oversubscribed",
                 "R-congestion-input",
-                "R-repeats",
+                "R-srretries",
                 "R-hotstore-stress",
             )
             if not _arm(blocks, b)
