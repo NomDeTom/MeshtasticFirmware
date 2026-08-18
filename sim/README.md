@@ -77,12 +77,13 @@ A run leaves three things beside each other, and needs no post-processing step t
 
 | Module            | Run as                 | Purpose                                                                           |
 | ----------------- | ---------------------- | --------------------------------------------------------------------------------- |
-| `campaign.py`     | `-m sfpp.campaign`     | one scenario end to end; writes a JSON report                                     |
-| `sweep.py`        | `-m sfpp.sweep`        | a named block: one arm, several values, shared seeds                              |
+| `campaign.py`     | `-m sfpp.campaign`     | one scenario end to end; writes JSON, report and charts                          |
+| `sweep.py`        | `-m sfpp.sweep`        | a named block: one arm, several values, shared seeds; same three outputs         |
 | `report.py`       | `-m sfpp.report`       | per-portnum statistics as distributions, text marked and first                    |
 | `analyse.py`      | `-m sfpp.analyse`      | markdown tables from saved JSON, re-tabulated without re-running                  |
 | `autochart.py`    | (automatic)            | charts rendered by the run that produced the data                                 |
 | `tuning.py`       | `-m sfpp.tuning`       | recommended values with evidence, confidence, and what would overturn each        |
+| `figures.py`      | `-m sfpp.figures`      | the earlier rounds' block figures (reach, cadence, resolve, capacity, loss, place) |
 | `figures3.py`     | `-m sfpp.figures3`     | the campaign's set-piece figures (mesh shapes, protocol comparison, coverage gap) |
 | `experiment.py`   | `-m sfpp.experiment`   | one-off comparisons that are not worth a named block                             |
 | `diagram.py`      | `-m sfpp.diagram`      | draws a mesh's link graph, for checking a topology rather than a result          |
@@ -97,10 +98,11 @@ anyone remembering a second command, and its stdout is not always kept. `report.
 remain for re-tabulating saved JSON without re-running it, not for making a run readable in the
 first place.
 
-`figures3.py` is the exception - it draws from runs pinned by name (`Q-protocol-hours-48.json`), so
-it takes `--runs` and `--out` and skips any figure whose run is not present.
+The two `figures*.py` tools are the exception - they draw from blocks pinned by name, so they take
+`--runs` and `--out` and say which file they wanted rather than skipping in silence. A block run
+under `--grid` carries the grid in its filename, which is the usual reason one is not found.
 
-`python3 -m sfpp.sweep --list` prints the 66 named blocks.
+`python3 -m sfpp.sweep --list` prints the named blocks.
 
 ---
 
@@ -117,7 +119,7 @@ it takes `--runs` and `--out` and skips any figure whose run is not present.
 | `--router-fraction`      | 0.1              | share promoted to ROUTER, chosen by degree                                                                            |
 | `--router-late-fraction` | 0.0              | share as ROUTER_LATE                                                                                                  |
 | `--client-base-fraction` | 0.0              | share as CLIENT_BASE                                                                                                  |
-| `--role-mix`             | `legacy-default` | named role census, e.g. `baymesh-2026-08`                                                                             |
+| `--role-mix`             | empty            | named role census, e.g. `baymesh-2026-08`. Empty keeps `--router-fraction` and the other shares                       |
 | `--platform-mix`         | `uniform`        | board mix; decides each node's hot-store size. Inert unless `--max-num-nodes` is left unset          |
 | `--siting-mix`           | `uniform`        | where nodes physically are, as a per-node gain offset. **Assumed, not measured** - see §10          |
 | `--favourite-routers`    | off              | router-like nodes favourite each other, so relays between them keep their hop limit                                   |
@@ -343,6 +345,9 @@ Both of these are in the JSON and both were ignored for three rounds:
   to three was measured through it.
 - **Identical rows across a swept arm.** Two arms have been silently inert - accepted on the command
   line, stored, never read - and both produced well-formed tables supporting the opposite of the truth.
+  Every discrete flag has since been run on both sides and its reports diffed, so none is inert now;
+  the ones that need a second flag before they do anything are listed in §10.4, and a sweep over one
+  of those without its enabler produces exactly the same symptom.
 
 And the standing one: **`silent_losses` must be zero.** A checksum that closes over two unequal sets
 would falsify the design. Across roughly 280 runs, two bucket regimes and both protocols, it never has.

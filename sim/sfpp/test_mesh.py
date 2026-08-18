@@ -2051,6 +2051,39 @@ print(",".join(failed))
                                          "--seed-base", "--grid", "--run"})
         self.assertEqual(ghosts, [], "flags the README documents that the parser does not accept")
 
+    def test_the_documented_defaults_are_the_parser_defaults(self):
+        """§4 quotes a default for every flag, and a wrong one sends someone down the wrong arm.
+
+        Only §4's tables are read - §10.4's second column names an enabling flag rather than a
+        default. Words like `off` and `empty` stand in for False and "", so they are accepted.
+        """
+        import re
+
+        from .campaign import build_parser
+
+        readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+        section = readme[readme.index("## 4. Every parameter") : readme.index("## 5. Topologies")]
+        defaults = {
+            a.option_strings[0]: a.default for a in build_parser()._actions if a.option_strings
+        }
+        prose = {"-", "empty", "off", "on", "random", "per-class mix", "from board", "see §5"}
+        wrong = []
+        for line in section.splitlines():
+            match = re.match(r"\|\s*`(--[a-z0-9-]+)`[^|]*\|\s*([^|]+?)\s*\|", line)
+            if not match or match.group(1) not in defaults:
+                continue
+            documented = match.group(2).strip("*` ")
+            if documented in prose:
+                continue
+            actual = str(defaults[match.group(1)]).strip("'")
+            try:
+                same = float(documented) == float(actual)
+            except ValueError:
+                same = documented == actual
+            if not same:
+                wrong.append((match.group(1), documented, actual))
+        self.assertEqual(wrong, [], "defaults the README states that the parser does not use")
+
     def test_every_report_section_is_documented(self):
         """A section nobody documents is a section nobody reads, however carefully it is computed."""
         readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
