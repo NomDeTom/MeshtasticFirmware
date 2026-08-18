@@ -345,6 +345,9 @@ BLOCKS = {
     # Tropospheric ducting. The reach is not the result - the contention and the routes learned
     # through links that then disappear are.
     "X-duct": ("duct-per-hour", [0.0, 0.25, 1.0], ["--duct-gain-db", "25"]),
+    # A mesh stretched past what it can carry, against the duct that briefly makes it work. The
+    # adversarial pair: reach that exists for half an hour, gets learned, and then does not.
+    "X-stretch-duct": ("duct-per-hour", [0.0, 1.0], ["--stretch", "1.5", "--duct-gain-db", "25"]),
     # Position and telemetry turned up, which is what an operator does when the map looks stale.
     "X-chatty": ("broadcast-interval-s", [3600, 900, 300], []),
     # The same, with the hop limit raised too - the other half of that instinct.
@@ -463,7 +466,7 @@ BATCHES = {
     "adversarial": ["X-nomute", "X-badrouters", "X-siting", "X-worst"],
     "adversarial-radio": ["X-amplifiers", "X-amplify-worst"],
     # Distance, a moving floor, and a duct: the three that decide what a link is worth.
-    "propagation": ["X-stretch", "X-noise", "X-pulse", "X-duct"],
+    "propagation": ["X-stretch", "X-noise", "X-pulse", "X-duct", "X-stretch-duct"],
     # Where the deployed meshes are and where the two big regions are going.
     "presets": ["P-preset", "P-bw500", "P-eu-presets"],
     "adversarial-load": ["X-chatty", "X-chatty-hops"],

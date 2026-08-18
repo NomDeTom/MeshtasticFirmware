@@ -432,7 +432,10 @@ to within **0.041 dB** and is what licenses deriving the rest the same way.
   `EU_N_868` to `NARROW_SLOW` (`src/mesh/RadioInterface.cpp:144-145`), so a European result covering
   only the 250 kHz presets is a result about the past. That is `P-eu-presets`.
 - `LONG_SLOW`, `VERY_LONG_SLOW` and the two `EXTRA_` presets remain available to `--preset`. A result
-  on them is a result about a mesh nobody runs.
+  on them is a result about a mesh nobody runs, and the report says so: `outside_deployed_range` is
+  null for a combination a real mesh is in and carries a sentence naming the problem otherwise. Not a
+  guard - a run may ask about anything - but an out-of-range number cannot then be quoted as though it
+  came from a deployed mesh.
 
 The wideLora (2.4 GHz) bandwidths in the same switch - 1625, 812.5, 406.25 kHz - are **not** here,
 because the vendored region table has no 2.4 GHz entry to run them against.
