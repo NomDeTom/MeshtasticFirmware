@@ -246,7 +246,8 @@ At 60 nodes, seed 990001, 8 km:
 | `mixed`     | drawn from the seed            | -          | -        | a sweep samples across _shapes_ rather than draws of one shape                    |
 
 **Use `chain`, not a stretched `uniform`, for wide meshes.** Stretching a uniform field far enough to
-exceed seven hops fragments it - at 16 km with 60 nodes it splits into components, and a diameter
+exceed seven hops fragments it: at 16 km with 60 nodes it falls into 15 components at degree 2.6,
+where `chain` over the same span stays in one piece at degree 10.6 with a diameter of 11. A diameter
 measured across a fragmented graph is the diameter of whichever fragment the walk started in.
 `link_stats()` reports `components`, `largest_component` and `connected`, and `diameter()` returns
 `None` rather than a misleading number when the mesh is not connected.
@@ -298,7 +299,7 @@ diameter column reads fragmented rather than a number.
 | Section        | Contains                                                                                                                                                                                                              |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mesh`         | nodes, area, degree, `diameter` (`None` if fragmented), components, routers, topology                                                                                                                                 |
-| `traffic`      | originated per class, channel utilisation, transmissions, **`queue_drops`**, `dropped_to_backoff_cap`, receptions, collision and half-duplex losses, airtime by kind, congestion coefficient                          |
+| `traffic`      | the largest section, and the one that grows. Offered load and airtime (originated per class, channel utilisation, transmissions, **`queue_drops`**, `dropped_to_backoff_cap`, receptions, collision, half-duplex and PHY losses, congestion coefficient), then one family per mechanism: next-hop routing (`next_hop_*`, `route_expired_*`, `routes_lost_to_eviction`), the NodeDB tiers (`nodedb_evictions`, `warm_*`, `dm_blocked_no_key`), signing (`packets_signed`, `dropped_unsigned_strict`, `dropped_unverifiable`, `dropped_downgrade`, `signature_bootstraps`), traceroute (`traceroutes_sent`, `traceroute_routes_learned`, `traceroute_uncorroborated`, `route_cache_*`), hop scaling (`hop_samples`, `hop_rolls`, `hop_limit_lowered`), and the unreleased mechanisms (`extra_repeats_*`, `early_floods`) |
 | `by_class`     | per portnum: sent, received, **per-node reception distribution**, `nodes_receiving_none`, airtime share, `archived`                                                                                                   |
 | `by_hop_limit` | reception and hops traversed, split by the node's own limit                                                                                                                                                           |
 | `baseline`     | text reach min/median/mean/max, routing ceiling, and the loss split into beyond-hop-limit against lost-within-reach                                                                                                   |
@@ -328,11 +329,17 @@ Every per-node quantity is `min / p10 / median / mean / p90 / max`. **Prefer the
 mean**: on a stretched mesh the result is bimodal - nodes near an archive gain a great deal, nodes past
 the last archive gain nothing - and a mean describes neither.
 
-### 7.3 Charts
+### 7.3 The report and the charts
 
-Rendered automatically beside the JSON, footered with the transport commit, seed and duration so a
-figure cannot be read against the wrong code. Per-class reception spread with the worst node marked,
-airtime by class, and the stretch metrics where present.
+Both are written by the run itself, into `reports/` and `figures/` beside the JSON, so an unattended
+run leaves a complete result and no post-processing step to forget. `--no-charts` skips only the
+charts; the JSON and the text report are written either way.
+
+The report is the per-portnum statistics with the archived class marked and listed first, the reach
+and routing-ceiling summary, what only an archive could have delivered, and the `silent_losses` gate.
+The charts are per-class reception spread with the worst node marked, airtime by class, and the
+stretch metrics where present - each footered with the transport commit, seed and duration, so a
+figure cannot be read against the wrong code.
 
 ---
 
