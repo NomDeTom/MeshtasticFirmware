@@ -1286,6 +1286,11 @@ class Campaign:
         self.generator.schedule(self.duration_ms)
         self._schedule_traceroutes()
         self.mesh.start_hop_scaling()
+        if getattr(self.opts, "trace_interval_s", 0):
+            self.mesh.start_adaptive_trace(
+                interval_ms=self.opts.trace_interval_s * 1000.0,
+                generator=self.generator,
+            )
         if self.chain is not None:
             for server in self.servers.values():
                 start = self.rng.uniform(0, server.interval_ms)
@@ -1350,6 +1355,7 @@ class Campaign:
             "by_class": self._class_report(),
             "by_hop_limit": self._hop_report(),
             "hop_scaling": self._hop_scaling_report(),
+            "adaptive": self._adaptive_report(),
             "traffic": {
                 "originated": dict(self.generator.originated),
                 "congestion_coefficient": round(self.generator.congestion, 3),
@@ -1522,6 +1528,44 @@ class Campaign:
             }
         return out
 
+    def _adaptive_report(self):
+        """What the adaptive quantities did over time, not just where they ended.
+
+        `settled` is the share of nodes whose hop recommendation stopped changing over the second
+        half of the run; `reversals` counts how often it changed direction. A converged mesh and an
+        oscillating one have the same mean, and differ here.
+        """
+        trace = self.mesh.adaptive_trace
+        if not trace:
+            return {"samples": 0}
+        by_node = {}
+        for row in trace:
+            by_node.setdefault(row["node"], []).append(row)
+        settled, reversals, ranges = 0, 0, []
+        for rows in by_node.values():
+            series = [r["required_hop"] for r in rows]
+            half = series[len(series) // 2 :]
+            if half and len(set(half)) == 1:
+                settled += 1
+            ranges.append(max(series) - min(series))
+            direction = 0
+            for before, after in zip(series, series[1:]):
+                step = (after > before) - (after < before)
+                if step and direction and step != direction:
+                    reversals += 1
+                if step:
+                    direction = step
+        return {
+            "samples": len(trace),
+            "interval_s": self.opts.trace_interval_s,
+            "nodes": len(by_node),
+            "settled_share": round(settled / len(by_node), 3),
+            "reversals": reversals,
+            "hop_range_mean": round(statistics.mean(ranges), 3),
+            "hop_range_max": max(ranges),
+            "series": trace,
+        }
+
     def _hop_scaling_report(self):
         """Truth, observation and estimate for the mesh, averaged over the nodes that have rolled.
 
@@ -1602,6 +1646,8 @@ def _profile_for(opts):
         overrides["extra_repeats"] = True
     if getattr(opts, "coding_rate_ladder", False):
         overrides["coding_rate_ladder"] = True
+    if getattr(opts, "no_adopt_hop_recommendation", False):
+        overrides["adopt_hop_recommendation"] = False
     if dm_mode == "flood-only":
         overrides["next_hop_routing"] = False
     elif dm_mode == "m4-early-flood":
@@ -1659,6 +1705,19 @@ def build_parser():
         default="legacy",
         choices=M.VERSIONS + ("legacy",),
         help="the rules the --legacy-fraction share of nodes runs instead of --profile",
+    )
+    ap.add_argument(
+        "--trace-interval-s",
+        type=int,
+        default=0,
+        help="sample every adaptive quantity per node this often, and keep the series. A "
+        "converged mean and an oscillating one look identical at the end of a run; 0 disables it",
+    )
+    ap.add_argument(
+        "--no-adopt-hop-recommendation",
+        action="store_true",
+        help="compute the hop recommendation but do not apply it, holding the feedback loop open "
+        "as the control against a mesh whose nodes all adopt it",
     )
     ap.add_argument(
         "--traceroute-per-hour",

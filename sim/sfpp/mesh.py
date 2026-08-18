@@ -98,6 +98,7 @@ FEATURE_TAG = {
     "traceroute_learning": ("2.7", "v2.7.13"),
     "traceroute_corroboration": ("2.8", None),
     "route_cache": ("2.8", None),
+    "adopt_hop_recommendation": ("2.8", None),
     "resolve_ambiguity": ("2.8", None),
     "route_health": ("2.8", None),
     "warm_store": ("2.8", None),
@@ -203,6 +204,14 @@ TRACEROUTE_MAX_HOPS = 8
 TRACEROUTE_BYTES_PER_HOP = 5
 TRACEROUTE_BASE_BYTES = 12
 TEXT_PORTNUMS = frozenset({1, 8})  # TEXT_MESSAGE_APP and TEXT_MESSAGE_COMPRESSED_APP
+
+# Router.cpp:483: the hop recommendation is applied to routine device broadcasts and to nothing
+# else. A text message keeps whatever hop limit its operator set.
+VARIABLE_HOP_PORTNUMS = frozenset({3, 4, 67, 71})  # POSITION, NODEINFO, TELEMETRY, NEIGHBORINFO
+
+# HopScalingModule: reporting roles stay reachable on a dense mesh whatever the histogram says.
+# None of the roles this transport models maps to one of these, so the floor is zero throughout.
+ROLE_HOP_FLOOR = {"TRACKER": 2, "TAK_TRACKER": 2, "SENSOR": 1}
 
 # A Routing ACK is a two-byte payload; the header dominates it.
 ACK_PAYLOAD_BYTES = 2
@@ -505,6 +514,8 @@ class Profile:
         "congestion_clamp",
         "signing",
         "hop_scaling",
+        "adopt_hop_recommendation",
+        "nohop_portnums",
         "extra_repeats",
         "early_flood_on_unverified",
         "coding_rate_ladder",
@@ -616,6 +627,13 @@ class Profile:
 
         self.signing = self.at_least("2.8")
         self.hop_scaling = self.at_least("2.8")
+        # The module's whole purpose: a node lowers its own hop limit on routine broadcasts to what
+        # it estimates the mesh needs. Unconditional in the firmware wherever the module exists, so
+        # it follows hop_scaling - separable only so a sweep can hold the loop open.
+        self.adopt_hop_recommendation = self.at_least("2.8")
+        # Portduino's nohop_ports: named portnums relayed at hop_limit 0. Operator configuration
+        # rather than a release feature, so no version turns it on.
+        self.nohop_portnums = frozenset()
 
         # Off unless the module or the build flag is on. `extra_repeats` is RepeatScalingModule,
         # which is on a branch rather than in any release, so no series turns it on by itself.
@@ -669,6 +687,8 @@ class Profile:
         self.congestion_clamp = False
         self.signing = False
         self.hop_scaling = False
+        self.adopt_hop_recommendation = False
+        self.nohop_portnums = frozenset()
         self.exhaust_hops = False
         self.event_relay_hop_limit = None
         self.extra_repeats = False
@@ -1210,6 +1230,7 @@ class Node:
         "route_cache",
         "hop_scaling",
         "observed_hops",
+        "required_hop",
     )
 
     def __init__(
@@ -1302,6 +1323,9 @@ class Node:
         # transport can take for free. Reporting both is what says how far apart they are.
         self.hop_scaling = None
         self.observed_hops = {}
+        # getLastRequiredHop: HOP_MAX until the module has rolled at least once with something in
+        # it, then the walk's answer raised to this role's floor.
+        self.required_hop = HopScaling.MAX_HOP
 
     @property
     def relay_byte(self):
@@ -1781,6 +1805,9 @@ class Mesh:
             "hop_samples": 0,
             "hop_rolls": 0,
             "hop_dropped_full": 0,
+            # The recommendation actually taking effect, and the zero-hop list doing the same.
+            "hop_limit_lowered": 0,
+            "hop_limit_zeroed": 0,
             "reliable_retx": 0,
             "reliable_failures": 0,
             "opaque_relays": 0,
@@ -1800,6 +1827,8 @@ class Mesh:
         self.on_receive = (
             None  # callback(node, packet, rssi, snr) for the campaign's app layer
         )
+        # Per-node samples of every adaptive quantity, filled by start_adaptive_trace().
+        self.adaptive_trace = []
         self._build_links()
 
     # ---- link layer -------------------------------------------------------------------
@@ -3327,6 +3356,38 @@ class Mesh:
                 return hops_used + 2
         return limit
 
+    def _apply_hop_policy(self, radio, packet):
+        """Router.cpp:483 and the Portduino zero-hop list, applied to a packet we are composing.
+
+        The recommendation reaches routine device broadcasts and nothing else - position,
+        telemetry, nodeinfo, neighbourinfo - and can only lower the limit, never raise it above
+        what the operator configured. A text message is untouched, which bounds how far the
+        feedback loop can reach.
+
+        A zero-hop portnum is capped afterwards. Both paths reduce hop_start by the same amount as
+        hop_limit, so `hops_away` computed by every downstream receiver stays honest; changing only
+        the limit would silently corrupt the very histogram the recommendation came from.
+        """
+        profile = radio.profile
+        if (
+            profile.adopt_hop_recommendation
+            and packet.destination == BROADCAST
+            and packet.portnum in VARIABLE_HOP_PORTNUMS
+            and radio.required_hop < packet.hop_limit
+        ):
+            self._lower_hop_limit(packet, radio.required_hop)
+            self.stats["hop_limit_lowered"] += 1
+        if packet.portnum in profile.nohop_portnums and packet.hop_limit > 0:
+            self._lower_hop_limit(packet, 0)
+            self.stats["hop_limit_zeroed"] += 1
+
+    @staticmethod
+    def _lower_hop_limit(packet, limit):
+        """capEventRelayHops' arithmetic: take the same amount off hop_start as off hop_limit."""
+        reduction = packet.hop_limit - limit
+        packet.hop_start = max(0, packet.hop_start - reduction)
+        packet.hop_limit = limit
+
     def _perhaps_ack(self, rx, packet):
         """ReliableRouter::sendAckNak at the destination of a packet that asked to be acknowledged.
 
@@ -3493,6 +3554,14 @@ class Mesh:
                 if target.hop_scaling is None:
                     return
                 target.hop_scaling.roll_hour()
+                # lastRequiredHop = max(suggested, roleFloor), and stays at HOP_MAX until the
+                # histogram has something in it to walk.
+                suggested = (
+                    target.hop_scaling.last_suggested_hop
+                    if target.hop_scaling.rolls > 0 and target.hop_scaling.entries
+                    else HopScaling.MAX_HOP
+                )
+                target.required_hop = max(suggested, ROLE_HOP_FLOOR.get(target.role, 0))
                 self.stats["hop_rolls"] += 1
                 self.stats["hop_dropped_full"] = sum(
                     n.hop_scaling.dropped_full
@@ -3502,6 +3571,44 @@ class Mesh:
                 self.at(self.now + hour, roll)
 
             self.at(start, roll)
+
+    def start_adaptive_trace(self, interval_ms=1800_000.0, generator=None):
+        """Sample every adaptive quantity per node on a timer, and keep the series.
+
+        An end-state mean cannot tell a value that settled from one still swinging between two,
+        and every quantity here is now in a feedback loop: the hop recommendation feeds what gets
+        sent, which feeds the histogram it came from; the congestion coefficient feeds how often a
+        node sends, which feeds how many peers everyone hears. Sampling per node over time is what
+        makes the difference visible, so it is a prerequisite for reading any of these results
+        rather than a follow-up to them.
+        """
+        self.adaptive_trace = []
+
+        def sample():
+            hour = self.now / 3600_000.0
+            for node in self.nodes:
+                row = {
+                    "hours": round(hour, 3),
+                    "node": node.index,
+                    "required_hop": node.required_hop,
+                    "hop_limit": self.hop_limit_for(node.index),
+                    "neighbours": node.direct_neighbours,
+                    "known": len(node.nodedb),
+                    "online_seen": node.num_online(self.now),
+                    "channel_util": round(
+                        node.channel_utilization_percent(self.now), 2
+                    ),
+                }
+                if node.hop_scaling is not None:
+                    row["suggested_hop"] = node.hop_scaling.last_suggested_hop
+                    row["entries"] = len(node.hop_scaling.entries)
+                    row["sampling_denominator"] = node.hop_scaling.sampling_denominator
+                if generator is not None:
+                    row["congestion"] = round(generator.node_congestion(node.index), 3)
+                self.adaptive_trace.append(row)
+            self.at(self.now + interval_ms, sample)
+
+        self.at(0.0, sample)
 
     def hop_report(self, index):
         """Truth, observation and estimate side by side for one node.
@@ -3618,6 +3725,7 @@ class Mesh:
             reply_id=reply_id,
             opaque=opaque,
         )
+        self._apply_hop_policy(radio, packet)
         packet.xeddsa_signed = signed
         packet.pki_encrypted = bool(pki) and destination != BROADCAST
         packet.relay_node = radio.relay_byte
