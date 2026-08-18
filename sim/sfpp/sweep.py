@@ -292,6 +292,21 @@ BLOCKS = {
         [0.0, 0.25, 0.5, 0.75],
         ["--old-profile", "2.6"],
     ),
+    # The mesh nobody would build on purpose. Each arm removes one thing a real deployment has, so
+    # a design that only holds up on baymesh-2026-08 with uniform siting shows it here.
+    "X-nomute": ("role-mix", ["baymesh-2026-08", "no-mute", "all-routers"], []),
+    "X-badrouters": ("role-placement", ["degree", "inverse", "random"], ["--role-mix", "baymesh-2026-08"]),
+    "X-siting": (
+        "siting-mix",
+        ["uniform", "local-typical", "basement-heavy"],
+        ["--role-mix", "baymesh-2026-08"],
+    ),
+    # Everything wrong at once, against everything right, on a mesh dense enough to survive it.
+    "X-worst": (
+        "role-placement",
+        ["degree", "inverse"],
+        ["--role-mix", "no-mute", "--siting-mix", "local-typical", "--nodes", "120"],
+    ),
     # The roles 2.8 added. ROUTER_LATE only speaks when the mesh still needs it, so promoting the
     # spine to it should cut relay airtime without costing reach - which is the claim to test.
     "R-routerlate": ("router-late-fraction", [0.0, 0.05, 0.1, 0.2], []),
@@ -404,6 +419,8 @@ BATCHES = {
     "scale": ["R-hotstore", "R-hopscale", "R-hotstore-stress", "R-oversubscribed"],
     # Offered load and the clock, which set the denominator every share is quoted against.
     "load": ["Q-interval", "P-diurnal", "P-preset", "P-congestion", "P-catchup"],
+    # The floor rather than the deployment: no CLIENT_MUTE, routers badly placed, nodes indoors.
+    "adversarial": ["X-nomute", "X-badrouters", "X-siting", "X-worst"],
 }
 
 

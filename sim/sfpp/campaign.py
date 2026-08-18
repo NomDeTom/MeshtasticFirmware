@@ -373,6 +373,7 @@ class Campaign:
             ),
             platform_mix=getattr(opts, "platform_mix", "uniform"),
             siting_mix=getattr(opts, "siting_mix", "uniform"),
+            role_placement=getattr(opts, "role_placement", "degree"),
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(
@@ -2174,6 +2175,14 @@ def build_parser():
         help="where the nodes physically are, as a gain offset on every link: a named mix, or one "
         "siting for all. Not from the firmware and not measured - a stated assumption, and a large "
         "one, since roof and basement differ by 26 dB",
+    )
+    ap.add_argument(
+        "--role-placement",
+        default="degree",
+        choices=["degree", "inverse", "random"],
+        help="where the router-like roles go. degree puts them on the best-connected nodes, as an "
+        "operator would; inverse puts them on the worst, which is what happens when someone flashes "
+        "ROUTER onto the node they already own; random separates the role from its usual siting",
     )
     ap.add_argument("--position-throttle", type=int, default=1)
     ap.add_argument("--telemetry-throttle", type=int, default=1)

@@ -425,6 +425,13 @@ ROLE_MIXES = {
     },
     # The pre-census default, kept so earlier runs can be reproduced and compared against.
     "legacy-default": {CLIENT: 0.90, ROUTER: 0.10},
+    # Adversarial, and deliberately not a census of anything. CLIENT_MUTE is what keeps a real mesh
+    # quiet - a fifth of Baymesh does not rebroadcast at all - so removing it entirely is the single
+    # cruellest realistic change to a role mix. Everything left relays.
+    "no-mute": {CLIENT: 0.81, CLIENT_BASE: 0.16, ROUTER: 0.02, ROUTER_LATE: 0.01},
+    # The same, with the router share inflated: every router rebroadcasts early and without the
+    # contention-window offset a client pays, so a mesh of routers is a mesh with no backoff.
+    "all-routers": {ROUTER: 1.0},
 }
 
 
@@ -1739,6 +1746,10 @@ SITING_MIXES = {
     "local-typical": {"roof": 0.15, "desk": 0.45, "pocket": 0.3, "basement": 0.1},
     "event": {"roof": 0.05, "desk": 0.15, "pocket": 0.8},
     "backbone": {"roof": 0.8, "desk": 0.2},
+    # Adversarial. `basement-heavy` is the estate of indoor nodes nobody has re-sited; `worst-case`
+    # is every node badly placed, which is not a deployment but is the floor a design has to clear.
+    "basement-heavy": {"desk": 0.2, "pocket": 0.3, "basement": 0.5},
+    "worst-case": {"pocket": 0.2, "basement": 0.8},
 }
 
 
@@ -3945,6 +3956,7 @@ def build(
     signature_policy=SIGNATURE_POLICY_COMPATIBLE,
     platform_mix="uniform",
     siting_mix="uniform",
+    role_placement="degree",
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -4051,13 +4063,20 @@ def build(
             min(7, 3 + int(rank[i] * 4 + rng.random() * 1.5)) for i in range(node_count)
         ]
 
+    # `degree` is what an operator does: the repeater goes on the hill. `inverse` is the adversarial
+    # control - the router is the node in the basement with three neighbours, which is what actually
+    # happens when someone flashes ROUTER onto the node they already own. `random` separates the
+    # role's own effect from the siting that usually comes with it.
     by_degree = sorted(range(node_count), key=lambda i: -len(mesh.neighbours[i]))
+    if role_placement == "inverse":
+        by_degree = list(reversed(by_degree))
+    elif role_placement == "random":
+        rng.shuffle(by_degree)
     if role_mix:
         shares = ROLE_MIXES[role_mix] if isinstance(role_mix, str) else role_mix
-        # Router-like roles go to the best-sited nodes, because that is what an operator does with
-        # a hilltop. CLIENT_MUTE is drawn at random from the rest: muting a node is a decision about
-        # power or noise, not about siting, and handing it to the worst-connected nodes would make
-        # it look free.
+        # Router-like roles go to the head of that order. CLIENT_MUTE is drawn at random from the
+        # rest: muting a node is a decision about power or noise, not about siting, and handing it
+        # to the worst-connected nodes would make it look free.
         taken = 0
         for role in (ROUTER, ROUTER_LATE, CLIENT_BASE):
             want = int(round(node_count * shares.get(role, 0.0)))
