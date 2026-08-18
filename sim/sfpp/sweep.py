@@ -48,6 +48,11 @@ BASE = [
     "hybrid",
 ]
 
+# What a retry-ladder arm needs before it does anything. An addressed message only exists once SR
+# traffic is routed through the transport, and a route is only learned once traceroutes seed one, so
+# an arm over --dm-mode or --coding-rate-ladder without these produces identical rows.
+DM_LADDER = ["--dm-transport", "transport", "--traceroute-per-hour", "1"]
+
 BLOCKS = {
     "D-cadence": ("trigger", ["bucket", "interval", "aimd", "bucket+interval"], []),
     "D-resolve": ("resolve", ["sketch", "enum", "hybrid"], []),
@@ -92,7 +97,10 @@ BLOCKS = {
     # The same node counts in a fixed area, so this one is density rather than size. Running both is
     # the only way to say which of the two any effect belongs to.
     "K-density": ("nodes", [40, 60, 90, 120, 150], ["--hop-spread"]),
-    "K-hopspread": ("hop-limit", [3, 5, 7], []),
+    # One hop limit for everyone, swept. --no-hop-spread is not optional here: with the spread on,
+    # every node takes a per-node limit from centrality and --hop-limit is never read, which made
+    # this block produce three identical rows.
+    "K-hopspread": ("hop-limit", [3, 5, 7], ["--no-hop-spread"]),
     # Uniform hop limit against per-node 3-7 by centrality, everything else fixed.
     "K-spread": ("hop-spread", [False, True], []),
     # Adverts only other archives can act on; replays every node in earshot can use.
@@ -228,13 +236,13 @@ BLOCKS = {
     "R-dmmode": (
         "dm-mode",
         ["flood-only", "directed-with-late-flood", "m4-early-flood"],
-        [],
+        DM_LADDER,
     ),
-    "R-crladder": ("coding-rate-ladder", [False, True], []),
+    "R-crladder": ("coding-rate-ladder", [False, True], DM_LADDER),
     "R-dmmode-cr": (
         "dm-mode",
         ["directed-with-late-flood", "m4-early-flood"],
-        ["--coding-rate-ladder"],
+        DM_LADDER + ["--coding-rate-ladder"],
     ),
     # The cheapest rival to the archive: spend one extra relay of a text rather than replicate it
     # afterwards. Measured against the archive in the same arm rather than separately.
@@ -262,6 +270,13 @@ BLOCKS = {
     # A mesh that has not finished upgrading. The share below runs 2.6 while the rest run 2.8, which
     # is the case the release notes never describe.
     "R-mixed": (
+        "legacy-fraction",
+        [0.0, 0.25, 0.5, 0.75],
+        ["--old-profile", "2.5"],
+    ),
+    # The same, one series later: 2.6 already has next-hop routing, so this separates "some nodes
+    # cannot route" from "some nodes cannot learn a route".
+    "R-mixed-26": (
         "legacy-fraction",
         [0.0, 0.25, 0.5, 0.75],
         ["--old-profile", "2.6"],
@@ -319,6 +334,40 @@ def cell_argv(arm, value, extra):
     return argv
 
 
+# Named groups, so a batch can be launched by what it asks rather than by remembering which block
+# names belong together. Ordered cheap-to-expensive within each, so results accumulate rather than
+# waiting on the largest mesh in the group.
+BATCHES = {
+    # Which release a mesh runs, and what a half-upgraded one costs.
+    "versions": ["R-firmware", "R-versions", "R-mixed", "R-mixed-26"],
+    # The hop limit as an operator actually sets it: one value for everyone, against per-node
+    # limits, against nodes choosing their own from the histogram.
+    "hops": ["K-hopspread", "K-spread", "Q-hopassign", "R-adopt"],
+    # The archive itself: off, the incumbent walk, the sketch.
+    "protocol": ["Q-protocol", "Q-control"],
+    # The two unreleased mechanisms, each against its own control.
+    "unreleased": ["R-crladder", "R-repeats", "R-repeats-busy", "R-dmmode", "R-dmmode-cr"],
+    # One 2.8 mechanism per block, each with the conditions that make it do anything.
+    "mechanisms": [
+        "R-favourites",
+        "R-routerlate",
+        "R-roles",
+        "R-signing",
+        "R-rebroadcast",
+        "R-congestion-mode",
+        "R-warm",
+        "R-traceroute",
+        "R-traceroute-small",
+    ],
+    # What the mesh is made of and where it sits, which bounds every other block.
+    "shape": ["R-platform", "R-siting", "Q-topology", "K-density", "K-size"],
+    # Past the hot store, where the NodeDB stops being able to hold the mesh.
+    "scale": ["R-hotstore", "R-hopscale", "R-hotstore-stress", "R-oversubscribed"],
+    # Offered load and the clock, which set the denominator every share is quoted against.
+    "load": ["Q-interval", "P-diurnal", "P-preset", "P-congestion", "P-catchup"],
+}
+
+
 def run_block(name, seeds, out_dir, grid=None):
     arm, values, extra = BLOCKS[name]
     parser = build_parser()
@@ -351,6 +400,7 @@ def run_block(name, seeds, out_dir, grid=None):
     with open(path, "w") as f:
         json.dump(results, f, indent=2)
     table(name, arm, values, results)
+    reception_table(name, arm, values, results)
     print(f"wrote {path}")
     chart = AC.auto(results, path, kind="block")
     if chart:
@@ -425,9 +475,75 @@ def table(name, arm, values, results):
     return rows
 
 
+def reception_table(name, arm, values, results):
+    """What each arm did to delivery, read at the tails rather than the mean.
+
+    The archive table above answers whether reconciliation worked. This one answers whether the arm
+    was worth having at all, which is a different question and the one most of the feature blocks
+    exist for. p10 is the tenth-percentile node - the badly-placed one an arm has to help to be
+    worth its airtime - and p90 the well-placed one, which most arms move very little. A change that
+    lifts the mean by moving p90 has helped nobody who needed it.
+
+    `all` is every portnum together: an arm that lifts text by displacing telemetry is a trade, not
+    a gain, and only the aggregate row shows it.
+    """
+    print(f"\n=== {name} - reception ===")
+    header = (
+        f"{arm:>18} | text p10   med   p90 | all  p10   med   p90 | "
+        f"util  none | txs     coll"
+    )
+    print(header)
+    print("-" * len(header))
+    rows = []
+    for value in values:
+        cells = [r for r in results if r["value"] == value and "by_class" in r]
+        if not cells:
+            continue
+
+        def dist(cls, stat, cells=cells):
+            got = [
+                c["by_class"][cls]["per_node_reception"][stat]
+                for c in cells
+                if cls in c["by_class"]
+            ]
+            return statistics.mean(got) if got else float("nan")
+
+        def traffic(key, cells=cells):
+            return statistics.mean(c["traffic"][key] for c in cells)
+
+        row = {
+            "value": value,
+            "text_p10": dist("text", "p10"),
+            "text_median": dist("text", "median"),
+            "text_p90": dist("text", "p90"),
+            "all_p10": dist("all", "p10"),
+            "all_median": dist("all", "median"),
+            "all_p90": dist("all", "p90"),
+            "channel_utilisation": traffic("channel_utilisation"),
+            "nodes_receiving_none": statistics.mean(
+                c["by_class"]["text"]["nodes_receiving_none"] for c in cells
+            ),
+            "transmissions": traffic("transmissions"),
+            "lost_to_collision": traffic("lost_to_collision"),
+        }
+        rows.append(row)
+        print(
+            f"{str(value):>18} | {row['text_p10']:9.3f} {row['text_median']:5.3f} {row['text_p90']:5.3f} | "
+            f"{row['all_p10']:8.3f} {row['all_median']:5.3f} {row['all_p90']:5.3f} | "
+            f"{row['channel_utilisation']:5.2f} {row['nodes_receiving_none']:5.1f} | "
+            f"{row['transmissions']:7.0f} {row['lost_to_collision']:8.0f}"
+        )
+    return rows
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--block", action="append", help="repeatable; omit with --list")
+    ap.add_argument(
+        "--batch",
+        action="append",
+        help="a named group of blocks, repeatable: " + ", ".join(sorted(BATCHES)),
+    )
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument(
@@ -443,10 +559,26 @@ def main(argv=None):
     )
     opts = ap.parse_args(argv)
 
-    if opts.list or not opts.block:
-        for name, (arm, values, _) in BLOCKS.items():
-            print(f"{name:14} {arm} = {values}")
+    # A batch is a name for a group of blocks; --block and --batch add to the same list, so the two
+    # can be mixed and a batch can be extended with one extra block on the command line.
+    blocks = list(opts.block or [])
+    for batch in opts.batch or []:
+        if batch not in BATCHES:
+            ap.error(f"unknown batch {batch!r}; known: {', '.join(sorted(BATCHES))}")
+        blocks += [b for b in BATCHES[batch] if b not in blocks]
+
+    if opts.list or not blocks:
+        for name, (arm, values, grid) in BLOCKS.items():
+            suffix = f"   [{' '.join(grid)}]" if grid else ""
+            print(f"{name:20} {arm} = {values}{suffix}")
+        print()
+        for batch, names in sorted(BATCHES.items()):
+            print(f"batch {batch:12} {' '.join(names)}")
         return 0
+
+    unknown = [b for b in blocks if b not in BLOCKS]
+    if unknown:
+        ap.error(f"unknown block(s): {', '.join(unknown)}")
 
     if opts.seed_base is None:
         seeds = [random.SystemRandom().randrange(1 << 31) for _ in range(opts.seeds)]
@@ -454,7 +586,7 @@ def main(argv=None):
         seeds = [opts.seed_base + i for i in range(opts.seeds)]
     print(f"seeds {seeds}")
 
-    for name in opts.block:
+    for name in blocks:
         run_block(name, seeds, opts.out, grid=opts.grid.split() if opts.grid else None)
     return 0
 

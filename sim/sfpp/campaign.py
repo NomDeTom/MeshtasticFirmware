@@ -1694,6 +1694,38 @@ class Campaign:
                 "nodes_receiving_none": sum(1 for c in per_node if c == 0),
                 "archived": name == "text",
             }
+        # One more row across every class, because a per-class table answers "did text get through"
+        # but not "did this node hear the mesh at all". A node can sit at a healthy text share while
+        # missing most of the position and telemetry around it, and an arm that trades one for the
+        # other is invisible in any single class.
+        total_sent = sum(self.generator.originated.values())
+        if total_sent:
+            per_node = [0] * self.opts.nodes
+            for name in self.generator.originated:
+                for node_index, _pid in self.heard_by_class.get(name, {}):
+                    per_node[node_index] += 1
+            shares = [c / total_sent for c in per_node]
+            out["all"] = {
+                "originated": total_sent,
+                "receptions": sum(
+                    len(self.heard_by_class.get(n, {})) for n in self.generator.originated
+                ),
+                "mean_receivers_per_packet": round(
+                    sum(len(self.heard_by_class.get(n, {})) for n in self.generator.originated)
+                    / total_sent,
+                    2,
+                ),
+                "reception_rate": round(
+                    sum(len(self.heard_by_class.get(n, {})) for n in self.generator.originated)
+                    / (total_sent * max(1, self.opts.nodes - 1)),
+                    4,
+                ),
+                "airtime_s": round(self.mesh.stats["airtime_ms"] / 1000.0, 1),
+                "airtime_share": 1.0,
+                "per_node_reception": self._dist(shares),
+                "nodes_receiving_none": sum(1 for c in per_node if c == 0),
+                "archived": False,
+            }
         return out
 
     def _hops_away_report(self):
