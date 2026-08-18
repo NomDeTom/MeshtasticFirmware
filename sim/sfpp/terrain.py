@@ -95,6 +95,13 @@ class IndexedTerrainGrid:
             self._buckets.setdefault(
                 (int(math.floor(x / self.cell)), int(math.floor(y / self.cell))), []
             ).append((x, y, elevation, index))
+        # The occupied extent, so the ring search knows when it has actually covered every sample.
+        # Counting examined cells against the number of occupied buckets does not: buckets are
+        # sparse, and a square can cover many empty cells while every sample sits outside it.
+        self._bx_min = min(bx for bx, _ in self._buckets)
+        self._bx_max = max(bx for bx, _ in self._buckets)
+        self._by_min = min(by for _, by in self._buckets)
+        self._by_max = max(by for _, by in self._buckets)
         self._cache = {}
 
     @classmethod
@@ -148,8 +155,15 @@ class IndexedTerrainGrid:
                 guaranteed = ring * self.cell
                 if found[self.NEAREST - 1][0] <= guaranteed:
                     break
-            if ring > 0 and (2 * ring + 1) ** 2 >= len(self._buckets) + 8:
-                break  # the whole grid is in hand
+            # Every occupied bucket is inside the examined square, so widening it further cannot
+            # reach a sample that is not already in `found`.
+            if (
+                cx - ring <= self._bx_min
+                and cx + ring >= self._bx_max
+                and cy - ring <= self._by_min
+                and cy + ring >= self._by_max
+            ):
+                break
             ring += 1
 
         weighted_sum = 0.0
@@ -296,6 +310,16 @@ class Scenario:
 
     def __len__(self):
         return len(self.points)
+
+    def __bool__(self):
+        """A scenario is always a scenario, whatever `__len__` says.
+
+        `__len__` counts nodes, and a landform carries ground under a *generated* mesh - so it has
+        terrain rows and no points, and Python would read the scenario as false and silently drop
+        the ground. Every caller here tests `is None` for that reason, but the trap only has to be
+        stepped in once, by anyone, for a run to come out flat while claiming a landform.
+        """
+        return True
 
     @property
     def node_count(self):
