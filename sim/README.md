@@ -328,15 +328,21 @@ cross-check on the event simulator rather than folded into it.
 
 ### 9.1 Firmware versions the transport can imitate
 
-`--profile` selects which firmware's rules to obey. These are **rule sets, not releases**:
+`--profile` selects which firmware's rules to obey - a **release series**, taken at the final release
+of that series:
 
-| Profile       | Means                                                                                                                                                                                                    |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `2.8`         | this tree - next-hop routing, the late window, utilisation backoff, role-aware cancellation                                                                                                              |
-| `2.5-approx`  | a **floor, not a reconstruction**: the rules certainly newer than 2.5 are switched off and everything else stays at 2.8. The name says approx because it is absence of evidence, not evidence of absence |
-| `pre-fold-in` | the transport's own rules before the 2.8 fold-in, so a result can be attributed to the fold-in rather than to the mesh                                                                                   |
-| `legacy`      | accepted alias for `pre-fold-in`; the old name misdescribed it                                                                                                                                           |
+| Profile       | Means                                                                                                                                          |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `2.4` … `2.8` | the MAC and routing rules of that series. `2.8` is this tree                                                                                   |
+| `legacy`      | this transport's own pre-fold-in model - **not a firmware version**, kept so a result can be attributed to the fold-in rather than to the mesh |
 
-There is no 2.1 or 2.2 profile. The vendored Meshtasticator's own 2.1-era physics remains reachable in
-`sim/meshtasticator/` for comparison, but the SF++ transport does not model behaviour older than the
-`2.5-approx` floor.
+`--old-profile` and `--legacy-fraction` run a share of the nodes on a different series, for a
+mixed-version mesh. `--profile-flag NAME=VALUE` overrides a single rule, which is where a specific
+pre-2.5 pathology belongs rather than as a profile of its own.
+
+Three mechanisms are **not in any release** and are switched on explicitly: `--extra-repeats`
+(branch `extra-repeats`), `--coding-rate-ladder` (branch `CRCRRCRRR`), and `--dm-mode m4-early-flood`
+(written and compiled out at `NEXTHOP_EARLY_FLOOD_ON_UNVERIFIED 0`).
+
+The vendored Meshtasticator's own 2.1-era physics remains reachable in `sim/meshtasticator/` for
+comparison, but the SF++ transport does not model behaviour older than `2.4`.
