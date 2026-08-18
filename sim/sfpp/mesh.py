@@ -901,6 +901,219 @@ class NodeRecord:
         return self.is_favourite
 
 
+class HopScaling:
+    """HopScalingModule: a sampled, capped, hash-collided estimate of how far the mesh is.
+
+    Not a histogram so much as an estimator that emits a hop-limit recommendation. Every property
+    below costs it accuracy against the exhaustive count, and each is here because the difference is
+    the point of modelling it at all:
+
+    - identity is a 16-bit hash, so two nodes can share an entry
+    - 128 entries, 4 bytes each, and it fills
+    - only one node in `sampling_denominator` is ever admitted, chosen by hash
+    - the buckets are scaled by `filtering_denominator` before the recommendation walk
+    - recency is a 13-bit hourly bitmap, not a count
+    - on overflow it raises the denominator and drops nodes, warning that the answer may be skewed
+
+    So the module's per-hop counts are an estimate of the mesh, and the transport can compute the
+    truth. Reporting both is what says how far apart they are.
+    """
+
+    CAPACITY = 128
+    DENOM_MIN = 1
+    DENOM_MAX = 128
+    MAX_HOP = 7
+    FILL_HIGH_PCT = 80
+    FILL_LOW_PCT = 20
+    FILTER_DENOM_HOLD_ROLLS = 13
+    HOURS_TRACKED = 13
+    RUNS_PER_HOUR = 12
+    TARGET_AFFECTED_NODES = 40
+    MAX_TARGET_NODES = 80
+    POLITENESS_DENOM = 4
+    POLITENESS_GENEROUS = 4
+    POLITENESS_DEFAULT = 2
+    POLITENESS_STRICT = 1
+    ACTIVITY_WEIGHT_SCALE = 10
+    ACTIVITY_WEIGHT_GENEROUS_MAX_NUMER = 9
+    ACTIVITY_WEIGHT_STRICT_MIN_NUMER = 12
+
+    __slots__ = (
+        "hash_seed",
+        "entries",
+        "sampling_denominator",
+        "filtering_denominator",
+        "hold_rolls_remaining",
+        "denominator_history",
+        "last_per_hop",
+        "last_total",
+        "last_scaled_per_hop",
+        "last_suggested_hop",
+        "polite_numer",
+        "rolls",
+        "dropped_full",
+    )
+
+    def __init__(self, hash_seed=0):
+        self.hash_seed = hash_seed & 0xFFFF
+        # hash -> [hops_away, seen bitmap], in insertion order, capped at CAPACITY.
+        self.entries = {}
+        self.sampling_denominator = self.DENOM_MIN
+        self.filtering_denominator = self.DENOM_MIN
+        self.hold_rolls_remaining = 0
+        self.denominator_history = [0] * self.HOURS_TRACKED
+        self.last_per_hop = [0] * (self.MAX_HOP + 1)
+        self.last_total = 0
+        self.last_scaled_per_hop = [0] * (self.MAX_HOP + 1)
+        self.last_suggested_hop = self.MAX_HOP
+        self.polite_numer = self.POLITENESS_DEFAULT
+        self.rolls = 0
+        self.dropped_full = 0
+
+    def hash_node_id(self, node_num):
+        """Knuth's multiplicative hash, folded to 16 bits and seeded per node."""
+        return (((node_num * 2654435761) >> 16) & 0xFFFF) ^ self.hash_seed
+
+    @staticmethod
+    def passes_filter(node_hash, denominator):
+        """Subsample in hash space rather than by node number, so the choice is stable."""
+        return denominator > 0 and (node_hash & (denominator - 1)) == 0
+
+    @property
+    def fill_percentage(self):
+        return len(self.entries) * 100 // self.CAPACITY
+
+    def sample(self, node_num, hops):
+        """samplePacketForHistogram, called for every packet heard over the air."""
+        node_hash = self.hash_node_id(node_num)
+        if not self.passes_filter(node_hash, self.sampling_denominator):
+            return False
+        hops = min(max(0, hops), self.MAX_HOP)
+        entry = self.entries.get(node_hash)
+        if entry is not None:
+            entry[0] = hops
+            entry[1] |= 1  # markCurrentHour
+            return True
+        if self.fill_percentage >= self.FILL_HIGH_PCT:
+            self.trim_if_needed()
+        if len(self.entries) < self.CAPACITY:
+            self.entries[node_hash] = [hops, 1]
+            return True
+        # Full at the coarsest denominator there is; the recommendation is skewed from here on.
+        self.dropped_full += 1
+        return False
+
+    def trim_if_needed(self):
+        """Drop everything unseen for 13 hours, then halve the sample rate if it is still full."""
+        self.entries = {
+            node_hash: entry for node_hash, entry in self.entries.items() if entry[1]
+        }
+        if (
+            self.fill_percentage < self.FILL_HIGH_PCT
+            or self.sampling_denominator >= self.DENOM_MAX
+        ):
+            return
+        self.sampling_denominator = min(self.sampling_denominator * 2, self.DENOM_MAX)
+        self.filtering_denominator = max(
+            self.filtering_denominator, self.sampling_denominator
+        )
+        self.hold_rolls_remaining = self.FILTER_DENOM_HOLD_ROLLS
+        self.denominator_history = [
+            max(d, self.filtering_denominator) for d in self.denominator_history
+        ]
+        self.entries = {
+            node_hash: entry
+            for node_hash, entry in self.entries.items()
+            if self.passes_filter(node_hash, self.sampling_denominator)
+        }
+
+    def roll_hour(self):
+        """The hourly pass: summarise, recommend, then shift every bitmap along by one hour."""
+        self.denominator_history = [
+            self.filtering_denominator
+        ] + self.denominator_history[:-1]
+
+        per_hop = [0] * (self.MAX_HOP + 1)
+        total = 0
+        hourly_raw = [0] * self.HOURS_TRACKED
+        for node_hash, (hops, seen) in self.entries.items():
+            for hour in range(self.HOURS_TRACKED):
+                if (seen & (1 << hour)) and self.passes_filter(
+                    node_hash, self.denominator_history[hour]
+                ):
+                    hourly_raw[hour] += 1
+            if not self.passes_filter(node_hash, self.filtering_denominator):
+                continue
+            if seen:
+                per_hop[hops] += 1
+                total += 1
+        self.last_per_hop = per_hop
+        self.last_total = total
+
+        # How fast the mesh is turning over decides how generous the walk is allowed to be.
+        recent = hourly_raw[0] + hourly_raw[1]
+        older = hourly_raw[1] + hourly_raw[2]
+        if older > 1 and recent > 1:
+            scaled_recent = recent * self.ACTIVITY_WEIGHT_SCALE
+            if scaled_recent < older * self.ACTIVITY_WEIGHT_GENEROUS_MAX_NUMER:
+                self.polite_numer = self.POLITENESS_GENEROUS
+            elif scaled_recent > older * self.ACTIVITY_WEIGHT_STRICT_MIN_NUMER:
+                self.polite_numer = self.POLITENESS_STRICT
+            else:
+                self.polite_numer = self.POLITENESS_DEFAULT
+        else:
+            self.polite_numer = self.POLITENESS_DEFAULT
+
+        self.last_suggested_hop = self._walk(per_hop, total)
+        self.last_scaled_per_hop = [
+            count * self.filtering_denominator for count in per_hop
+        ]
+
+        # Scale down when the sample has thinned out, holding the filtering denominator for 13
+        # rolls so the buckets it scaled are not reinterpreted under a different one.
+        if total * 100 < self.CAPACITY * self.FILL_LOW_PCT:
+            if self.sampling_denominator > self.DENOM_MIN:
+                self.sampling_denominator //= 2
+        if self.filtering_denominator > self.sampling_denominator:
+            if self.hold_rolls_remaining > 0:
+                self.hold_rolls_remaining -= 1
+            if self.hold_rolls_remaining == 0:
+                self.filtering_denominator = max(
+                    self.filtering_denominator // 2, self.sampling_denominator
+                )
+
+        for entry in self.entries.values():
+            entry[1] = (entry[1] << 1) & 0x1FFF
+        self.rolls += 1
+        return self.last_suggested_hop
+
+    def _walk(self, per_hop, total):
+        """The recommendation: the first hop that reaches enough nodes, plus one if it is cheap.
+
+        `enough` is 40 nodes after scaling by the filtering denominator. The extension to the next
+        hop is allowed when the nodes it would add still leave the total inside a budget that runs
+        from 40 to 80, scaled by how politely the mesh is behaving.
+        """
+        if total <= 0:
+            return self.MAX_HOP
+        suggested = self.MAX_HOP
+        cumulative = 0
+        for hop in range(self.MAX_HOP + 1):
+            cumulative += per_hop[hop] * self.filtering_denominator
+            if cumulative >= self.TARGET_AFFECTED_NODES:
+                suggested = hop
+                break
+        if suggested < self.MAX_HOP:
+            at_next = per_hop[suggested + 1] * self.filtering_denominator
+            gap = self.MAX_TARGET_NODES - self.TARGET_AFFECTED_NODES
+            if (cumulative + at_next) * self.POLITENESS_DENOM <= (
+                self.TARGET_AFFECTED_NODES * self.POLITENESS_DENOM
+                + gap * self.polite_numer
+            ):
+                suggested += 1
+        return suggested
+
+
 class WarmEntry:
     """One 40-byte `WarmNodeEntry`: node number, last_heard, and a Curve25519 public key.
 
@@ -995,6 +1208,8 @@ class Node:
         "repeat_counts",
         "repeat_slot",
         "route_cache",
+        "hop_scaling",
+        "observed_hops",
     )
 
     def __init__(
@@ -1083,6 +1298,10 @@ class Node:
         # is much larger than the hot store and is not bounded by it, so it can hold a route for a
         # node the NodeDB has evicted or never admitted.
         self.route_cache = {}
+        # The firmware's estimator, when this node's release has it, and the exhaustive count the
+        # transport can take for free. Reporting both is what says how far apart they are.
+        self.hop_scaling = None
+        self.observed_hops = {}
 
     @property
     def relay_byte(self):
@@ -1557,6 +1776,11 @@ class Mesh:
             # could not have answered.
             "route_cache_writes": 0,
             "route_cache_hits": 0,
+            # The hop-scaling estimator: packets it admitted, hourly rolls, and nodes it had to
+            # drop because it was full at the coarsest sampling it has.
+            "hop_samples": 0,
+            "hop_rolls": 0,
+            "hop_dropped_full": 0,
             "reliable_retx": 0,
             "reliable_failures": 0,
             "opaque_relays": 0,
@@ -2745,6 +2969,13 @@ class Mesh:
         # NodeDB::updateFrom. getHopsAway is hop_start - hop_limit, so a packet that has not been
         # relayed yet is what tells us a peer is a direct neighbour.
         record = self.note_heard(rx, packet.origin, hops_away=packet.hops_taken())
+        # NodeDB.cpp:3730 samples every packet heard over the air, clamping a negative hop count to
+        # zero rather than rejecting it - the conservative direction for a recommendation.
+        hops = max(0, packet.hops_taken())
+        node.observed_hops[packet.origin] = hops
+        if node.hop_scaling is not None:
+            if node.hop_scaling.sample(self.nodes[packet.origin].node_num, hops):
+                self.stats["hop_samples"] += 1
         if packet.portnum == NODEINFO_PORTNUM:
             # NodeInfo is what carries a peer's public key, so it is the only thing that makes a PKI
             # DM to that peer possible. The cold cache keeps a copy for the decrypt path, bounded
@@ -2769,16 +3000,23 @@ class Mesh:
         """meshTooBusyForExtraRepeats: three unvalidated constants, any one of which forces 1.
 
         Channel utilisation over 10%, our own transmit share of the last hour over 4%, or more than
-        ten direct neighbours. The last reads HopScalingModule's per-hop counts, which the model
-        does not have yet, so the neighbour count stands in for it - the same quantity, measured
-        exactly rather than sampled.
+        ten direct neighbours. The neighbour count is HopScalingModule::getLastPerHopCounts()'s
+        zero-hop bucket, which is a sampled and hourly-rolled estimate rather than the exact count -
+        so on a mesh whose sampling denominator has climbed, this threshold reads low and extra
+        repeats stay switched on longer than the exact count would allow. Falls back to the hot
+        store's neighbour count when the node's release has no such module.
         """
         node = self.nodes[rx]
         if node.channel_utilization_percent(self.now) > BUSY_CHANNEL_UTIL_PERCENT:
             return True
         if node.utilization_tx_percent(self.now) > BUSY_AIR_UTIL_TX_PERCENT:
             return True
-        if node.direct_neighbours > BUSY_DIRECT_ACTIVE_NODES:
+        neighbours = (
+            node.hop_scaling.last_per_hop[0]
+            if node.hop_scaling is not None
+            else node.direct_neighbours
+        )
+        if neighbours > BUSY_DIRECT_ACTIVE_NODES:
             return True
         return False
 
@@ -3235,6 +3473,80 @@ class Mesh:
             return min(8, base + 1)
         return base
 
+    def start_hop_scaling(self, first_roll_ms=None):
+        """Arm the hourly pass on every node that has the module.
+
+        The module runs RUNS_PER_HOUR times an hour and rolls once, so the recommendation moves on
+        an hourly cadence however busy the mesh is. Each node's roll is offset, since nothing
+        synchronises boot times.
+        """
+        hour = 3600_000.0
+        for node in self.nodes:
+            if node.hop_scaling is None:
+                continue
+            start = (
+                self.rng.uniform(0, hour) if first_roll_ms is None else first_roll_ms
+            )
+
+            def roll(index=node.index, at=start):
+                target = self.nodes[index]
+                if target.hop_scaling is None:
+                    return
+                target.hop_scaling.roll_hour()
+                self.stats["hop_rolls"] += 1
+                self.stats["hop_dropped_full"] = sum(
+                    n.hop_scaling.dropped_full
+                    for n in self.nodes
+                    if n.hop_scaling is not None
+                )
+                self.at(self.now + hour, roll)
+
+            self.at(start, roll)
+
+    def hop_report(self, index):
+        """Truth, observation and estimate side by side for one node.
+
+        `truth` is the topological distance to every reachable node, which no device can know.
+        `observed` is every hop count this node actually saw, exhaustive and exact. `estimated` is
+        what the firmware's own structure would report - sampled, capped at 128 entries, hashed
+        into collisions and scaled back up by the sampling denominator.
+
+        All three are indexed by `hops_away`, where a direct neighbour is zero: getHopsAway is
+        hop_start - hop_limit, so a packet that has not been relayed reads 0. A BFS distance counts
+        the same neighbour as 1, so truth is shifted down to match rather than being reported in
+        units nothing else uses.
+        """
+        node = self.nodes[index]
+        truth = [0] * (HopScaling.MAX_HOP + 1)
+        for peer, hops in self.hops_from([index]).items():
+            if peer != index and 0 < hops <= HopScaling.MAX_HOP + 1:
+                truth[hops - 1] += 1
+        observed = [0] * (HopScaling.MAX_HOP + 1)
+        for hops in node.observed_hops.values():
+            observed[min(hops, HopScaling.MAX_HOP)] += 1
+        report = {
+            "node": index,
+            "truth": truth,
+            "truth_total": sum(truth),
+            "observed": observed,
+            "observed_total": sum(observed),
+        }
+        if node.hop_scaling is not None:
+            module = node.hop_scaling
+            report.update(
+                {
+                    "estimated": list(module.last_scaled_per_hop),
+                    "estimated_total": module.last_total * module.filtering_denominator,
+                    "entries": len(module.entries),
+                    "sampling_denominator": module.sampling_denominator,
+                    "filtering_denominator": module.filtering_denominator,
+                    "suggested_hop": module.last_suggested_hop,
+                    "rolls": module.rolls,
+                    "dropped_full": module.dropped_full,
+                }
+            )
+        return report
+
     def _prune(self):
         """Keep the transmission list bounded; nothing this old can overlap anything new."""
         if len(self.transmissions) < 4000:
@@ -3435,6 +3747,10 @@ def build(
         )
     for node in nodes:
         node.rebroadcast_mode = rebroadcast_mode
+        if node.profile.hop_scaling:
+            # A per-node hash seed, so two nodes do not collide on the same pair of peers. The
+            # firmware seeds it randomly at first boot and persists it.
+            node.hop_scaling = HopScaling(hash_seed=rng.randrange(0, 1 << 16))
     mesh = Mesh(
         conf,
         nodes,
