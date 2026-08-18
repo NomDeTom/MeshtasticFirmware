@@ -95,6 +95,9 @@ FEATURE_TAG = {
     "preserve_hops": ("2.7", "v2.7.11"),
     "hop_upgrade": ("2.7", "v2.7.13"),
     "next_hop_learning": ("2.7", "v2.7.13"),
+    "traceroute_learning": ("2.7", "v2.7.13"),
+    "traceroute_corroboration": ("2.8", None),
+    "route_cache": ("2.8", None),
     "resolve_ambiguity": ("2.8", None),
     "route_health": ("2.8", None),
     "warm_store": ("2.8", None),
@@ -192,6 +195,13 @@ BUSY_DIRECT_ACTIVE_NODES = 10
 # it is where a node learns whom it can encrypt to.
 NODEINFO_PORTNUM = 4
 ROUTING_PORTNUM = 5  # ROUTING_APP, which is what an ACK is
+TRACEROUTE_PORTNUM = 70  # TRACEROUTE_APP, whose payload is a RouteDiscovery
+
+# RouteDiscovery's route array. A traceroute that runs out of slots stops recording hops.
+TRACEROUTE_MAX_HOPS = 8
+# Each hop in the route is a 4-byte NodeNum plus a byte of SNR, on top of the request's own header.
+TRACEROUTE_BYTES_PER_HOP = 5
+TRACEROUTE_BASE_BYTES = 12
 TEXT_PORTNUMS = frozenset({1, 8})  # TEXT_MESSAGE_APP and TEXT_MESSAGE_COMPRESSED_APP
 
 # A Routing ACK is a two-byte payload; the header dominates it.
@@ -481,6 +491,9 @@ class Profile:
         "hop_upgrade",
         "next_hop_routing",
         "next_hop_learning",
+        "traceroute_learning",
+        "traceroute_corroboration",
+        "route_cache",
         "resolve_ambiguity",
         "route_health",
         "reliable_retx",
@@ -562,6 +575,17 @@ class Profile:
         self.next_hop_routing = self.at_least("2.6")
         self.next_hop_learning = self.at_least("2.7")
 
+        # TraceRouteModule::updateNextHops, v2.7.13: a traceroute reply teaches a next hop for
+        # every node beyond the learner in the route, not just the neighbour. The corroboration
+        # guard that refuses to learn unless the byte the route names is the one that actually
+        # relayed the reply is only in this tree - 2.7 learns from the unauthenticated payload
+        # unconditionally, so it learns more, and some of what it learns is wrong.
+        self.traceroute_learning = self.at_least("2.7")
+        self.traceroute_corroboration = self.at_least("2.8")
+        # The TrafficManagement overflow cache, which can hold a route for a node the hot store has
+        # evicted or never held.
+        self.route_cache = self.at_least("2.8")
+
         # NodeDB::resolveUniqueLastByte. Before this tree a last-byte lookup took the first node it
         # matched; nothing asked whether a second node shared the byte. So hop preservation and
         # next-hop emission were ambiguity-blind, and got it wrong silently on a dense mesh.
@@ -631,6 +655,9 @@ class Profile:
         self.hop_upgrade = False
         self.next_hop_routing = False
         self.next_hop_learning = False
+        self.traceroute_learning = False
+        self.traceroute_corroboration = False
+        self.route_cache = False
         self.resolve_ambiguity = False
         self.route_health = False
         self.reliable_retx = False
@@ -698,6 +725,7 @@ class Packet:
         "xeddsa_signed",
         "pki_encrypted",
         "coding_rate",
+        "route",
         "request_id",
         "reply_id",
         "opaque",
@@ -740,6 +768,9 @@ class Packet:
         # A per-packet TX coding-rate override. None uses the preset's, which is what every packet
         # does unless the retransmission ladder has stepped this one.
         self.coding_rate = None
+        # RouteDiscovery's route array, on a traceroute and nothing else. None means this packet is
+        # not a traceroute; a list is the hops recorded so far, in order.
+        self.route = None
         self.priority = (
             priority
             if priority is not None
@@ -783,6 +814,7 @@ class Packet:
         clone.xeddsa_signed = self.xeddsa_signed
         clone.pki_encrypted = self.pki_encrypted
         clone.coding_rate = self.coding_rate
+        clone.route = None if self.route is None else list(self.route)
         return clone
 
 
@@ -962,6 +994,7 @@ class Node:
         "tx_epoch",
         "repeat_counts",
         "repeat_slot",
+        "route_cache",
     )
 
     def __init__(
@@ -1046,6 +1079,10 @@ class Node:
         # modelling its size rather than a dict.
         self.repeat_counts = [None] * REPEAT_TRACKER_SIZE
         self.repeat_slot = 0
+        # TrafficManagementModule's overflow cache of next-hop hints: node index -> relay byte. It
+        # is much larger than the hot store and is not bounded by it, so it can hold a route for a
+        # node the NodeDB has evicted or never admitted.
+        self.route_cache = {}
 
     @property
     def relay_byte(self):
@@ -1510,6 +1547,16 @@ class Mesh:
             # Routing ACKs generated at a destination, and deliveries they confirmed.
             "acks_sent": 0,
             "acks_delivered": 0,
+            # Traceroute: what was asked, what came back, what it taught, and what the
+            # corroboration guard refused to learn from.
+            "traceroutes_sent": 0,
+            "traceroute_replies": 0,
+            "traceroute_routes_learned": 0,
+            "traceroute_uncorroborated": 0,
+            # The overflow cache: hints written, and routes served from it that the hot store
+            # could not have answered.
+            "route_cache_writes": 0,
+            "route_cache_hits": 0,
             "reliable_retx": 0,
             "reliable_failures": 0,
             "opaque_relays": 0,
@@ -2542,7 +2589,7 @@ class Mesh:
         record = node.nodedb.get(destination)
         stored = record.next_hop if record is not None else NO_NEXT_HOP_PREFERENCE
         if not stored:
-            return None
+            return self._next_hop_from_cache(rx, destination, relay_byte)
         health = node.route_health.get(destination)
         if health is not None and health.last_next_hop == stored:
             failed = health.consecutive_failures >= ROUTE_FAILURE_THRESHOLD
@@ -2564,6 +2611,38 @@ class Mesh:
         ):
             return None
         return stored
+
+    def _next_hop_from_cache(self, rx, destination, relay_byte):
+        """The overflow cache, consulted once the hot store has no route to offer.
+
+        This is the case the cache exists for: a node past the hot store's capacity, whose route
+        traceroute or an ACK taught us and whose NodeInfoLite has since been evicted. A stale hint
+        is cleared here rather than tried, and a hint that no longer resolves to one reachable
+        neighbour is not emitted at all.
+        """
+        node = self.nodes[rx]
+        if not node.profile.route_cache:
+            return None
+        hint = node.route_cache.get(destination)
+        if not hint or hint == relay_byte:
+            return None
+        health = node.route_health.get(destination)
+        if (
+            health is not None
+            and health.last_next_hop == hint
+            and (self.now - health.learned_at) >= ROUTE_TTL_MSEC
+        ):
+            node.route_cache.pop(destination, None)
+            node.route_health.pop(destination, None)
+            self.stats["route_expired_ttl"] += 1
+            return None
+        if (
+            self.resolve_unique_last_byte(rx, hint, require_direct_neighbour=True)
+            is None
+        ):
+            return None
+        self.stats["route_cache_hits"] += 1
+        return hint
 
     def note_route_learned(self, rx, destination, next_hop):
         """NextHopRouter::noteRouteLearned - refresh a route, without forgiving it.
@@ -2677,9 +2756,11 @@ class Mesh:
         node.remember(packet.id, fresh)
 
         self._sniff_ack_or_reply(rx, heard)
+        self._traceroute_learn(rx, heard)
         if self.on_receive is not None:
             self.on_receive(node, packet, rssi, snr)
         self._perhaps_ack(rx, heard)
+        self._perhaps_traceroute_reply(rx, heard)
         self.perhaps_rebroadcast(rx, heard)
 
     # ---- extra repeats (RepeatScalingModule) -------------------------------------------
@@ -2857,6 +2938,7 @@ class Mesh:
             return False
 
         relay = packet.copy()
+        self._record_traceroute_hop(rx, relay)
         if exhaust:
             relay.hop_limit = 0
             self.stats["hops_exhausted"] += 1
@@ -2884,6 +2966,110 @@ class Mesh:
         if entry is not None:
             node.pending[packet.id] = record
         return entry is not None
+
+    # ---- traceroute (TraceRouteModule) -------------------------------------------------
+
+    def send_traceroute(self, src, destination):
+        """Start a route discovery. Each relay appends itself; the destination replies.
+
+        The reply is what teaches anything: a node that finds itself in the returned route learns a
+        next hop for every node beyond it, not just for its neighbour.
+        """
+        packet = self.originate(
+            src,
+            TRACEROUTE_PORTNUM,
+            TRACEROUTE_BASE_BYTES,
+            kind="traceroute",
+            destination=destination,
+        )
+        if packet is not None:
+            packet.route = []
+            self.stats["traceroutes_sent"] += 1
+        return packet
+
+    def _record_traceroute_hop(self, rx, relay):
+        """alterReceivedProtobuf: a relay writes itself into the route before passing it on."""
+        if relay.route is None or len(relay.route) >= TRACEROUTE_MAX_HOPS:
+            return
+        relay.route.append(rx)
+        # The packet grows with every hop it records, which is the airtime a traceroute costs.
+        relay.length = TRACEROUTE_BASE_BYTES + len(relay.route) * TRACEROUTE_BYTES_PER_HOP
+
+    def _perhaps_traceroute_reply(self, rx, packet):
+        """The destination answers, carrying the route the request accumulated on the way out."""
+        if packet.route is None or packet.request_id or packet.destination != rx:
+            return None
+        reply = self.originate(
+            rx,
+            TRACEROUTE_PORTNUM,
+            packet.length,
+            kind="traceroute_reply",
+            destination=packet.origin,
+            request_id=packet.id,
+        )
+        if reply is not None:
+            reply.route = list(packet.route)
+            self.stats["traceroute_replies"] += 1
+        return reply
+
+    def _traceroute_learn(self, rx, packet):
+        """TraceRouteModule::updateNextHops on a returning reply.
+
+        If the route is A->B->C->D, then B learns C as the next hop for C and for D, and C learns D
+        for D. A node that is the original sender takes the first entry; a node that is last in the
+        route takes the responder itself.
+
+        The guard is the part worth having. The route array is unauthenticated payload, so this
+        tree refuses to learn from it unless the node it names as our next hop is the one that
+        actually relayed this reply to us, and treats a missing relay byte - an MQTT-sourced packet
+        with no RF corroboration - as unlearnable. 2.7 has the learning without the guard, so a
+        forged reply could point any node's next_hop anywhere.
+        """
+        node = self.nodes[rx]
+        if not node.profile.traceroute_learning or packet.route is None:
+            return
+        if not packet.request_id:
+            return  # a request on its way out teaches nobody
+        route = packet.route
+        if packet.destination == rx:
+            index = 0
+        elif rx in route:
+            index = route.index(rx) + 1
+        else:
+            return
+        next_hop_node = route[index] if index < len(route) else packet.origin
+        if next_hop_node == rx:
+            return
+        next_hop_byte = self.nodes[next_hop_node].relay_byte
+
+        if node.profile.traceroute_corroboration:
+            if not packet.relay_node or next_hop_byte != packet.relay_node:
+                self.stats["traceroute_uncorroborated"] += 1
+                return
+
+        for target in list(route[index:]) + [packet.origin]:
+            if target == rx:
+                continue
+            self._maybe_set_next_hop(rx, target, next_hop_byte)
+
+    def _maybe_set_next_hop(self, rx, target, next_hop_byte):
+        """maybeSetNextHop: the hot store when it holds the target, and the overflow cache always.
+
+        Traceroute is the highest-confidence source there is - a full known route - so the hint is
+        mirrored into the overflow cache even for a target the hot store has no room for.
+        """
+        node = self.nodes[rx]
+        record = node.nodedb.get(target)
+        if record is not None and record.next_hop != next_hop_byte:
+            record.next_hop = next_hop_byte
+            self.note_route_learned(rx, target, next_hop_byte)
+            self.stats["traceroute_routes_learned"] += 1
+        if node.profile.route_cache and node.cold_cache_size:
+            if node.route_cache.get(target) != next_hop_byte:
+                self.stats["route_cache_writes"] += 1
+            node.route_cache[target] = next_hop_byte
+            while len(node.route_cache) > node.cold_cache_size:
+                node.route_cache.pop(next(iter(node.route_cache)))
 
     def hop_limit_for_response(self, rx, packet):
         """RoutingModule::getHopLimitForResponse - answer over the distance the request came.
@@ -2959,7 +3145,8 @@ class Mesh:
             # freshness and clear the failure count - without creating health for a route we never
             # learned - and stop retransmitting, which is the whole point of having asked.
             self.note_route_success(rx, packet.origin)
-            self.stats["acks_delivered"] += 1
+            if packet.portnum == ROUTING_PORTNUM:
+                self.stats["acks_delivered"] += 1
             # Often already stopped: overhearing our own packet relayed is an implicit ACK, and it
             # usually beats the real one back.
             self._stop_retransmission(rx, packet.request_id)

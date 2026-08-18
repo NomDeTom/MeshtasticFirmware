@@ -161,6 +161,16 @@ BLOCKS = {
     # What the 2.8 fold-in is worth against the pre-fold-in transport: same seed, same mesh, same
     # traffic, only the MAC and routing rules change.
     "R-firmware": ("profile", ["legacy", "2.8"], []),
+    # Does traceroute learning pay for its own airtime? Each reply teaches a route for every node
+    # beyond the learner, and this tree's corroboration guard refuses a share of what it is told.
+    "R-traceroute": ("traceroute-per-hour", [0.0, 0.25, 1.0, 4.0], []),
+    # The same, on a mesh whose hot store cannot hold it - where the overflow cache is the only
+    # thing that can keep a route for the long tail.
+    "R-traceroute-small": (
+        "traceroute-per-hour",
+        [0.0, 1.0],
+        ["--nodes", "120", "--max-num-nodes", "20"],
+    ),
     # The retry budget from both ends: M4 spends a directed attempt to flood sooner, the coding-rate
     # ladder spends airtime to make each attempt more likely to land. Swept together because they
     # trade against the same budget.
