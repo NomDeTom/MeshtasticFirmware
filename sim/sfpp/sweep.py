@@ -161,6 +161,14 @@ BLOCKS = {
     # What the 2.8 fold-in is worth against the pre-fold-in transport: same seed, same mesh, same
     # traffic, only the MAC and routing rules change.
     "R-firmware": ("profile", ["legacy", "2.8"], []),
+    # The feedback loop closed against the same loop held open: every node adopting a hop
+    # recommendation derived from a histogram of what other adopting nodes sent. Needs the trace,
+    # since a converged mean and an oscillating one are identical at the end of a run.
+    "R-adopt": (
+        "no-adopt-hop-recommendation",
+        [False, True],
+        ["--nodes", "120", "--hop-spread", "--trace-interval-s", "1800"],
+    ),
     # How far the firmware's estimator sits from the exhaustive count it approximates, as the mesh
     # outgrows its 128 entries. Reported truth / observed / estimated side by side.
     "R-hopscale": ("nodes", [60, 120, 250, 500], ["--scale-area", "--hop-spread"]),

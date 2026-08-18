@@ -1108,6 +1108,116 @@ class WarmTier(unittest.TestCase):
         self.assertFalse(M.Profile("2.7").warm_store)
 
 
+class AdoptingTheRecommendation(unittest.TestCase):
+    """Router.cpp:483 - routine device broadcasts take the recommendation, and nothing else does."""
+
+    def prepared(self, required=2, nodes=8):
+        mesh = small_mesh(nodes=nodes, seed=6)
+        for node in mesh.nodes:
+            node.required_hop = required
+        return mesh
+
+    def test_a_position_broadcast_is_lowered(self):
+        mesh = self.prepared()
+        packet = mesh.originate(0, 3, 40)  # POSITION_APP
+        self.assertEqual(packet.hop_limit, 2)
+        self.assertEqual(mesh.stats["hop_limit_lowered"], 1)
+
+    def test_a_text_message_keeps_the_operator_s_hop_limit(self):
+        """The loop reaches device chatter only, which bounds how far it can go wrong."""
+        mesh = self.prepared()
+        configured = mesh.hop_limit_for(0)
+        packet = mesh.originate(0, 1, 40)  # TEXT_MESSAGE_APP
+        self.assertEqual(packet.hop_limit, configured)
+        self.assertEqual(mesh.stats["hop_limit_lowered"], 0)
+
+    def test_it_never_raises_the_limit(self):
+        mesh = self.prepared(required=M.HopScaling.MAX_HOP)
+        configured = mesh.hop_limit_for(0)
+        packet = mesh.originate(0, 3, 40)
+        self.assertEqual(packet.hop_limit, configured)
+        self.assertEqual(mesh.stats["hop_limit_lowered"], 0)
+
+    def test_a_dm_is_not_touched(self):
+        mesh = self.prepared()
+        configured = mesh.hop_limit_for(0)
+        packet = mesh.originate(0, 3, 40, destination=4)
+        self.assertEqual(packet.hop_limit, configured)
+
+    def test_hop_start_comes_down_with_the_limit(self):
+        """Otherwise every downstream hops_away is wrong, including the histogram's own input."""
+        mesh = self.prepared(required=1)
+        packet = mesh.originate(0, 3, 40)
+        self.assertEqual(packet.hop_limit, 1)
+        self.assertEqual(packet.hop_start, 1)
+        self.assertEqual(packet.hops_taken(), 0, "still zero hops away from its sender")
+
+    def test_a_zero_hop_portnum_is_capped_the_same_way(self):
+        """Portduino's nohop_ports, which is operator config rather than a release feature."""
+        mesh = small_mesh(
+            nodes=8, profile=M.Profile("2.8", nohop_portnums=frozenset({67}))
+        )
+        packet = mesh.originate(0, 67, 40)
+        self.assertEqual(packet.hop_limit, 0)
+        self.assertEqual(packet.hop_start, 0)
+        self.assertEqual(mesh.stats["hop_limit_zeroed"], 1)
+        for version in M.VERSIONS:
+            self.assertEqual(M.Profile(version).nohop_portnums, frozenset(), version)
+
+    def test_the_recommendation_is_hop_max_until_something_has_rolled(self):
+        mesh = small_mesh(nodes=8)
+        self.assertEqual(mesh.nodes[0].required_hop, M.HopScaling.MAX_HOP)
+        configured = mesh.hop_limit_for(0)
+        packet = mesh.originate(0, 3, 40)
+        self.assertEqual(packet.hop_limit, configured, "nothing to adopt yet")
+
+    def test_a_roll_installs_the_walk_s_answer(self):
+        mesh = small_mesh(nodes=12, seed=3)
+        mesh.start_hop_scaling(first_roll_ms=1000.0)
+        for index in range(12):
+            mesh.originate(index, 1, 40)
+            mesh.run(mesh.now + 500.0)
+        mesh.run(5000.0)
+        node = mesh.nodes[0]
+        self.assertGreater(node.hop_scaling.rolls, 0)
+        self.assertEqual(
+            node.required_hop,
+            max(node.hop_scaling.last_suggested_hop, 0),
+            "lastRequiredHop = max(suggested, roleFloor), and no modelled role has a floor",
+        )
+
+    def test_no_series_before_this_tree_adopts_anything(self):
+        for version in ("2.5", "2.6", "2.7"):
+            self.assertFalse(M.Profile(version).adopt_hop_recommendation, version)
+        self.assertTrue(M.Profile("2.8").adopt_hop_recommendation)
+
+
+class AdaptiveTrace(unittest.TestCase):
+    """Per-node series, because a converged mean and an oscillating one end up identical."""
+
+    def test_it_samples_every_node_on_its_interval(self):
+        mesh = small_mesh(nodes=6, seed=3)
+        mesh.start_adaptive_trace(interval_ms=10000.0)
+        mesh.run(35000.0)
+        self.assertEqual(len(mesh.adaptive_trace) % 6, 0)
+        rows = [r for r in mesh.adaptive_trace if r["node"] == 0]
+        self.assertGreaterEqual(len(rows), 4)
+        self.assertEqual(rows[0]["hours"], 0.0)
+        self.assertAlmostEqual(rows[1]["hours"], 10 / 3600.0, places=3)
+        for key in ("required_hop", "hop_limit", "neighbours", "known", "channel_util"):
+            self.assertIn(key, rows[0])
+
+    def test_the_series_records_a_recommendation_that_moves(self):
+        mesh = small_mesh(nodes=6, seed=3)
+        mesh.start_adaptive_trace(interval_ms=5000.0)
+        mesh.run(6000.0)
+        mesh.nodes[0].required_hop = 2
+        mesh.run(20000.0)
+        seen = [r["required_hop"] for r in mesh.adaptive_trace if r["node"] == 0]
+        self.assertIn(M.HopScaling.MAX_HOP, seen)
+        self.assertIn(2, seen, "the change is in the series, not just in the end state")
+
+
 class HopScalingEstimator(unittest.TestCase):
     """HopScalingModule: sampled, capped, hash-collided, and hourly."""
 
