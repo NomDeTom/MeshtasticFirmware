@@ -52,7 +52,17 @@ printf '%s\n' "${BLOCKS[@]}" >"$OUT_ROOT/.manifest"
 PIN=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 # The gate: a transport that fails its own tests does not get to produce results.
-if ! python3 -m pytest sfpp/test_mesh.py -q >"$OUT_ROOT/.tests.log" 2>&1; then
+#
+# unittest rather than pytest, and both modules rather than one. pytest is not in requirements.txt,
+# so on a checkout without it this gate failed and refused to launch anything - which reads exactly
+# like a broken transport. The tests are unittest.TestCase either way; pytest is used when present
+# only because its output is shorter.
+if python3 -c "import pytest" >/dev/null 2>&1; then
+	GATE=(python3 -m pytest sfpp/test_mesh.py sfpp/test_knowledge.py -q)
+else
+	GATE=(python3 -m unittest sfpp.test_mesh sfpp.test_knowledge)
+fi
+if ! "${GATE[@]}" >"$OUT_ROOT/.tests.log" 2>&1; then
 	echo "transport tests FAILED - see $OUT_ROOT/.tests.log; not running anything"
 	exit 4
 fi
