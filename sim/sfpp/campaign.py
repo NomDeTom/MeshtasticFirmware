@@ -344,7 +344,7 @@ class Campaign:
         self.opts = opts
         self.seed = seed
         self.rng = random.Random(seed)
-        self.conf = M.make_config(preset=opts.preset, phy_loss=not opts.no_phy_loss, tx_power=getattr(opts, 'tx_power', None))
+        self.conf = M.make_config(preset=opts.preset, phy_loss=not opts.no_phy_loss, tx_power=getattr(opts, 'tx_power', None), noise_model=getattr(opts, 'noise_model', 'thermal'))
         # 150 nodes in the same 8 x 8 km as 60 is two and a half times the density, so a size sweep
         # that holds area fixed measures density and calls it size. Scaling the side by sqrt(n/60)
         # keeps nodes per square kilometre constant and lets the two be separated.
@@ -2349,6 +2349,14 @@ def build_parser():
         type=int,
         default=5,
         help="the largest separation admin sessions are attempted at",
+    )
+    ap.add_argument(
+        "--noise-model",
+        default="thermal",
+        choices=["thermal", "fixed"],
+        help="thermal derives the noise floor from kTB + 6 dB NF for the preset's bandwidth, which "
+        "is what the vendored sensitivity table was calculated with; fixed keeps the vendored "
+        "single constant and reproduces runs made before this existed",
     )
     ap.add_argument(
         "--tx-power",
