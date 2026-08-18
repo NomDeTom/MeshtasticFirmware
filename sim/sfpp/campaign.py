@@ -28,6 +28,7 @@ import tempfile
 import time
 
 from . import autochart as AC
+from . import report as R
 from . import chain as CH
 from . import mesh as M
 from . import traffic as T
@@ -2270,9 +2271,21 @@ def main(argv=None):
         with open(opts.out, "w") as f:
             json.dump(reports if len(reports) > 1 else reports[0], f, indent=2)
         print(f"wrote {opts.out}")
+        # The statistics report is written by the run that produced the numbers, not left as a
+        # post-processing step: an unattended run has to leave a readable result behind on its own.
+        text = "\n\n".join(R.report_one(r) for r in reports)
+        text_path = os.path.join(
+            os.path.dirname(os.path.abspath(opts.out)),
+            "reports",
+            os.path.basename(opts.out).replace(".json", "") + ".txt",
+        )
+        os.makedirs(os.path.dirname(text_path), exist_ok=True)
+        with open(text_path, "w") as f:
+            f.write(text + "\n")
+        print(f"wrote {text_path}")
         if not opts.no_charts:
             # Rendered by the same call that produced the JSON, so a figure cannot lag a withdrawn
-            # number the way two of today's did.
+            # number.
             path = AC.auto(reports, opts.out, kind="run")
             if path:
                 print(f"wrote {path}")
