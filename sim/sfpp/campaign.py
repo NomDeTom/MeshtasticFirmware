@@ -1307,11 +1307,31 @@ class Campaign:
                 self.mesh.at(when, probe)
                 when += self.rng.expovariate(1.0 / mean_gap_ms)
 
+    def _start_util_sampling(self, interval_ms=30000.0):
+        """Every node's channel utilisation, on a cadence, for the run's own mean.
+
+        The firmware's ring holds sixty seconds, so it has to be read while traffic is still in it.
+        Half the window keeps every bucket represented without over-weighting a quiet stretch.
+        """
+        self._util_samples = [[] for _ in self.mesh.nodes]
+
+        def tick():
+            if self.mesh.now > self.duration_ms:
+                return
+            for index, node in enumerate(self.mesh.nodes):
+                self._util_samples[index].append(
+                    node.channel_utilization_percent(self.mesh.now)
+                )
+            self.mesh.at(self.mesh.now + interval_ms, tick)
+
+        self.mesh.at(interval_ms, tick)
+
     def run(self):
         started = time.time()
         self.generator.schedule(self.duration_ms)
         self._schedule_traceroutes()
         self.mesh.start_hop_scaling()
+        self._start_util_sampling()
         if getattr(self.opts, "trace_interval_s", 0):
             self.mesh.start_adaptive_trace(
                 interval_ms=self.opts.trace_interval_s * 1000.0,
@@ -1389,8 +1409,25 @@ class Campaign:
                 "observed_senders": T.observed_senders(self.mesh),
                 "text_objects": total,
                 "airtime_ms": round(self.mesh.stats["airtime_ms"], 1),
+                # Aggregate demand, NOT the firmware's ChannelUtilization: every node's transmit
+                # time summed and divided by elapsed time. One channel-second per second reads as
+                # 1.0, so a mesh asking for more than one radio can carry reads above it, and that
+                # is the useful signal rather than an error.
                 "channel_utilisation": round(
                     self.mesh.stats["airtime_ms"] / self.duration_ms, 3
+                ),
+                # AirTime::channelUtilizationPercent, per node, averaged over the run: six
+                # ten-second buckets charging every packet the node could hear above the CAD floor,
+                # decoded or not, plus its own transmissions. This is the number a real device
+                # reports and the one that sizes its contention window, and it cannot exceed 100.
+                # Sampled on a cadence rather than read at the end: the ring covers sixty seconds,
+                # so a single read after the last packet returns zero for every node.
+                "node_channel_util_percent": self._dist(
+                    [
+                        sum(samples) / len(samples)
+                        for samples in self._util_samples
+                        if samples
+                    ]
                 ),
                 "airtime_by_kind": {
                     str(k): round(v / 1000.0, 1)

@@ -529,7 +529,7 @@ def reception_table(name, arm, values, results):
     print(f"\n=== {name} - reception ===")
     header = (
         f"{arm:>18} | text p10   med   p90 | all  p10   med   p90 | "
-        f"util  none | txs     coll"
+        f"demand  node% | txs     coll"
     )
     print(header)
     print("-" * len(header))
@@ -559,6 +559,13 @@ def reception_table(name, arm, values, results):
             "all_median": dist("all", "median"),
             "all_p90": dist("all", "p90"),
             "channel_utilisation": traffic("channel_utilisation"),
+            "node_util_median": statistics.mean(
+                c["traffic"]["node_channel_util_percent"]["median"]
+                for c in cells
+                if "node_channel_util_percent" in c["traffic"]
+            )
+            if any("node_channel_util_percent" in c["traffic"] for c in cells)
+            else float("nan"),
             "nodes_receiving_none": statistics.mean(
                 c["by_class"]["text"]["nodes_receiving_none"] for c in cells
             ),
@@ -569,7 +576,7 @@ def reception_table(name, arm, values, results):
         print(
             f"{str(value):>18} | {row['text_p10']:9.3f} {row['text_median']:5.3f} {row['text_p90']:5.3f} | "
             f"{row['all_p10']:8.3f} {row['all_median']:5.3f} {row['all_p90']:5.3f} | "
-            f"{row['channel_utilisation']:5.2f} {row['nodes_receiving_none']:5.1f} | "
+            f"{row['channel_utilisation']:6.2f} {row['node_util_median']:5.1f}% | "
             f"{row['transmissions']:7.0f} {row['lost_to_collision']:8.0f}"
         )
     return rows
