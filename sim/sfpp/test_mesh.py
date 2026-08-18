@@ -2027,6 +2027,35 @@ print(",".join(failed))
         unknown = sorted({arm for arm, _, _ in BLOCKS.values()} - known)
         self.assertEqual(unknown, [], "sweep arms that no longer exist on the command line")
 
+    def test_the_runner_checks_for_a_block_by_exact_name(self):
+        """Seven block names are a prefix of another, so a glob skips the shorter one.
+
+        R-signing was skipped without running because R-signing-cost.json satisfied
+        `ls R-signing*.json`. The names are kept - they read well and the notes refer to them - so
+        the presence check has to be exact. run-blocks.sh never passes --grid, so a block always
+        writes exactly <name>.json and there is no suffix a glob would be needed for.
+        """
+        from .sweep import BLOCKS
+
+        pairs = [
+            (a, b) for a in BLOCKS for b in BLOCKS if a != b and b.startswith(a)
+        ]
+        self.assertTrue(pairs, "if no name shares a prefix, this guard has stopped guarding")
+
+        runner = (pathlib.Path(__file__).resolve().parents[1] / "run-blocks.sh").read_text()
+        self.assertNotIn(
+            '"$OUT_ROOT/$blk"*.json',
+            runner,
+            "the skip check must not glob: it would match a longer block's output",
+        )
+        self.assertNotIn(
+            '"$DIR/$blk"*.json',
+            runner,
+            "the status check must not glob either",
+        )
+        self.assertIn('[ -f "$OUT_ROOT/$blk.json" ]', runner)
+        self.assertIn('[ -f "$DIR/$blk.json" ]', runner)
+
     def test_every_block_cell_actually_differs_from_its_neighbours(self):
         """Two cells of one block must parse to different values for the arm they sweep.
 
