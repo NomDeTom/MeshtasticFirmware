@@ -193,6 +193,23 @@ thirds of rebroadcast attempts.
 | `--burst-loss` | 0.0     | chance a node is deaf for a whole window                                                                              |
 | `--burst-ms`   | 60000   | length of that window. A 60 s outage is nothing to a bucket that takes an hour to fill; 1800000 is the one that bites |
 
+**The ground under the mesh** (§5.1h). Terrain, land cover, and real node geometry. Without
+`--scenario` the world is flat and every figure below is inert, which is what every run before this
+assumed without saying so.
+
+| Flag                      | Default | Meaning                                                                                            |
+| ------------------------- | ------- | -------------------------------------------------------------------------------------------------- |
+| `--scenario`              | -       | `flat`, `rolling`, `ridge`, `valleys`, `coastal`, `alpine` put ground under a **generated** mesh; `batumi` is a **real** mesh over real ground and decides its own node count and roles; `map` cuts `--bbox` out of the public map |
+| `--bbox`                  | -       | `min_lat,min_lon,max_lat,max_lon`. Required by `--scenario map`                                     |
+| `--scenario-limit`        | -       | keep at most this many nodes from a `map` fetch                                                     |
+| `--no-terrain`            | off     | keep the scenario's geometry and flatten its ground. **The paired run that prices terrain on its own** |
+| `--no-clutter`            | off     | ignore the land-cover raster, keeping terrain                                                       |
+| `--no-link-calibration`   | off     | drop the fitted RSSI correction - a ridge fit over one city's observed links, so a run asking what the ground alone does should say so |
+| `--offline`               | off     | refuse network fetches for SRTM and OSM; use only what is cached                                    |
+
+`--stretch` is refused on a real-geometry scenario rather than ignored: moving Batumi's nodes apart
+makes it somewhere else, and the result would still be labelled `batumi`.
+
 **A noise floor that moves** (§5.1f). `--noise-model` sets the *static* floor; these vary it in time.
 
 | Flag                        | Default | Meaning                                                                                          |
