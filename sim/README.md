@@ -122,6 +122,7 @@ under `--grid` carries the grid in its filename, which is the usual reason one i
 | `--role-mix`             | empty            | named role census, e.g. `baymesh-2026-08`. Empty keeps `--router-fraction` and the other shares                       |
 | `--platform-mix`         | `uniform`        | board mix; decides each node's hot-store size. Inert unless `--max-num-nodes` is left unset          |
 | `--siting-mix`           | `uniform`        | where nodes physically are, as a per-node gain offset. **Assumed, not measured** - see §10          |
+| `--role-placement`       | `degree`         | where the router-like roles go: `degree` on the best-connected nodes as an operator would, `inverse` on the worst, `random` to separate the role from its usual siting |
 | `--favourite-routers`    | off              | router-like nodes favourite each other, so relays between them keep their hop limit                                   |
 
 ### 4.2 Hop limits
@@ -251,6 +252,44 @@ where `chain` over the same span stays in one piece at degree 10.6 with a diamet
 measured across a fragmented graph is the diameter of whichever fragment the walk started in.
 `link_stats()` reports `components`, `largest_component` and `connected`, and `diameter()` returns
 `None` rather than a misleading number when the mesh is not connected.
+
+### 5.1a Adversarial meshes
+
+Most named mixes describe a mesh somebody has. These describe one nobody would build on purpose, and
+exist to find the floor a design has to clear rather than to predict a deployment.
+
+| Knob | Value | What it removes |
+| --- | --- | --- |
+| `--role-mix no-mute` | 81% CLIENT, 16% CLIENT_BASE, 2% ROUTER, 1% ROUTER_LATE | **`CLIENT_MUTE` entirely.** A fifth of Baymesh does not rebroadcast at all; deleting that is the single cruellest realistic change to a role census |
+| `--role-mix all-routers` | every node ROUTER | the contention-window offset a client pays, and every rebroadcast delay with it |
+| `--role-placement inverse` | routers on the worst-connected nodes | the operator's judgement - this is what happens when someone flashes ROUTER onto the node they already own |
+| `--siting-mix basement-heavy` | 50% basement, 30% pocket, 20% desk | the assumption that nodes are somewhere sensible |
+| `--siting-mix worst-case` | 80% basement, 20% pocket | any node that can hear well. **Not a deployment** - a floor |
+
+Measured at 60 nodes, 8 km, seed 9, 6 h, against `baymesh-2026-08` with `uniform` siting:
+
+| Mesh | Degree | text p10 | median | p90 | node util | transmissions |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline | 9.2 | 0.587 | 0.751 | 0.836 | 26.2% | 22 564 |
+| no `CLIENT_MUTE` | 9.2 | **0.682** | 0.807 | 0.884 | 27.7% | 25 210 |
+| every node a ROUTER | 9.2 | 0.691 | 0.778 | 0.887 | **66.9%** | **58 142** |
+| routers on the worst nodes | 9.2 | 0.635 | 0.709 | 0.783 | 23.9% | 22 601 |
+| `local-typical` siting | 7.5 | 0.413 | 0.698 | 0.762 | 24.1% | 26 059 |
+| `basement-heavy` siting | **1.2** | **0.000** | 0.000 | 0.307 | 0.4% | 11 637 |
+
+Three things worth knowing before using these:
+
+- **Removing `CLIENT_MUTE` improves reception here**, it does not degrade it. More relays means more
+  copies, and at 26% channel utilisation this mesh can absorb them. It is adversarial for *airtime*,
+  and only becomes adversarial for delivery on a mesh already near saturation. The same is true of
+  `all-routers`: nearly the same reception as `no-mute` for 2.6x the transmissions and 67% node
+  utilisation.
+- **`inverse` levels rather than lowers**: p10 rises to 0.635 while p90 falls to 0.783. A router on
+  a fringe node helps the fringe and stops helping the core. Adversarial for the well-connected.
+- **`basement-heavy` does not stress the mesh, it kills it.** Siting gain applies at both ends of a
+  link, so two basement nodes are 40 dB down and degree collapses to 1.2. Nothing is delivered
+  because there is no mesh left. Use `local-typical` for a hard-but-alive mesh; `worst-case` is a
+  connectivity floor, not a traffic experiment.
 
 ### 5.2 Archive placement - `--place`
 
