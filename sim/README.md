@@ -370,6 +370,47 @@ costs, and CR8 then makes it slightly longer. Worth knowing before reading the b
 Also: **SF5 and SF6 need an SX126x or SX128x.** An SX127x cannot do them at all, so
 `EXTRA_SHORT_TURBO` is not a setting every board could take even if the firmware offered it.
 
+### 5.1d The noise floor, and why there were no marginal links
+
+Two questions worth answering together, because one bug caused both.
+
+**Does wider bandwidth model more noise?** Under `--noise-model fixed`, no. Thermal noise is kTB, so
+doubling the bandwidth costs 3 dB, and a single constant cannot be right for 62.5 kHz and 500 kHz at
+once. The vendored constant is anchored near 100 kHz.
+
+**Does the model work down to the demodulator limits?** The PER curve does - its p50 sits at −17.0 dB
+(CR5) to −19.4 (CR8), which is exactly where LoRa stops working, and it is floored at 2% and capped
+at 99.5%. But under a fixed floor the simulation never visits that region.
+
+| Preset | BW | Sensitivity | SNR the model computes | True kTB+6 SNR | LoRa limit |
+| --- | --- | --- | --- | --- | --- |
+| `VERY_LONG_SLOW` | 62.5k | −140.0 | −20.75 | **−20.0** | −20.0 |
+| `LONG_FAST` | 250k | −131.5 | −12.25 | **−17.5** | −17.5 |
+| `LONG_TURBO` | 500k | −128.5 | −9.25 | **−17.5** | −17.5 |
+| `SHORT_TURBO` | 500k | −118.5 | +0.75 | **−7.5** | −7.5 |
+
+The vendored sensitivity table is internally consistent and correct - every "true" column lands on
+the demodulator limit. It is the fixed noise floor that disagrees with it.
+
+**This is why there was no marginal link.** With a fixed floor, a LONG_FAST link at sensitivity
+computes SNR −12.25 dB and decodes 96% of the time - 5 dB into the flat top of the PER curve. With a
+thermal floor it computes −17.5 dB and decodes **39%**. The threshold lands on the curve's knee
+instead of past it, which is where links that work a third of the time come from.
+
+| Preset | success at sensitivity, `fixed` | `thermal` |
+| --- | --- | --- |
+| `LONG_FAST` | 0.964 | **0.388** |
+| `LONG_TURBO` | 0.995 | **0.386** |
+| `EXTRA_LONG_TURBO` | 0.974 | **0.095** |
+| `VERY_LONG_SLOW` | 0.058 | 0.097 |
+
+The link *graph* is unchanged either way - `neighbours` is thresholded on RSSI against sensitivity
+and never consults the noise floor - so degree, diameter and the margin bands are identical. Only
+delivery changes.
+
+**Everything measured before this defaulted to `fixed`**, including all of round five, and is
+optimistic about weak-link delivery by the margin above. The turbo presets are the worst affected.
+
 ### 5.2 Archive placement - `--place`
 
 | Value               | Where the archives go                                                   |
@@ -576,6 +617,7 @@ the mechanism is not modelled at all and any question about it has no answer her
 | ------------------------------ | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | **Siting gain** (`--siting-mix`) | roof +6, desk 0, pocket −10, basement −20 dB   | **Not from the firmware and not measured.** The firmware has no concept of siting at all. 26 dB between roof and basement is wide enough to move any result. The default `uniform` is all-desk, i.e. 0 dB, so a run that does not set this flag is unaffected |
 | Link asymmetry                 | per-node transmit and receive gain, plus a per-pair Gaussian σ 2 dB | `rssi[i][j]` takes `tx_gain[i] + rx_gain[j]`, so an amplified node is heard where it cannot hear. Siting moves both directions together (a basement is bad to transmit from and to receive in); amplification does not. The amplifier figures are **assumed, not measured** - the firmware knows `tx_power` and nothing about what is bolted to the antenna port |
+| **Noise floor** (`--noise-model`) | `thermal`: kTB + 6 dB NF for the preset's bandwidth. `fixed`: the vendored single constant | The vendored `NOISE_LEVEL` is one number, −119.25 dBm, for every preset - but the sensitivity table beside it is not. Those figures are kTB + 6 dB NF, and each lands **exactly** on its spreading factor's demodulator limit (SF7 −7.5 dB, SF11 −17.5, SF12 −20.0). A fixed floor therefore misstates SNR by 10·log₁₀(bw/anchor): roughly **5 dB optimistic at 250 kHz and 8 dB at 500 kHz.** `thermal` is the default; `fixed` reproduces runs made before this existed |
 | **No marginal link** - but delivery *is* probabilistic | every reception draws against `payload_success_probability(rssi, cr, length)`; only pairs above sensitivity are ever attempted | The draw is real and the coding rate reaches it, so a retransmission at a higher CR genuinely is more likely to land. What is missing is the *range*: `neighbours` is thresholded at sensitivity, where the vendored curve already sits at 96%, and it saturates at 99.5% by +3 dB of margin. So the whole probabilistic band is 0.96-0.995, and **a link that works a third of the time cannot exist here at all**. Consequences worth knowing: PHY loss is around 0.7% of reception attempts against 28% to collisions, so contention dominates weak links by a factor of ~56; and raising the coding rate from 5 to 8 buys +0.030 at zero margin, +0.004 at +2 dB and **exactly nothing at +3 dB or more**, which bounds what any CR-ladder result can show. `link_quality.fragile` (margin under 5 dB) and `near_miss` (within 6 dB below sensitivity) size what the threshold hides: 207 against 342 on a stock 60-node mesh. Letting sub-sensitivity pairs deliver probabilistically is the fix, and it is a change to the vendored physics |
 | Path loss                      | 3GPP Suburban Macro (`MODEL = 5`)                | one propagation environment for every run. No terrain, no clutter, no per-link environment                                         |
 | Diurnal shape                  | `commuter`, 17:1 peak-to-trough                  | invented, not measured. It sets when the mesh is busy, which the whole congestion story rests on                                    |

@@ -1818,7 +1818,20 @@ EXTRA_PRESETS = {
 }
 
 
-def make_config(preset="LONG_FAST", model=5, phy_loss=True, tx_power=None):
+# Boltzmann thermal noise in a bandwidth, at 290 K, plus a receiver noise figure. -174 dBm/Hz is
+# kT at room temperature; 6 dB is the NF the vendored sensitivity table was calculated with.
+THERMAL_NOISE_DBM_PER_HZ = -174.0
+RECEIVER_NOISE_FIGURE_DB = 6.0
+
+
+def thermal_noise_floor(bw_hz, noise_figure_db=RECEIVER_NOISE_FIGURE_DB):
+    """kTB + NF for one bandwidth. Doubling the bandwidth costs 3 dB."""
+    return THERMAL_NOISE_DBM_PER_HZ + 10.0 * math.log10(bw_hz) + noise_figure_db
+
+
+def make_config(
+    preset="LONG_FAST", model=5, phy_loss=True, tx_power=None, noise_model="thermal"
+):
     from lib.config import Config
 
     conf = Config()
@@ -1827,6 +1840,20 @@ def make_config(preset="LONG_FAST", model=5, phy_loss=True, tx_power=None):
     conf.MODEM_PRESET = preset
     conf.MODEL = model
     conf.PHY_LOSS_MODEL_ENABLED = phy_loss
+    # The vendored NOISE_LEVEL is one constant for every preset, and the sensitivity table it sits
+    # beside is not: those figures are kTB + 6 dB NF, and each one lands exactly on its spreading
+    # factor's demodulator limit (SF7 -7.5 dB, SF11 -17.5, SF12 -20.0). A fixed floor therefore
+    # misstates SNR by 10log10(bw/anchor) - about 5 dB optimistic at 250 kHz and 8 at 500 kHz.
+    #
+    # It matters more than a few dB sounds, because the PER curve's p50 sits at -17.0 dB (CR5) to
+    # -19.4 (CR8), right on those demodulator limits. Under the fixed floor a LONG_FAST link at
+    # sensitivity computes SNR -12.25 and decodes 96% of the time; under a thermal floor it computes
+    # -17.5 and decodes 39%. The fixed floor is why this model has no marginal link: it puts every
+    # link the graph will use 5 dB into the flat top of the curve.
+    if noise_model == "thermal":
+        conf.NOISE_LEVEL = thermal_noise_floor(conf.current_preset["bw"])
+    elif noise_model != "fixed":
+        raise ValueError(f"unknown noise model {noise_model!r}")
     if tx_power is not None:
         # The region's power limit is the ceiling an operator may use, not one they must. Turning it
         # down while leaving the geometry alone asks what the mesh costs when everyone is polite.
