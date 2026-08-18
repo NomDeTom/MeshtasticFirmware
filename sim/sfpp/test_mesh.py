@@ -1987,6 +1987,56 @@ class ToolingContract(unittest.TestCase):
         unknown = sorted({arm for arm, _, _ in BLOCKS.values()} - known)
         self.assertEqual(unknown, [], "sweep arms that no longer exist on the command line")
 
+    def test_every_command_line_flag_is_documented(self):
+        """The README is the operating manual, so a flag it does not name cannot be found.
+
+        Eleven flags had accumulated undocumented, and two profiles the parser no longer accepts
+        were still described. Both directions are checked because both drifted.
+        """
+        import re
+
+        from .campaign import build_parser
+
+        readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+        flags = set()
+        for action in build_parser()._actions:
+            flags.update(opt for opt in action.option_strings if opt.startswith("--"))
+        flags.discard("--help")
+        undocumented = sorted(f for f in flags if f not in readme)
+        self.assertEqual(undocumented, [], "flags the README does not mention")
+
+        # And the other way: a flag the README names in backticks must still exist. `--runs` and
+        # `--out` belong to the analysis tools rather than to campaign, so they are exempt.
+        named = set(re.findall(r"`(--[a-z0-9][a-z0-9-]+)", readme))
+        ghosts = sorted(named - flags - {"--runs", "--status", "--list", "--block", "--seeds",
+                                         "--seed-base", "--grid", "--run"})
+        self.assertEqual(ghosts, [], "flags the README documents that the parser does not accept")
+
+    def test_every_report_section_is_documented(self):
+        """A section nobody documents is a section nobody reads, however carefully it is computed."""
+        readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+        for section in ("mesh", "traffic", "by_class", "by_hop_limit", "hops_away",
+                        "hop_scaling", "adaptive", "baseline", "designated", "observers",
+                        "sfpp", "opts"):
+            self.assertIn(f"`{section}`", readme, f"report section {section} is undocumented")
+
+    def test_the_named_profiles_are_the_ones_the_parser_takes(self):
+        """The README described two profiles that had been removed, and named none of the five."""
+        from .campaign import build_parser
+
+        readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md").read_text()
+        choices = None
+        for action in build_parser()._actions:
+            if "--profile" in action.option_strings:
+                choices = set(action.choices)
+        self.assertEqual(choices, set(M.VERSIONS) | {"legacy"})
+        # Backticked, because "pre-fold-in" survives as an ordinary adjective for the transport
+        # that `legacy` models; what must not survive is either name offered as a --profile value.
+        for retired in ("`2.5-approx`", "`pre-fold-in`"):
+            self.assertNotIn(retired, readme, f"{retired} is no longer a profile")
+        for live in sorted(choices):
+            self.assertIn(f"`{live}`", readme, f"profile {live} is undocumented")
+
 
 class Siting(unittest.TestCase):
     """Where a node physically is, as a gain offset on every link it takes part in."""
