@@ -77,11 +77,9 @@ class TextObject:
 # the configured rate whichever shape is chosen - a diurnal curve should move *when* traffic happens,
 # not how much of it there is, or the shapes would not be comparable.
 #
-# `commuter` is the two-peak human pattern: a morning bump, a lull, a larger evening peak, and a deep
-# overnight trough. `sinusoid` is the naive single-peak version, kept because it is what most models
-# reach for and it is worth being able to show the difference. Measured hourly weights from a real
-# packet feed would replace `commuter`, which is a shape drawn from how people behave rather than from
-# data - see the plan's stretch goal.
+# `commuter` is the two-peak human pattern: a morning bump, a lull, a larger evening peak and a deep
+# overnight trough. `sinusoid` is the single-peak version, kept for comparison. Both are drawn from
+# how people behave rather than from a measured feed.
 DIURNAL = {
     "flat": [1.0] * 24,
     "sinusoid": [
@@ -121,18 +119,53 @@ def diurnal_weight(shape, hour_of_day):
     return weights[int(hour_of_day) % 24] / (sum(weights) / 24.0)
 
 
-def congestion_coefficient(node_count, sf, bw_hz, event_mode=False):
-    """The firmware's own broadcast-interval scaling, from Default.h:106.
+# Default.h congestionScalingCoefficient, 2.5 and 2.6: the per-node throttle depends on the modem
+# preset, and the two shortest presets switch it off entirely rather than throttling at all.
+PRESET_THROTTLING_FACTOR = {
+    "MEDIUM_SLOW": 0.04,
+    "MEDIUM_FAST": 0.02,
+    "SHORT_SLOW": 0.01,
+    "SHORT_FAST": None,
+    "SHORT_TURBO": None,
+}
+PRESET_THROTTLING_DEFAULT = 0.075
 
-    At or below 40 nodes it is 1.0. Above that, every extra node lengthens device-originated
-    broadcast intervals by 2^SF / (BW_kHz * 100) - which on LONG_FAST is 0.08192 per node, so a
-    150-node mesh stretches its intervals by a factor of ten. A size sweep that ignores this models
-    a mesh nobody running 2.8 would actually have.
+# 2.5 through v2.7.16 shorten intervals on a small mesh instead of leaving them alone. Removed in
+# v2.7.17, so the 2.7 profile - which is v2.7.21 - does not have it.
+SMALL_MESH_SPEEDUP = ((10, 0.6), (20, 0.7), (30, 0.8))
+
+
+def congestion_coefficient(
+    node_count, sf, bw_hz, event_mode=False, model="sf_bw", preset="LONG_FAST"
+):
+    """The firmware's own broadcast-interval scaling, Default.h congestionScalingCoefficient.
+
+    A multiplier on every periodic broadcast interval. Three models, one per era:
+
+    - `flat` (2.4): 1.0 to 40 nodes, then 0.075 per extra node whatever the preset.
+    - `preset` (2.5, 2.6): a per-preset factor, no throttle at all on SHORT_FAST or SHORT_TURBO, and
+      a coefficient *below* 1.0 up to 30 nodes - a small mesh is deliberately made chattier.
+    - `sf_bw` (2.7, 2.8): 2^SF / (BW_kHz * divisor), which on LONG_FAST is 0.08192 per node, so a
+      150-node mesh stretches its intervals by a factor of ten. The divisor is 100, or 25 in event
+      mode.
     """
+    if model == "preset":
+        for bound, coefficient in SMALL_MESH_SPEEDUP:
+            if node_count <= bound:
+                return coefficient
     if node_count <= 40:
         return 1.0
-    divisor = 25.0 if event_mode else 100.0
-    throttling_factor = (2.0**sf) / ((bw_hz / 1000.0) * divisor)
+    if model == "flat":
+        throttling_factor = PRESET_THROTTLING_DEFAULT
+    elif model == "preset":
+        throttling_factor = PRESET_THROTTLING_FACTOR.get(
+            preset, PRESET_THROTTLING_DEFAULT
+        )
+        if throttling_factor is None:
+            return 1.0
+    else:
+        divisor = 25.0 if event_mode else 100.0
+        throttling_factor = (2.0**sf) / ((bw_hz / 1000.0) * divisor)
     return 1.0 + (node_count - 40) * throttling_factor
 
 
@@ -166,6 +199,7 @@ class Generator:
         mix=DEFAULT_MIX,
         text_scale=1.0,
         congestion_scaling=True,
+        congestion_mode="adaptive",
         position_throttle=1,
         telemetry_throttle=1,
         online_cap=120,
@@ -181,13 +215,37 @@ class Generator:
         self.text_scale = text_scale
         preset = mesh.conf.current_preset
         # Device-originated broadcasts stretch with mesh size; user-typed text does not, because
-        # nothing in the firmware throttles a person deciding to send a message.
+        # nothing in the firmware throttles a person deciding to send a message. Which era's
+        # throttle applies comes from the mesh's own default profile, so a 2.5 mesh gets the
+        # per-preset table and its small-mesh speedup rather than 2.8's SF/BW curve.
+        #
+        # `adaptive` recomputes the coefficient per node from that node's own online count at the
+        # moment it would send, which is what Default::getConfiguredOrDefaultMsScaled does on every
+        # interval. `static` computes one mesh-wide coefficient up front - what this generator used
+        # to do, and what earlier runs were measured under.
+        profile = mesh.nodes[0].profile if mesh.nodes else None
+        self.congestion_mode = congestion_mode if congestion_scaling else "off"
+        self.congestion_model = (
+            profile.congestion_model if profile is not None else "sf_bw"
+        )
+        self.preset_name = getattr(mesh.conf, "MODEM_PRESET", "LONG_FAST")
+        self.sf = preset["sf"]
+        self.bw = preset["bw"]
+        self.online_cap = online_cap
         # Which quantity drives the throttle. `hotstore` is what the firmware does and is bounded by
         # MAX_NUM_NODES, so it saturates on a mesh larger than the store - the pathology round four
         # exists to price. `truesize` is the unbounded ideal, the upper bound on what a corrected
         # input could buy. `utilisation` scales on measured channel busy-ness instead of a node count,
         # which is what the throttle actually cares about and cannot be bounded by memory.
         self.congestion_input = congestion_input
+        # The coefficient falls below 1 on the 2.5 and 2.6 models, which speed a small mesh up.
+        # Thinning needs a candidate rate at least as high as anything later selected from it, so
+        # candidates are generated against the most permissive coefficient the model can produce.
+        self.congestion_floor = (
+            min(c for _, c in SMALL_MESH_SPEEDUP)
+            if self.congestion_model == "preset"
+            else 1.0
+        )
         self.congestion = (
             # getNumOnlineMeshNodes() iterates the hot store, so a node cannot count mesh members it
             # has evicted. The coefficient is bounded by MAX_NUM_NODES, not by mesh size.
@@ -197,8 +255,10 @@ class Generator:
                     if congestion_input == "truesize"
                     else min(len(mesh.nodes), online_cap)
                 ),
-                preset["sf"],
-                preset["bw"],
+                self.sf,
+                self.bw,
+                model=self.congestion_model,
+                preset=self.preset_name,
             )
             if congestion_scaling
             else 1.0
@@ -234,6 +294,26 @@ class Generator:
             chosen = rng.sample(range(node_count), count)
             self.emitters[cls.name] = set(chosen)
 
+    def node_congestion(self, node_index):
+        """The coefficient this node would apply right now, from its own view of the mesh.
+
+        getNumOnlineMeshNodes() walks the hot store, so the input is bounded twice: by the store,
+        which cannot hold more than MAX_NUM_NODES, and by the two-hour NUM_ONLINE_SECS window. The
+        node counts itself, as the firmware does by iterating a table that contains its own record.
+        """
+        if self.congestion_mode != "adaptive":
+            return self.congestion
+        node = self.mesh.nodes[node_index]
+        online = min(node.num_online(self.mesh.now) + 1, self.online_cap)
+        return congestion_coefficient(
+            online,
+            self.sf,
+            self.bw,
+            model=node.profile.congestion_model,
+            preset=self.preset_name,
+            event_mode=node.profile.event_relay_hop_limit is not None,
+        )
+
     def _size(self, cls):
         return max(8, int(self.rng.gauss(cls.mean_bytes, cls.sigma_bytes)))
 
@@ -251,9 +331,19 @@ class Generator:
                     if self.broadcast_interval_s
                     else cls.per_hour
                 )
-                rate = base / self.congestion / self.throttle.get(cls.name, 1)
+                # Under `adaptive` the coefficient is not known until the moment of sending, so
+                # candidates are laid down at the most permissive rate the model allows and thinned
+                # at emit time against each node's own view. Under `static` the coefficient is a
+                # constant and divides the rate directly.
+                rate = base / self.throttle.get(cls.name, 1)
+                rate = (
+                    rate / self.congestion_floor
+                    if self.congestion_mode == "adaptive"
+                    else rate / self.congestion
+                )
             if rate <= 0:
                 continue
+            adaptive = self.congestion_mode == "adaptive" and not cls.archived
             diurnal = self.diurnal != "flat" and cls.name in self.diurnal_classes
             peak = (
                 max(DIURNAL[self.diurnal]) / (sum(DIURNAL[self.diurnal]) / 24.0)
@@ -267,21 +357,24 @@ class Generator:
             for node in self.emitters[cls.name]:
                 t = self.rng.expovariate(1.0 / mean_gap_ms)
                 while t < duration_ms:
-                    if not diurnal:
-                        self._schedule_one(node, cls, t)
-                    else:
+                    keep = True
+                    if diurnal:
                         hour = (self.start_hour + t / 3600_000.0) % 24
-                        if (
-                            self.rng.random()
-                            < diurnal_weight(self.diurnal, hour) / peak
-                        ):
-                            self._schedule_one(node, cls, t)
+                        keep = self.rng.random() < diurnal_weight(self.diurnal, hour) / peak
+                    if keep:
+                        self._schedule_one(node, cls, t, adaptive=adaptive)
                     t += self.rng.expovariate(1.0 / mean_gap_ms)
 
-    def _schedule_one(self, node, cls, when):
+    def _schedule_one(self, node, cls, when, adaptive=False):
         size = self._size(cls)
 
         def emit(node=node, cls=cls, size=size):
+            if adaptive:
+                # Thinning against the node's live coefficient: a candidate survives with
+                # probability floor/coefficient, so a node whose store says the mesh is large sends
+                # proportionally less often, and one on a small 2.5 mesh sends more often.
+                if self.rng.random() > self.congestion_floor / self.node_congestion(node):
+                    return
             if cls.archived:
                 packet = self.mesh.originate(
                     node, cls.portnum, size, kind=cls.name, payload=None

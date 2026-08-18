@@ -2,8 +2,8 @@
 
 The graph algorithms are checked against hand-drawn graphs with unambiguous answers rather than
 against the simulator's own output, for the same reason as test_mesh: a finder that agrees with
-itself proves nothing. Both bugs these caught were real - `partition` left inbound-only links
-intact on an asymmetric graph, and coverage read above 100% after a split.
+itself proves nothing. The cases cover an asymmetric graph, where `partition` must cut inbound-only
+links too, and coverage after a split, which must not exceed 100%.
 
 Run from `sim/`:  python3 -m unittest sfpp.test_knowledge -v
 """
