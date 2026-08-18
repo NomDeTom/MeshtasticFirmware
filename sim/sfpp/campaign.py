@@ -1579,6 +1579,9 @@ class Campaign:
                 "diameter": self.mesh.diameter(),
             },
             "link_quality": self.mesh.link_quality(),
+            # Null when the preset and node count are a combination a real mesh is in. A note, not a
+            # guard, so an out-of-range number cannot be quoted later as though it came from one.
+            "outside_deployed_range": M.preset_realism(self.opts.preset, self.opts.nodes),
             # Only where a stretch was asked for: the census is against the unstretched link set, so
             # at stretch 1.0 it is all zeros by construction and says nothing.
             "stretch": (

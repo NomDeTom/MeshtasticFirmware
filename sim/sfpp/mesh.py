@@ -2099,6 +2099,47 @@ def thermal_noise_floor(bw_hz, noise_figure_db=RECEIVER_NOISE_FIGURE_DB):
     return THERMAL_NOISE_DBM_PER_HZ + 10.0 * math.log10(bw_hz) + noise_figure_db
 
 
+# The presets deployed meshes actually run. LONG_FAST is the default and the middle of the range.
+# Anything slower than LONG_MODERATE is used, but not on a mesh of any size: at 21 s for a full
+# LONG_SLOW payload a few nodes exhaust the airtime budget between them, and the periodic-interference
+# profile shows LONG_MODERATE already losing every full payload to a 10 s interferer.
+DEPLOYED_PRESETS = (
+    "SHORT_TURBO",
+    "SHORT_FAST",
+    "SHORT_SLOW",
+    "MEDIUM_TURBO",
+    "MEDIUM_FAST",
+    "MEDIUM_SLOW",
+    "LONG_TURBO",
+    "LITE_FAST",
+    "LITE_SLOW",
+    "NARROW_FAST",
+    "NARROW_SLOW",
+    "LONG_FAST",
+    "LONG_MODERATE",
+)
+
+# Above this node count, the slow presets stop being a choice anyone makes.
+DEPLOYED_SIZE_LIMIT = 30
+
+
+def preset_realism(preset, nodes):
+    """Is this preset and node count a combination a real mesh would be in? None if it is.
+
+    Not a guard and not an error - a run is free to ask about anything. It is a line in the report, so
+    a number that came out of a mesh nobody runs cannot be quoted later as though it came out of one.
+    """
+    if preset in DEPLOYED_PRESETS:
+        return None
+    if nodes > DEPLOYED_SIZE_LIMIT:
+        return (
+            f"{preset} is slower than LONG_MODERATE and this mesh has {nodes} nodes. No mesh "
+            f"above ~{DEPLOYED_SIZE_LIMIT} nodes runs a preset this slow; treat the result as a "
+            f"question about the preset, not as evidence about a mesh of this size."
+        )
+    return f"{preset} is outside the range deployed meshes run (SHORT_FAST to LONG_MODERATE)."
+
+
 # The LoRa demodulator's SNR limit by spreading factor: -7.5 dB at SF7 and 2.5 dB per step down.
 DEMOD_SNR_LIMIT_DB = {
     5: -2.5,
