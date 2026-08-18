@@ -1608,6 +1608,10 @@ class Campaign:
                 "diameter": self.mesh.diameter(),
             },
             "link_quality": self.mesh.link_quality(),
+            # The ground this result was computed over, and what each loss term cost. Null on a flat
+            # run, which is the honest label for one: every figure here rests on the geometry, so a
+            # JSON that does not say which geometry cannot be compared with one that does.
+            "ground": self._ground_report(),
             # Null when the preset and node count are a combination a real mesh is in. A note, not a
             # guard, so an out-of-range number cannot be quoted later as though it came from one.
             "outside_deployed_range": M.preset_realism(self.opts.preset, self.opts.nodes),
@@ -1986,6 +1990,33 @@ class Campaign:
                 "per_node_reception": self._dist(shares),
                 "nodes_receiving_none": sum(1 for c in per_node if c == 0),
                 "archived": False,
+            }
+        return out
+
+    def _ground_report(self):
+        """What the run stood on, and what each loss term cost per pair.
+
+        Null without a scenario rather than a dict of zeros: a flat run and a run over ground whose
+        terrain happened to cost nothing are different claims, and a reader comparing two JSONs has
+        to be able to tell them apart. The three terms are reported separately for the same reason
+        they are computed separately - `terrain_db` is a public elevation model, `clutter_db` is a
+        land-cover raster, and on a real city the second is usually the larger of the two.
+        """
+        if self.scenario is None:
+            return None
+        out = dict(self.scenario.summary())
+        out["terrain_applied"] = self.terrain is not None
+        out["clutter_applied"] = bool(getattr(self.conf, "CLUTTER_ENABLED", False))
+        out["link_calibration_applied"] = bool(
+            getattr(self.conf, "LINK_CALIBRATION_MODEL_ENABLED", False)
+        )
+        terms = getattr(self.mesh, "loss_terms", None)
+        if terms and terms.get("pairs"):
+            pairs = terms["pairs"]
+            out["mean_loss_db"] = {
+                "terrain": round(terms["terrain_db"] / pairs, 3),
+                "clutter": round(terms["clutter_db"] / pairs, 3),
+                "pairs": pairs,
             }
         return out
 
