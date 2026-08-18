@@ -374,6 +374,8 @@ class Campaign:
             platform_mix=getattr(opts, "platform_mix", "uniform"),
             siting_mix=getattr(opts, "siting_mix", "uniform"),
             role_placement=getattr(opts, "role_placement", "degree"),
+            amplifier_mix=getattr(opts, "amplifier_mix", "none"),
+            amplify_worst=getattr(opts, "amplify_worst", 0.0),
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(
@@ -1396,6 +1398,7 @@ class Campaign:
                 "topology": getattr(self.mesh, "topology", "uniform"),
                 "diameter": self.mesh.diameter(),
             },
+            "link_quality": self.mesh.link_quality(),
             "by_class": self._class_report(),
             "by_hop_limit": self._hop_report(),
             "hops_away": self._hops_away_report(),
@@ -2183,6 +2186,21 @@ def build_parser():
         help="where the router-like roles go. degree puts them on the best-connected nodes, as an "
         "operator would; inverse puts them on the worst, which is what happens when someone flashes "
         "ROUTER onto the node they already own; random separates the role from its usual siting",
+    )
+    ap.add_argument(
+        "--amplifier-mix",
+        default="none",
+        choices=sorted(set(M.AMPLIFIERS) | set(M.AMPLIFIER_MIXES)),
+        help="power amplifiers, as separate transmit and receive gain: a PA gives 8-15 dB out and "
+        "leaves the receive path unchanged or worse. Not from the firmware and not measured",
+    )
+    ap.add_argument(
+        "--amplify-worst",
+        type=float,
+        default=0.0,
+        help="fit a high amplifier to this share of the worst-connected nodes, after the links are "
+        "built. The field pathology: the node nobody can hear gets a PA, and is then heard by "
+        "everyone while still hearing almost nobody",
     )
     ap.add_argument("--position-throttle", type=int, default=1)
     ap.add_argument("--telemetry-throttle", type=int, default=1)

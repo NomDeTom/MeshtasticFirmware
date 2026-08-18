@@ -1972,6 +1972,47 @@ class TracerouteLegs(unittest.TestCase):
         self.assertEqual(reply.length, expected)
 
 
+class AsymmetricGain(unittest.TestCase):
+    """Transmit and receive gain are separate numbers, so a link can run one way.
+
+    `neighbours[i]` is i's *audience* - the nodes that clear sensitivity on a transmission from i -
+    because _deliver walks it from the sending node. So transmit gain grows `neighbours[i]`, and
+    receive gain grows the set of j whose audience contains i.
+    """
+
+    @staticmethod
+    def _audience(mesh, i):
+        return len(mesh.neighbours[i])
+
+    @staticmethod
+    def _hears(mesh, i):
+        return sum(1 for j in range(len(mesh.nodes)) if j != i and i in mesh.neighbours[j])
+
+    def test_an_amplifier_is_heard_where_it_cannot_hear(self):
+        mesh = small_mesh(nodes=30, seed=7, area=6000.0)
+        mesh.tx_gain[0] += 15.0
+        mesh.rx_gain[0] += -3.0
+        mesh._build_links()
+        self.assertGreater(
+            self._audience(mesh, 0),
+            self._hears(mesh, 0),
+            "a PA is heard by more nodes than it can hear",
+        )
+
+    def test_one_way_links_rise_with_a_transmit_only_gain(self):
+        """Some links are already one-way from the per-pair skew; a PA makes many more."""
+        mesh = small_mesh(nodes=30, seed=7, area=6000.0)
+        before = mesh.link_quality()["one_way_links"]
+        mesh.tx_gain[0] += 15.0
+        mesh._build_links()
+        self.assertGreater(mesh.link_quality()["one_way_links"], before)
+
+    def test_siting_still_moves_both_directions(self):
+        """A basement is a bad place to transmit from and to receive in; only a PA is one-sided."""
+        mesh = small_mesh(nodes=20, seed=7, siting_mix="basement")
+        self.assertEqual(mesh.tx_gain, mesh.rx_gain)
+
+
 class ToolingContract(unittest.TestCase):
     """Things that break a run without failing a test, unless something checks them."""
 
