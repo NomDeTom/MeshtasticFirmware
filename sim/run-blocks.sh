@@ -95,6 +95,30 @@ echo "transport $PIN, tests pass ($(tail -1 "$OUT_ROOT/.tests.log"))"
 # Blocks arrive as positional arguments, NOT as an exported array: bash silently accepts
 # `BLOCKS=(a b) runner` as a command prefix but assigns the literal string "(a b)", so every
 # launch queued one block named after the whole list and died on a KeyError in one second.
+# Land each block as it finishes, rather than at the end.
+#
+# The runner is detached but the machine it runs on need not outlive it: a previous attempt left
+# three runner.logs holding a "started" line and nothing else, twenty-two blocks lost, because the
+# host went away mid-run. A block that is committed and pushed costs nothing if that happens again;
+# the most that can be lost is the block in flight. Concurrent runners share a branch, so pull
+# --rebase before pushing and retry rather than treating a race as failure.
+persist() {
+	local blk=$1 attempt
+	[ -n "${RESULTS_REPO:-}" ] || return 0
+	git -C "$RESULTS_REPO" add -A "$OUT_ROOT" >/dev/null 2>&1 || return 0
+	git -C "$RESULTS_REPO" diff --cached --quiet && return 0
+	git -C "$RESULTS_REPO" commit -q -m "runs: $blk on transport $PIN, seed base $SEED_BASE" || return 0
+	for attempt in 1 2 3 4 5; do
+		git -C "$RESULTS_REPO" pull --rebase -q origin "$RESULTS_BRANCH" >/dev/null 2>&1
+		if git -C "$RESULTS_REPO" push -q origin "HEAD:$RESULTS_BRANCH" >/dev/null 2>&1; then
+			echo "pushed $blk"
+			return 0
+		fi
+		sleep $((attempt * 4))
+	done
+	echo "WARNING: $blk committed but not pushed after 5 attempts"
+}
+
 runner() {
 	echo $$ >"$LOCK"
 	{
@@ -109,6 +133,7 @@ runner() {
 			python3 -u -m sfpp.sweep --block "$blk" --seeds 3 --seed-base "$SEED_BASE" \
 				--out "$OUT_ROOT" 2>&1
 			printf -- "--- %s finished rc=%s %s ---\n" "$blk" "$?" "$(date -Is)"
+			persist "$blk"
 		done
 		echo "all blocks attempted $(date -Is)"
 		python3 -m sfpp.tuning --runs "$OUT_ROOT" --markdown \
@@ -117,8 +142,17 @@ runner() {
 	rm -f "$LOCK"
 }
 
-setsid bash -c "$(declare -f runner); export OUT_ROOT=${OUT_ROOT@Q} LOCK=${LOCK@Q} \
-  PIN=${PIN@Q} SEED_BASE=${SEED_BASE@Q}; runner ${BLOCKS[*]@Q}" </dev/null >/dev/null 2>&1 &
+# RESULTS_REPO, if set, is a git checkout containing OUT_ROOT; each finished block is committed and
+# pushed to RESULTS_BRANCH there. Unset means results stay on disk only.
+RESULTS_REPO=${RESULTS_REPO:-}
+RESULTS_BRANCH=${RESULTS_BRANCH:-$(git -C "${RESULTS_REPO:-.}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}
+if [ -n "$RESULTS_REPO" ]; then
+	echo "results land in $RESULTS_REPO on $RESULTS_BRANCH, one commit per block"
+fi
+
+setsid bash -c "$(declare -f runner persist); export OUT_ROOT=${OUT_ROOT@Q} LOCK=${LOCK@Q} \
+  PIN=${PIN@Q} SEED_BASE=${SEED_BASE@Q} RESULTS_REPO=${RESULTS_REPO@Q} \
+  RESULTS_BRANCH=${RESULTS_BRANCH@Q}; runner ${BLOCKS[*]@Q}" </dev/null >/dev/null 2>&1 &
 disown
 sleep 1
 echo "detached runner started; ${#BLOCKS[@]} blocks queued"
