@@ -1726,6 +1726,170 @@ def place(topology, count, area, rng, min_dist=300.0):
     return TOPOLOGIES[topology](count, area, rng, min_dist), topology
 
 
+def _mix64(x):
+    """SplitMix64's finaliser. Avalanches hard, so neighbouring lattice indices are unrelated."""
+    x &= 0xFFFFFFFFFFFFFFFF
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+    return (x ^ (x >> 31)) & 0xFFFFFFFFFFFFFFFF
+
+
+def _unit(*key):
+    """A deterministic uniform in [0, 1) from an integer key. Draws nothing from any RNG."""
+    h = 0x9E3779B97F4A7C15
+    for k in key:
+        h = _mix64(h ^ (int(k) & 0xFFFFFFFFFFFFFFFF))
+    return h / 18446744073709551616.0
+
+
+def _lattice_gauss(*key):
+    """Approximately N(0, 1) at one lattice point. Irwin-Hall with four samples."""
+    total = _unit(*key, 0) + _unit(*key, 1) + _unit(*key, 2) + _unit(*key, 3)
+    return (total - 2.0) * 1.7320508075688772  # variance 1/3, so scale by sqrt(3)
+
+
+class NoiseField:
+    """A noise floor that moves, reported as an offset in dB. Positive is a worse band.
+
+    Hashed, not drawn. Two reasons, both learned the hard way from `--amplify-worst`:
+
+      * it consumes no randomness, so switching a profile on does not shift the stream the traffic
+        generator shares - every arm of a noise sweep carries the identical schedule, and the only
+        difference between them is the thing being swept;
+      * it is order-independent. The discrete-event loop does not deliver receptions in any fixed
+        order, so a stateful AR(1) would hand out a different field depending on what the traffic
+        happened to do, and a run would not reproduce.
+
+    TEMPORAL is a smooth field with a coherence time, sampled across the packet's own airtime and
+    judged on the WORST excursion it spans. That is the whole point of it: a frame is decoded as one
+    unit, so a single deep fade anywhere inside it corrupts enough coded symbols to fail the frame.
+    A 21 s LONG_SLOW packet at tau=500 ms spans forty independent excursions and is judged on the
+    deepest of forty draws; a 175 ms SHORT_TURBO packet spans less than one. The length penalty that
+    falls out is superlinear, which is what the vendored curve's flat 0.8 dB per 100 bytes is not.
+
+    TRANSIENT is episodic and spatial: a window of raised floor over part of the map, standing in for
+    an interferer switching on, a neighbour's non-LoRa gear, weather. Nothing extra is needed to make
+    it bite the stretched links first - a fixed dB excursion removes the least margin first, so the
+    marginal population is exactly who pays.
+
+    `lift_share` of transient events are NEGATIVE - a quieter band, further reach. This is as close
+    as this model gets to the lift it is meant to invert, and the asymmetry is worth stating: a lift
+    event can improve a link that exists, and cannot create one that does not, because `neighbours`
+    is thresholded on static RSSI and the graph never moves. Degradation is therefore modelled fully
+    and lift only partly. Extending range under lift needs the sensitivity cliff gone, which is a
+    change to the vendored physics and not this.
+    """
+
+    MAX_SAMPLES = 64  # a 36 s VERY_LONG_SLOW frame at tau=500 ms would otherwise cost 72 hashes
+
+    def __init__(
+        self,
+        seed,
+        temporal=False,
+        transient=False,
+        sigma_db=3.0,
+        tau_ms=500.0,
+        transient_rate_per_hour=0.0,
+        transient_db=8.0,
+        transient_ms=30000.0,
+        transient_radius_frac=0.35,
+        lift_share=0.0,
+        area=8000.0,
+    ):
+        self.seed = int(seed) & 0xFFFFFFFF
+        self.temporal = temporal
+        self.transient = transient
+        self.sigma_db = sigma_db
+        self.tau_ms = max(1.0, tau_ms)
+        self.transient_rate = transient_rate_per_hour
+        self.transient_db = transient_db
+        self.transient_ms = max(1.0, transient_ms)
+        self.transient_radius_frac = transient_radius_frac
+        self.lift_share = lift_share
+        self.area = area
+
+    def _smooth(self, lane, t_ms):
+        """The field at one instant: lattice values a coherence time apart, smoothstepped between."""
+        x = t_ms / self.tau_ms
+        i0 = math.floor(x)
+        frac = x - i0
+        a = _lattice_gauss(self.seed, lane, i0)
+        b = _lattice_gauss(self.seed, lane, i0 + 1)
+        return a + (b - a) * (frac * frac * (3.0 - 2.0 * frac))
+
+    def _temporal_db(self, lane, start, end):
+        span = max(0.0, end - start)
+        steps = min(self.MAX_SAMPLES, int(span / self.tau_ms) + 2)
+        worst = self._smooth(lane, start)
+        for k in range(1, steps):
+            v = self._smooth(lane, start + span * k / (steps - 1))
+            if v > worst:
+                worst = v
+        return self.sigma_db * worst
+
+    def _event_db(self, window, pos):
+        """Is there an excursion over this point in this window, and how deep?"""
+        chance = min(1.0, self.transient_rate * self.transient_ms / 3600_000.0)
+        if _unit(self.seed, 0x51, window) >= chance:
+            return 0.0
+        cx = _unit(self.seed, 0x52, window) * self.area
+        cy = _unit(self.seed, 0x53, window) * self.area
+        radius = self.transient_radius_frac * self.area * (0.5 + _unit(self.seed, 0x54, window))
+        if math.dist(pos, (cx, cy)) > radius:
+            return 0.0
+        amp = self.transient_db * (0.5 + _unit(self.seed, 0x55, window))
+        if _unit(self.seed, 0x56, window) < self.lift_share:
+            amp = -amp
+        return amp
+
+    def _transient_db(self, pos, start, end):
+        if self.transient_rate <= 0:
+            return 0.0
+        first = int(math.floor(start / self.transient_ms))
+        last = int(math.floor(end / self.transient_ms))
+        worst = 0.0
+        for w in range(first, min(last, first + self.MAX_SAMPLES) + 1):
+            amp = self._event_db(w, pos)
+            # The deepest excursion the packet meets decides it, in either direction: one event
+            # dominates rather than several averaging out.
+            if abs(amp) > abs(worst):
+                worst = amp
+        return worst
+
+    def excursion_db(self, lane, pos, start_ms, end_ms):
+        """dB to add to the floor for a packet occupying [start_ms, end_ms] at a receiver."""
+        total = 0.0
+        if self.temporal:
+            total += self._temporal_db(lane, start_ms, end_ms)
+        if self.transient:
+            total += self._transient_db(pos, start_ms, end_ms)
+        return total
+
+
+def stretch_points(points, factor):
+    """Scale every distance in the mesh by `factor`, about the mesh's own centroid.
+
+    A stretch is not a bigger area. `--area` redraws the placement, so an 8 km mesh and a 16 km mesh
+    at one seed are two different meshes and the difference between them is a different draw as much
+    as a longer link. Scaling the points that were already drawn keeps node k the same node with the
+    same neighbours in the same arrangement, and changes only how far apart they are - which is the
+    one thing a stretch is supposed to vary.
+
+    Scaled about the centroid rather than the origin so the mesh grows in place instead of also
+    translating away from it; nothing here depends on absolute position, but a shifted mesh makes the
+    diagrams harder to compare for no gain.
+
+    Consumes no randomness, so a stretch sweep is paired: every arm carries the same schedule.
+    """
+    if factor == 1.0:
+        return points
+    if factor <= 0:
+        raise ValueError(f"stretch must be positive, got {factor!r}")
+    cx = sum(x for x, _ in points) / len(points)
+    cy = sum(y for _, y in points) / len(points)
+    return [(cx + (x - cx) * factor, cy + (y - cy) * factor) for x, y in points]
+
+
 # Where a node actually is, as a gain offset in dB on every link it takes part in. These are the
 # deployments people describe having, and the spread between them is larger than most parameters this
 # simulator sweeps: a roof node and a basement node differ by 26 dB, which is more than the whole span
@@ -1888,6 +2052,7 @@ class Mesh:
         burst_ms=60000.0,
         siting_gain=None,
         amplifier_gain=None,
+        noise=None,
         profile="2.8",
     ):
         self.conf = conf
@@ -1928,6 +2093,10 @@ class Mesh:
         self.rx_gain = [
             self.siting_gain[i] + (amp[i][1] if amp else 0.0) for i in range(len(nodes))
         ]
+        # A moving noise floor, or None for the static one. See NoiseField.
+        self.noise = noise
+        # Drawn on the first _build_links and kept, so a rebuild is deterministic. See _build_links.
+        self._skew = None
         self._deaf_until = [0.0] * len(nodes)
         self._deaf_checked = [0.0] * len(nodes)
         self.now = 0.0
@@ -1947,6 +2116,11 @@ class Mesh:
             "cancelled_reach_lost": 0,
             "receptions": 0,
             "lost_to_collision": 0,
+            # Lost with a noise excursion that the static floor would have delivered through, and
+            # delivered under a lift event the static floor would have dropped. Both are attributed
+            # off the same single draw, so neither costs a extra random number.
+            "lost_to_noise_excursion": 0,
+            "saved_by_noise_lift": 0,
             "lost_to_half_duplex": 0,
             "lost_to_phy": 0,
             "bytes_on_air": 0,
@@ -2040,6 +2214,22 @@ class Mesh:
         self.neighbours = [[] for _ in range(n)]
         sensitivity = conf.current_preset["sensitivity"]
 
+        # The per-pair asymmetry is drawn ONCE for the life of the mesh and kept. A rebuild - after
+        # an amplifier is fitted, or to price a stretch - then draws nothing and moves nothing it was
+        # not asked to move. Redrawing it re-randomised every link in the mesh, including every pair
+        # with no amplifier anywhere near it, and advanced the RNG the traffic generator shares: the
+        # before and after of any such comparison were two different meshes carrying two different
+        # schedules.
+        if self._skew is None:
+            self._skew = [[0.0] * n for _ in range(n)]
+            if conf.MODEL_ASYMMETRIC_LINKS:
+                for i in range(n):
+                    for j in range(i + 1, n):
+                        self._skew[i][j] = self.rng.gauss(
+                            conf.MODEL_ASYMMETRIC_LINKS_MEAN,
+                            conf.MODEL_ASYMMETRIC_LINKS_STDDEV,
+                        )
+
         for i in range(n):
             for j in range(i + 1, n):
                 d = max(
@@ -2056,15 +2246,8 @@ class Mesh:
                 # rebroadcasts from nodes that could have carried the packet further than it can.
                 #
                 # The per-pair Gaussian skew is kept on top, for the asymmetry that is a property of
-                # the link rather than of either radio.
-                skew = (
-                    self.rng.gauss(
-                        conf.MODEL_ASYMMETRIC_LINKS_MEAN,
-                        conf.MODEL_ASYMMETRIC_LINKS_STDDEV,
-                    )
-                    if conf.MODEL_ASYMMETRIC_LINKS
-                    else 0.0
-                )
+                # the link rather than of either radio. Drawn once, above, and reused.
+                skew = self._skew[i][j]
                 self.rssi[i][j] = base + self.tx_gain[i] + self.rx_gain[j] + skew
                 self.rssi[j][i] = base + self.tx_gain[j] + self.rx_gain[i] - skew
 
@@ -2073,23 +2256,46 @@ class Mesh:
                 if i != j and self.rssi[i][j] >= sensitivity:
                     self.neighbours[i].append(j)
 
+    def delivery_probability(self, i, j, length=60, coding_rate=None):
+        """P(the payload decodes) on the directed link i->j, at a reference length.
+
+        Zero below sensitivity, because `neighbours` is thresholded there and such a pair is never
+        offered a packet at all. Above it, the vendored PER curve against the configured noise floor.
+        """
+        sensitivity = self.conf.current_preset["sensitivity"]
+        if self.rssi[i][j] < sensitivity:
+            return 0.0
+        if not self.conf.PHY_LOSS_MODEL_ENABLED:
+            return 1.0
+        import lib.radio_loss as radio_loss
+
+        return radio_loss.payload_success_probability(
+            self.conf,
+            self.rssi[i][j],
+            coding_rate or self.conf.current_preset["cr"],
+            length,
+        )
+
     def link_quality(self, length=60):
-        """Every directed link graded by how much margin it has, and how many are one-way.
+        """Every directed link graded twice: by dB margin, and by what it actually delivers.
 
-        Graded on margin over sensitivity rather than on delivery probability, because in this model
-        those are nearly the same question. A link becomes a neighbour the moment its RSSI clears
-        sensitivity, and the vendored PER curve puts success at 96% exactly there - so every link the
-        mesh will use is already reliable, and everything genuinely marginal sits below the threshold
-        and is not a link at all.
-
-        SIMPLIFICATION, and a real one: this transport has no marginal link. A pair either carries
-        ~96%+ of what it is offered or does not exist. Real meshes are full of links that work a
-        third of the time, and nothing here reproduces one. What margin does show is which links are
-        close enough to the cliff that a few dB of fading, a wet tree or a body in the way would
-        remove them, which is the nearest available proxy.
-
+        The margin bands are the geometry - `comfortable` (>=10 dB), `adequate` (5-10), `fragile`
+        (<5, so a little fading removes it) - and they do not depend on the noise floor at all.
         `near_miss` counts the other side of the cliff: pairs within 6 dB below sensitivity, which a
         real radio would sometimes hear and this one never does.
+
+        `delivery` is the second grading and it is the one that answers "how many links here are
+        genuinely marginal". Under a fixed noise floor the answer was none: the threshold sat 5 dB
+        into the flat top of the PER curve, so every link the mesh would use delivered 96%+ and
+        everything worse was not a link. Under the thermal floor the threshold lands on the curve's
+        knee - a LONG_FAST link at sensitivity delivers 39% - and a marginal band exists to measure.
+
+        THE DENOMINATOR MATTERS, and quoting this against the live link count alone is a trap. A
+        stretched mesh loses its worst links off the bottom of the graph entirely, so the share of
+        *surviving* links that are bad can improve while the mesh gets worse. Every share here is
+        therefore reported twice: against live links, and per thousand ordered pairs, which is fixed
+        whatever the stretch does. Read the second one across a stretch sweep, and read
+        `sub_sensitivity` beside it for what fell off the cliff.
         """
         conf = self.conf
         sensitivity = conf.current_preset["sensitivity"]
@@ -2097,15 +2303,19 @@ class Mesh:
         per_node_fragile = [0] * len(self.nodes)
         one_way = 0
         near_miss = 0
+        sub_sensitivity = 0
+        probs = []
         for i in range(len(self.nodes)):
             for j in range(len(self.nodes)):
                 if i == j:
                     continue
                 margin = self.rssi[i][j] - sensitivity
                 if margin < 0:
+                    sub_sensitivity += 1
                     if margin >= -6.0:
                         near_miss += 1
                     continue
+                probs.append(self.delivery_probability(i, j, length))
                 if margin >= 10.0:
                     bands["comfortable"] += 1
                 elif margin >= 5.0:
@@ -2135,6 +2345,116 @@ class Mesh:
                 for i, n in enumerate(per_node_fragile)
                 if self.neighbours[i] and n >= 0.5 * len(self.neighbours[i])
             ),
+            # Pairs the sensitivity threshold excluded outright, of which `near_miss` is the closest
+            # band. The stretch sweep's other half: links do not degrade here so much as vanish.
+            "sub_sensitivity": sub_sensitivity,
+            "delivery": self._delivery_census(probs, length),
+        }
+
+    def _delivery_census(self, probs, length):
+        """What the links actually deliver, at one reference length.
+
+        `marginal` is the band that could not exist under a fixed noise floor: a link that works
+        sometimes. It is the headline of any stretch or noise result, because it is the population
+        every retry, coding-rate and repeat mechanism in this design exists to serve, and until the
+        floor was corrected it was empty.
+        """
+        n = len(self.nodes)
+        pairs = max(1, n * (n - 1))
+        live = len(probs)
+        if not live:
+            return {"reference_length_bytes": length, "links": 0, "ordered_pairs": pairs}
+        v = sorted(probs)
+        below50 = sum(1 for p in v if p < 0.5)
+        below90 = sum(1 for p in v if p < 0.9)
+        marginal = sum(1 for p in v if 0.05 <= p <= 0.95)
+        per_k = lambda c: round(1000.0 * c / pairs, 3)  # noqa: E731
+        return {
+            "reference_length_bytes": length,
+            "links": live,
+            "ordered_pairs": pairs,
+            # A link that works sometimes - 5% to 95% of what it is offered.
+            "marginal": marginal,
+            "marginal_share_of_links": round(marginal / live, 4),
+            "marginal_per_1000_pairs": per_k(marginal),
+            # The figure to quote: links liable to 50% loss or worse.
+            "below_50": below50,
+            "below_50_share_of_links": round(below50 / live, 4),
+            "below_50_per_1000_pairs": per_k(below50),
+            "below_90": below90,
+            "below_90_share_of_links": round(below90 / live, 4),
+            "below_90_per_1000_pairs": per_k(below90),
+            "worst": round(v[0], 4),
+            "median": round(v[len(v) // 2], 4),
+            "mean": round(sum(v) / live, 4),
+        }
+
+    def stretch_census(self, length=60):
+        """What stretching this mesh did to the links it started with. The paired measurement.
+
+        Every share `link_quality` reports is against a denominator the stretch itself moves, and
+        that makes it unreadable across a sweep: the worst links fall off the bottom of the graph, so
+        the surviving population looks healthier the further you pull the mesh apart. Measured on a
+        uniform 60-node mesh, the share of links below 50% delivery goes 0.053, 0.064, 0.078, 0.059
+        across stretch 1.0 to 3.0 - it improves at the end, and the mesh is in pieces by then.
+
+        So the denominator here is the link set at stretch 1.0, recovered exactly rather than
+        re-drawn: the per-pair skew is stored for the life of the mesh, so scaling the distance back
+        reproduces the unstretched RSSI to the bit. Of the links this mesh had before it was pulled
+        apart, this reports how many still work, how many became marginal, and how many stopped
+        being links at all.
+
+        The last of those three is the honest headline of a stretch result. This model degrades a
+        link until it hits the sensitivity threshold and then deletes it, so most of what stretching
+        costs shows up as `lost_to_cliff` rather than as anything the delivery curve can see.
+        """
+        import lib.phy as phy
+
+        factor = getattr(self, "stretch", 1.0)
+        conf = self.conf
+        sensitivity = conf.current_preset["sensitivity"]
+        n = len(self.nodes)
+        was_link = still = marginal = lost = 0
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                d = max(1.0, math.dist(self.nodes[i].position(), self.nodes[j].position()))
+                ref_loss = phy.estimate_path_loss(conf, max(1.0, d / factor), conf.FREQ)
+                ref = (
+                    conf.PTX
+                    + 2 * conf.GL
+                    - ref_loss
+                    + self.tx_gain[i]
+                    + self.rx_gain[j]
+                    + (self._skew[i][j] if i < j else -self._skew[j][i])
+                )
+                if ref < sensitivity:
+                    continue
+                was_link += 1
+                if self.rssi[i][j] < sensitivity:
+                    lost += 1
+                    continue
+                still += 1
+                p = self.delivery_probability(i, j, length)
+                if 0.05 <= p <= 0.95:
+                    marginal += 1
+        if not was_link:
+            return {"stretch": factor, "links_at_stretch_1": 0}
+        return {
+            "stretch": factor,
+            "reference_length_bytes": length,
+            # The fixed denominator: what the mesh had before it was stretched.
+            "links_at_stretch_1": was_link,
+            "still_links": still,
+            # Degraded until the threshold deleted them. On this model, most of the damage.
+            "lost_to_cliff": lost,
+            "lost_to_cliff_share": round(lost / was_link, 4),
+            # Survived as links, and now work only sometimes.
+            "marginal_now": marginal,
+            "marginal_now_share": round(marginal / was_link, 4),
+            # Everything the stretch cost, however it was paid.
+            "degraded_or_lost_share": round((lost + marginal) / was_link, 4),
         }
 
     def link_stats(self):
@@ -2670,7 +2990,9 @@ class Mesh:
                 continue
             if (
                 self._deaf(rx)
-                or self._lost_to_phy(rssi, packet.length, packet.coding_rate)
+                or self._lost_to_phy(
+                    rssi, packet.length, packet.coding_rate, rx, tx.start, tx.end
+                )
                 or (self.extra_loss and self.rng.random() < self.extra_loss)
             ):
                 self.stats["lost_to_phy"] += 1
@@ -2703,19 +3025,43 @@ class Mesh:
                 self._deaf_until[node] = self.now + self.burst_ms
         return self.now < self._deaf_until[node]
 
-    def _lost_to_phy(self, rssi, length, coding_rate=None):
-        """The empirical SNR-to-PER curve. More redundancy survives a worse link."""
+    def _lost_to_phy(self, rssi, length, coding_rate=None, rx=None, start=0.0, end=0.0):
+        """The empirical SNR-to-PER curve. More redundancy survives a worse link.
+
+        A noise excursion arrives as a penalty on RSSI rather than as a change to the floor, because
+        the curve reads only their difference: 4 dB more noise and 4 dB less signal are the same
+        packet. That keeps the vendored `radio_loss` a clean copy, and it is why the excursion is
+        applied per reception - the floor a packet met is a property of when and where it was heard,
+        not of the configuration.
+
+        Exactly one random number is drawn, whatever the profile, so turning a profile on does not
+        move the stream and every existing run reproduces.
+        """
         import lib.radio_loss as radio_loss
 
         if not self.conf.PHY_LOSS_MODEL_ENABLED:
             return False
-        return radio_loss.payload_is_lost(
-            self.conf,
-            rssi,
-            coding_rate or self.conf.current_preset["cr"],
-            length,
-            self.rng.random(),
+        cr = coding_rate or self.conf.current_preset["cr"]
+        draw = self.rng.random()
+        if self.noise is None or rx is None:
+            return draw > radio_loss.payload_success_probability(
+                self.conf, rssi, cr, length
+            )
+        excursion = self.noise.excursion_db(
+            rx, self.nodes[rx].position(), start, end
         )
+        lost = draw > radio_loss.payload_success_probability(
+            self.conf, rssi - excursion, cr, length
+        )
+        if excursion:
+            # What the band did, separated from what the link is. Free: the same draw judged against
+            # the calm-band probability says whether the excursion is what decided this packet.
+            calm = radio_loss.payload_success_probability(self.conf, rssi, cr, length)
+            if lost and draw <= calm:
+                self.stats["lost_to_noise_excursion"] += 1
+            elif not lost and draw > calm:
+                self.stats["saved_by_noise_lift"] += 1
+        return lost
 
     # ---- breaking the mesh -------------------------------------------------------------
 
@@ -4164,6 +4510,8 @@ def build(
     role_placement="degree",
     amplifier_mix="none",
     amplify_worst=0.0,
+    stretch=1.0,
+    noise=None,
 ):
     """A mesh with positions drawn from `rng` and a share of the nodes promoted to ROUTER.
 
@@ -4172,6 +4520,7 @@ def build(
     ROUTER_LATE and CLIENT_BASE are drawn from the same ranking, below the plain routers.
     """
     points, resolved = place(topology, node_count, area, rng, min_dist)
+    points = stretch_points(points, stretch)
     # Real node numbers, so two nodes can share a last byte as they do on a real mesh; sequential
     # ids would hide the ambiguity path entirely.
     node_nums = [rng.randrange(1, 1 << 32) for _ in range(node_count)]
@@ -4245,9 +4594,11 @@ def build(
         burst_ms=burst_ms,
         siting_gain=[SITINGS[name] for name in sitings],
         amplifier_gain=amplifiers,
+        noise=noise,
         profile=profile,
     )
     mesh.topology = resolved
+    mesh.stretch = stretch
     mesh.sitings = sitings
     mesh.hop_assign = hop_assign
 

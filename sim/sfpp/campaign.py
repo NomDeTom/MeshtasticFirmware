@@ -339,6 +339,32 @@ class Server:
         return s if s.count > 0 else None
 
 
+def _noise_field(opts, seed, area):
+    """The moving noise floor, or None for the static one this simulator has always had.
+
+    Seeded off the run's seed but through its own constant, so the field is reproducible without
+    being correlated with anything else the seed decides. NoiseField draws no randomness at all, so
+    switching a profile on leaves every other draw in the run exactly where it was - the arms of a
+    noise sweep differ in the field and in nothing else.
+    """
+    profile = getattr(opts, "noise_profile", "none")
+    if profile == "none":
+        return None
+    return M.NoiseField(
+        seed=(int(seed) ^ 0x4E4F4953),
+        temporal=profile in ("temporal", "both"),
+        transient=profile in ("transient", "both"),
+        sigma_db=getattr(opts, "noise_sigma_db", 3.0),
+        tau_ms=getattr(opts, "noise_tau_ms", 500.0),
+        transient_rate_per_hour=getattr(opts, "noise_transient_per_hour", 6.0),
+        transient_db=getattr(opts, "noise_transient_db", 8.0),
+        transient_ms=getattr(opts, "noise_transient_ms", 30000.0),
+        transient_radius_frac=getattr(opts, "noise_transient_radius", 0.35),
+        lift_share=getattr(opts, "noise_lift_share", 0.0),
+        area=area,
+    )
+
+
 class Campaign:
     def __init__(self, opts, seed):
         self.opts = opts
@@ -382,6 +408,8 @@ class Campaign:
             role_placement=getattr(opts, "role_placement", "degree"),
             amplifier_mix=getattr(opts, "amplifier_mix", "none"),
             amplify_worst=getattr(opts, "amplify_worst", 0.0),
+            stretch=getattr(opts, "stretch", 1.0),
+            noise=_noise_field(opts, seed, self.area),
         )
         self.root_hash = bytes(range(16))
         self.generator = T.Generator(
@@ -1533,6 +1561,13 @@ class Campaign:
                 "diameter": self.mesh.diameter(),
             },
             "link_quality": self.mesh.link_quality(),
+            # Only where a stretch was asked for: the census is against the unstretched link set, so
+            # at stretch 1.0 it is all zeros by construction and says nothing.
+            "stretch": (
+                self.mesh.stretch_census()
+                if getattr(self.opts, "stretch", 1.0) != 1.0
+                else None
+            ),
             "admin": self._admin_report(),
             "by_class": self._class_report(),
             "by_hop_limit": self._hop_report(),
@@ -2349,6 +2384,70 @@ def build_parser():
         type=int,
         default=5,
         help="the largest separation admin sessions are attempted at",
+    )
+    ap.add_argument(
+        "--stretch",
+        type=float,
+        default=1.0,
+        help="scale every distance in the mesh by this factor, about the centroid, after placement. "
+        "Unlike --area it keeps the same nodes in the same arrangement, so an arm is paired with its "
+        "own control; read report['stretch'], which is quoted against the unstretched link set",
+    )
+    ap.add_argument(
+        "--noise-profile",
+        default="none",
+        choices=("none", "temporal", "transient", "both"),
+        help="a noise floor that moves, on top of --noise-model's static one. temporal is a smooth "
+        "field with a coherence time, and a packet is judged on the worst excursion its own airtime "
+        "spans - so a long frame is disproportionately exposed. transient is episodic and spatial: "
+        "an interferer switching on over part of the map",
+    )
+    ap.add_argument(
+        "--noise-sigma-db",
+        type=float,
+        default=3.0,
+        help="standard deviation of the temporal field, in dB",
+    )
+    ap.add_argument(
+        "--noise-tau-ms",
+        type=float,
+        default=500.0,
+        help="coherence time of the temporal field. This is the knob that decides how much longer "
+        "packets suffer: a frame spanning many tau sees the worst of many excursions, one inside a "
+        "single tau sees a flat offset. Set it near a short packet's airtime and the length effect "
+        "disappears",
+    )
+    ap.add_argument(
+        "--noise-transient-per-hour",
+        type=float,
+        default=6.0,
+        help="transient excursions per hour, mesh-wide. Inert unless --noise-profile includes it",
+    )
+    ap.add_argument(
+        "--noise-transient-db",
+        type=float,
+        default=8.0,
+        help="depth of a transient excursion in dB, before its own 0.5-1.5x spread",
+    )
+    ap.add_argument(
+        "--noise-transient-ms",
+        type=float,
+        default=30000.0,
+        help="how long one transient excursion lasts",
+    )
+    ap.add_argument(
+        "--noise-transient-radius",
+        type=float,
+        default=0.35,
+        help="radius of a transient excursion as a fraction of the area's side, before its spread",
+    )
+    ap.add_argument(
+        "--noise-lift-share",
+        type=float,
+        default=0.0,
+        help="share of transient excursions that are NEGATIVE - a quieter band. Lift can improve a "
+        "link that exists and cannot create one that does not, because the link graph is thresholded "
+        "on static RSSI; degradation is modelled fully and lift only partly",
     )
     ap.add_argument(
         "--noise-model",
