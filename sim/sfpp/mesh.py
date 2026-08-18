@@ -753,6 +753,11 @@ class Packet:
         "pki_encrypted",
         "coding_rate",
         "route",
+        # NOT ON THE WIRE. relay_node is one ambiguous byte; this is the sending node's index, kept
+        # for instrumentation only so a cancellation can be attributed to the node that caused it.
+        # Nothing in the transport reads it, and no decision may - resolving a relay to a node is
+        # exactly the ambiguity resolve_unique_last_byte exists to model.
+        "relay_index",
         # RouteDiscovery carries two arrays, not one: `route` accumulates on the way out and
         # `route_back` on the way home (mesh.proto tags 1 and 3, TraceRouteModule.cpp:377). Keeping
         # a single list conflated the legs, and on an asymmetric mesh - which this transport models
@@ -804,6 +809,7 @@ class Packet:
         # not a traceroute; a list is the hops recorded so far, in order.
         self.route = None
         self.route_back = None
+        self.relay_index = None
         self.priority = (
             priority
             if priority is not None
@@ -849,6 +855,7 @@ class Packet:
         clone.coding_rate = self.coding_rate
         clone.route = None if self.route is None else list(self.route)
         clone.route_back = None if self.route_back is None else list(self.route_back)
+        clone.relay_index = self.relay_index
         return clone
 
 
@@ -1835,6 +1842,8 @@ class Mesh:
             "rebroadcasts": 0,
             "rebroadcasts_queued": 0,
             "rebroadcasts_cancelled": 0,
+            "cancelled_by_weaker_relay": 0,
+            "cancelled_reach_lost": 0,
             "receptions": 0,
             "lost_to_collision": 0,
             "lost_to_half_duplex": 0,
@@ -2433,6 +2442,7 @@ class Mesh:
         radio.log_airtime(self.now, duration)
         radio.log_tx_airtime(self.now, duration)
         packet.relay_node = radio.relay_byte
+        packet.relay_index = node  # instrumentation only; see the slot comment
         tx = Transmission(packet, node, self.now, self.now + duration, radio.role)
         self.transmissions.append(tx)
         self.stats["transmissions"] += 1
@@ -3252,6 +3262,17 @@ class Mesh:
             if entry is not None:
                 node.pending.pop(packet.id, None)
                 self.stats["rebroadcasts_cancelled"] += 1
+                # Who silenced whom. A relay heard by fewer nodes than the one it just cancelled
+                # has suppressed a broadcast that would have travelled further than its own - the
+                # badly-sited node in the middle of a well-connected cluster. Counting it separates
+                # "duplicate suppression working" from "duplicate suppression backfiring".
+                sender = packet.relay_index
+                if sender is not None and sender != rx:
+                    if len(self.neighbours[sender]) < len(self.neighbours[rx]):
+                        self.stats["cancelled_by_weaker_relay"] += 1
+                        self.stats["cancelled_reach_lost"] += len(
+                            self.neighbours[rx]
+                        ) - len(self.neighbours[sender])
 
         if node.profile.late_window and (
             node.role == ROUTER_LATE
