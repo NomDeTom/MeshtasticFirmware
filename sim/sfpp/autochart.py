@@ -44,7 +44,8 @@ GRID = "#e3e3e0"
 BG = "#FCFCFA"
 
 
-def _pin():
+def transport_pin():
+    """The short SHA of the code producing this run. Read by the charts and by the report."""
     try:
         return (
             subprocess.run(
@@ -150,7 +151,7 @@ def render_run(report, out_dir, label="run"):
     fig.text(
         0.995,
         -0.06,
-        f"transport {_pin()} · seed {report.get('seed')} · {report['opts'].get('hours')} h",
+        f"transport {transport_pin()} · seed {report.get('seed')} · {report['opts'].get('hours')} h",
         ha="right",
         fontsize=7.5,
         color=MUTED,
@@ -216,7 +217,7 @@ def render_block(reports, out_dir, name):
         color=INK,
         y=1.03,
     )
-    fig.text(0.995, -0.06, f"transport {_pin()}", ha="right", fontsize=7.5, color=MUTED)
+    fig.text(0.995, -0.06, f"transport {transport_pin()}", ha="right", fontsize=7.5, color=MUTED)
     fig.tight_layout()
     path = os.path.join(out_dir, f"{name}.png")
     fig.savefig(path, facecolor=BG, dpi=140, bbox_inches="tight")

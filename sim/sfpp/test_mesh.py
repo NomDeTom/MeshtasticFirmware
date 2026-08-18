@@ -7,6 +7,7 @@ the firmware was read correctly, and so would pin nothing.
 Run from `sim/`:  python3 -m unittest sfpp.test_mesh -v
 """
 
+import json
 import os
 import pathlib
 import sys
@@ -2054,6 +2055,26 @@ print(",".join(failed))
             if enabler and enabler[0] not in grid:
                 wrong.append(f"{name} sweeps --{arm} without {enabler[0]}: {enabler[1]}")
         self.assertEqual(wrong, [], "blocks whose arm cannot do anything as configured")
+
+    def test_a_written_report_records_the_code_that_produced_it(self):
+        """Dating the deprecated runs took key-set archaeology because only the charts carried it."""
+        import subprocess
+        import tempfile
+
+        sim = pathlib.Path(__file__).resolve().parents[1]
+        out = os.path.join(tempfile.mkdtemp(), "run.json")
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "sfpp.campaign",
+                "--hours", "1", "--nodes", "12", "--seed", "3", "--no-charts", "--out", out,
+            ],
+            capture_output=True, text=True, cwd=sim,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-600:])
+        with open(out) as handle:
+            report = json.load(handle)
+        self.assertIn("transport", report)
+        self.assertTrue(report["transport"], "the commit must not be empty")
 
     def test_the_report_carries_both_tails_for_text_and_all_packets(self):
         """p10 and p90 are the pair conclusions are drawn from, and `all` is the row that shows a trade."""
