@@ -197,6 +197,7 @@ BUSY_DIRECT_ACTIVE_NODES = 10
 NODEINFO_PORTNUM = 4
 ROUTING_PORTNUM = 5  # ROUTING_APP, which is what an ACK is
 TRACEROUTE_PORTNUM = 70  # TRACEROUTE_APP, whose payload is a RouteDiscovery
+ADMIN_PORTNUM = 6  # ADMIN_APP. PKI-encrypted to the target, so it needs the target's key
 
 # RouteDiscovery's route array. A traceroute that runs out of slots stops recording hops.
 TRACEROUTE_MAX_HOPS = 8

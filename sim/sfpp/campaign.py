@@ -58,6 +58,12 @@ REPLAY_HEADER = 2
 REPLAY_MAX_TICKS = (1 << 16) - 1
 MAX_PAYLOAD = 233
 STORE_FORWARD_PLUSPLUS_APP = 35
+# An AdminMessage request and its reply. Both small; the multi-packet config payloads a real session
+# carries are not modelled, so this is the deliverability of the round trip rather than its cost.
+ADMIN_REQUEST_BYTES = 32
+ADMIN_REPLY_BYTES = 48
+# How long each leg is given before it is judged. Generous against the retry ladder's own budget.
+ADMIN_LEG_TIMEOUT_MS = 120_000.0
 
 # The traffic mix. NodeInfo is every three hours in the firmware's defaults, not hourly.
 MIX = (
@@ -1310,6 +1316,133 @@ class Campaign:
                 self.mesh.at(when, probe)
                 when += self.rng.expovariate(1.0 / mean_gap_ms)
 
+    def _schedule_admin_sessions(self):
+        """Can an operator actually administer a node this far away?
+
+        A configuration change is not a broadcast that some nodes may miss - it is a round trip that
+        has to complete: the AdminMessage reaches the target, the target answers, and the answer gets
+        back. Either leg failing means the session failed, and a mesh whose text reach looks healthy
+        can still be one where nothing beyond two hops can be configured.
+
+        Modelled as a PKI-encrypted DM with want_ack to a node at a chosen hop distance, and a reply
+        on the same terms. PKI is what makes this different from a text: no key for the target means
+        the packet is never composed at all, which is a real failure mode of an evicted peer and the
+        one an operator hits first on a large mesh.
+
+        SIMPLIFICATION: the firmware's admin flow also carries a session key with its own expiry and
+        a nonce exchange (AdminModule), and the multi-packet config payloads are larger than the one
+        request modelled here. This measures whether the round trip is deliverable, not whether the
+        whole session protocol completes.
+        """
+        rate = getattr(self.opts, "admin_probes_per_hour", 0.0)
+        if rate <= 0:
+            return
+        max_hops = int(getattr(self.opts, "admin_max_hops", 5))
+        self.admin_attempts = {h: 0 for h in range(1, max_hops + 1)}
+        self.admin_delivered = {h: 0 for h in range(1, max_hops + 1)}
+        self.admin_completed = {h: 0 for h in range(1, max_hops + 1)}
+        self.admin_no_key = {h: 0 for h in range(1, max_hops + 1)}
+        # Topological distance from every node, once: which node sits n hops away is a property of
+        # the mesh, not of what has been heard.
+        self._admin_targets = {}
+        for src in range(self.opts.nodes):
+            byhop = {}
+            for peer, hops in self.mesh.hops_from([src]).items():
+                if peer != src and 1 <= hops <= max_hops:
+                    byhop.setdefault(hops, []).append(peer)
+            self._admin_targets[src] = byhop
+
+        mean_gap_ms = 3600_000.0 / rate
+        when = self.rng.expovariate(1.0 / mean_gap_ms)
+        while when < self.duration_ms:
+
+            def probe(at=when):
+                src = self.rng.randrange(self.opts.nodes)
+                byhop = self._admin_targets.get(src) or {}
+                if not byhop:
+                    return
+                hops = self.rng.choice(sorted(byhop))
+                target = self.rng.choice(byhop[hops])
+                self._admin_session(src, target, hops)
+
+            self.mesh.at(when, probe)
+            when += self.rng.expovariate(1.0 / mean_gap_ms)
+
+    def _admin_session(self, src, target, hops):
+        """One request out, one reply back. Both must land for the session to count."""
+        self.admin_attempts[hops] += 1
+        request = self.mesh.originate(
+            src,
+            M.ADMIN_PORTNUM,
+            ADMIN_REQUEST_BYTES,
+            kind="admin",
+            destination=target,
+            want_ack=True,
+            pki=True,
+        )
+        if request is None:
+            # No key for the target, so the firmware never composes the packet. A real failure and
+            # the one an operator meets first once the peer has aged out of the hot store.
+            self.admin_no_key[hops] += 1
+            return
+        request_id = request.id
+
+        def on_arrival():
+            if request_id not in self.mesh.nodes[target].seen:
+                return
+            self.admin_delivered[hops] += 1
+            reply = self.mesh.originate(
+                target,
+                M.ADMIN_PORTNUM,
+                ADMIN_REPLY_BYTES,
+                kind="admin",
+                destination=src,
+                want_ack=True,
+                pki=True,
+                request_id=request_id,
+            )
+            if reply is None:
+                return
+            reply_id = reply.id
+
+            def on_return():
+                if reply_id in self.mesh.nodes[src].seen:
+                    self.admin_completed[hops] += 1
+
+            # Give the reply the same budget the request had before judging it.
+            self.mesh.at(self.mesh.now + ADMIN_LEG_TIMEOUT_MS, on_return)
+
+        self.mesh.at(self.mesh.now + ADMIN_LEG_TIMEOUT_MS, on_arrival)
+
+    def _admin_report(self):
+        if not getattr(self, "admin_attempts", None):
+            return None
+        out = {}
+        for hops in sorted(self.admin_attempts):
+            tried = self.admin_attempts[hops]
+            addressable = tried - self.admin_no_key[hops]
+            out[str(hops)] = {
+                "attempts": tried,
+                # Never composed: no key for the target in any tier, so the operator cannot address
+                # the node at all. A different failure from not reaching it, and the one that gets
+                # worse as the mesh outgrows the hot store.
+                "no_key_for_target": self.admin_no_key[hops],
+                "addressable": addressable,
+                "request_delivered": self.admin_delivered[hops],
+                "session_completed": self.admin_completed[hops],
+                # Over everything attempted: what an operator actually experiences.
+                "success_rate": (
+                    round(self.admin_completed[hops] / tried, 4) if tried else None
+                ),
+                # Over the ones that could be addressed: what the mesh's reach alone costs.
+                "success_given_key": (
+                    round(self.admin_completed[hops] / addressable, 4)
+                    if addressable
+                    else None
+                ),
+            }
+        return out
+
     def _start_util_sampling(self, interval_ms=30000.0):
         """Every node's channel utilisation, on a cadence, for the run's own mean.
 
@@ -1333,6 +1466,7 @@ class Campaign:
         started = time.time()
         self.generator.schedule(self.duration_ms)
         self._schedule_traceroutes()
+        self._schedule_admin_sessions()
         self.mesh.start_hop_scaling()
         self._start_util_sampling()
         if getattr(self.opts, "trace_interval_s", 0):
@@ -1399,6 +1533,7 @@ class Campaign:
                 "diameter": self.mesh.diameter(),
             },
             "link_quality": self.mesh.link_quality(),
+            "admin": self._admin_report(),
             "by_class": self._class_report(),
             "by_hop_limit": self._hop_report(),
             "hops_away": self._hops_away_report(),
@@ -2201,6 +2336,19 @@ def build_parser():
         help="fit a high amplifier to this share of the worst-connected nodes, after the links are "
         "built. The field pathology: the node nobody can hear gets a PA, and is then heard by "
         "everyone while still hearing almost nobody",
+    )
+    ap.add_argument(
+        "--admin-probes-per-hour",
+        type=float,
+        default=0.0,
+        help="attempt this many admin sessions per hour, mesh-wide, spread over 1..N hops of "
+        "separation. A session is a PKI DM out and a reply back, and both legs must land",
+    )
+    ap.add_argument(
+        "--admin-max-hops",
+        type=int,
+        default=5,
+        help="the largest separation admin sessions are attempted at",
     )
     ap.add_argument("--position-throttle", type=int, default=1)
     ap.add_argument("--telemetry-throttle", type=int, default=1)
