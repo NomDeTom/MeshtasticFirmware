@@ -490,9 +490,10 @@ def chart_bucket_size(size_pool, trials, outdir, rng):
                 trial(n, d, size_pool, min(max(d, 1), MAX_CAPACITY), rng)
                 for _ in range(max(trials // 4, 1))
             ]
-            objects = statistics.mean(
-                sum(s + WIRE["sfpp_overhead"] for s in [size_pool[0]] * d) for _ in runs
-            )
+        # The pool's mean, not its first entry: [size_pool[0]] * d is a constant that ignores
+            # the runs it is nominally averaged over, and shifts every curve by however far the
+            # capture's first text packet sits from the true mean.
+            objects = d * (statistics.mean(size_pool) + WIRE["sfpp_overhead"])
             for k in curves:
                 curves[k].append(statistics.mean(r[k].bytes for r in runs) - objects)
 

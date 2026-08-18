@@ -746,6 +746,11 @@ class Packet:
         "pki_encrypted",
         "coding_rate",
         "route",
+        # RouteDiscovery carries two arrays, not one: `route` accumulates on the way out and
+        # `route_back` on the way home (mesh.proto tags 1 and 3, TraceRouteModule.cpp:377). Keeping
+        # a single list conflated the legs, and on an asymmetric mesh - which this transport models
+        # - a reply need not retrace the request, so return-leg relays were learned as forward hops.
+        "route_back",
         "request_id",
         "reply_id",
         "opaque",
@@ -791,6 +796,7 @@ class Packet:
         # RouteDiscovery's route array, on a traceroute and nothing else. None means this packet is
         # not a traceroute; a list is the hops recorded so far, in order.
         self.route = None
+        self.route_back = None
         self.priority = (
             priority
             if priority is not None
@@ -835,6 +841,7 @@ class Packet:
         clone.pki_encrypted = self.pki_encrypted
         clone.coding_rate = self.coding_rate
         clone.route = None if self.route is None else list(self.route)
+        clone.route_back = None if self.route_back is None else list(self.route_back)
         return clone
 
 
@@ -2231,9 +2238,14 @@ class Mesh:
                 self._enqueue(radio, entry)
                 return True
 
-            # 3. Nothing ready to give up. Drop the back if its deadline has already passed and the
-            #    newcomer is more urgent still: ready always beats deferred, and between two overdue
-            #    packets the one that has been waiting longer goes first.
+            # 3. Nothing ready to give up. Drop the back if its deadline has already passed: a
+            #    ready packet always beats an overdue deferred one.
+            #
+            #    The wait-time comparison below is unreachable today. send() is the only caller and
+            #    always arrives with a freshly built QueueEntry, whose tx_after is 0.0, so the first
+            #    branch always wins. It is kept because the firmware's own comparison is between two
+            #    overdue packets and a future caller could pass a deferred entry; nothing here
+            #    currently constructs one.
             if self.now >= back.tx_after:
                 new_goes_first = not entry.tx_after or (
                     self.now >= entry.tx_after
@@ -2934,6 +2946,15 @@ class Mesh:
         back to the node that just relayed it, and never emit a byte that no longer resolves to a
         single reachable neighbour.
 
+        Decay needs a health record that still matches the stored byte, and `route_health` is capped
+        at ROUTE_HEALTH_MAX with LRU eviction. A destination whose record has been evicted therefore
+        keeps its next_hop with no TTL and no failure count left to age it. That is the firmware's
+        behaviour, not a shortcut here: NextHopRouter.cpp:297 guards the same way on the same cap of
+        32, and its comment is explicit that "a next_hop set by another path (e.g. TraceRouteModule)
+        with no matching record is left authoritative". On a mesh holding more than 32 live routes
+        it means a dead hop can be trusted until something else routes around it - a real property
+        worth knowing when reading a large-mesh result, and reproduced here deliberately.
+
         The route lives in the destination's own hot-store record, as `NodeInfoLite.next_hop` does,
         so evicting a peer forgets the way to it - a separate cost from the relay byte's ambiguity.
         """
@@ -3356,12 +3377,23 @@ class Mesh:
         return packet
 
     def _record_traceroute_hop(self, rx, relay):
-        """alterReceivedProtobuf: a relay writes itself into the route before passing it on."""
-        if relay.route is None or len(relay.route) >= TRACEROUTE_MAX_HOPS:
+        """alterReceivedProtobuf: a relay writes itself into the route before passing it on.
+
+        TraceRouteModule picks the array by direction - `route` while the request travels out,
+        `route_back` once the destination has answered - so a reply that comes home by a different
+        path cannot append onto the outbound leg. `request_id` is what marks a packet as the reply.
+        """
+        if relay.route is None:
             return
-        relay.route.append(rx)
-        # The packet grows with every hop it records, which is the airtime a traceroute costs.
-        relay.length = TRACEROUTE_BASE_BYTES + len(relay.route) * TRACEROUTE_BYTES_PER_HOP
+        outbound = not relay.request_id
+        leg = relay.route if outbound else relay.route_back
+        if leg is None or len(leg) >= TRACEROUTE_MAX_HOPS:
+            return
+        leg.append(rx)
+        # The packet grows with every hop either leg records, which is the airtime a traceroute
+        # costs; both arrays ride the same RouteDiscovery.
+        recorded = len(relay.route) + len(relay.route_back or [])
+        relay.length = TRACEROUTE_BASE_BYTES + recorded * TRACEROUTE_BYTES_PER_HOP
 
     def _perhaps_traceroute_reply(self, rx, packet):
         """The destination answers, carrying the route the request accumulated on the way out."""
@@ -3377,6 +3409,9 @@ class Mesh:
         )
         if reply is not None:
             reply.route = list(packet.route)
+            # The way home is recorded separately, so the forward path stays exactly what the
+            # request measured however the reply is routed back.
+            reply.route_back = []
             self.stats["traceroute_replies"] += 1
         return reply
 

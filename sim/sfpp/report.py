@@ -181,7 +181,10 @@ def report_block(path):
     for r in rs:
         arms.setdefault(r.get("value", "-"), []).append(r)
     for value, group in arms.items():
-        out.append(f"\n--- {r.get('arm','value')} = {value}   ({len(group)} seeds) ---")
+        # group[0], not the loop variable left over from building `arms`: that one points at
+        # whichever report came last in the file, and is only right by coincidence when every
+        # report in the file shares an arm.
+        out.append(f"\n--- {group[0].get('arm','value')} = {value}   ({len(group)} seeds) ---")
         out.append(report_one(group[0], indent="  "))
         if len(group) > 1:
             txt = [g["baseline"]["text_reception_mean"] for g in group]
