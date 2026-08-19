@@ -1526,8 +1526,15 @@ class Campaign:
 
         The firmware's ring holds sixty seconds, so it has to be read while traffic is still in it.
         Half the window keeps every bucket represented without over-weighting a quiet stretch.
+
+        Air-util-TX is sampled on the same tick but is a different measurement, not a second view of
+        the first: channel utilisation is what a node HEARD busy over the last minute, air-util-TX
+        is what it TRANSMITTED over the last hour. The firmware keeps them in separate rings over
+        those separate windows and gates on both, and it is the second one a duty cycle is enforced
+        against - so a run that reports only the first cannot say whether its nodes were legal.
         """
         self._util_samples = [[] for _ in self.mesh.nodes]
+        self._tx_util_samples = [[] for _ in self.mesh.nodes]
 
         def tick():
             if self.mesh.now > self.duration_ms:
@@ -1535,6 +1542,9 @@ class Campaign:
             for index, node in enumerate(self.mesh.nodes):
                 self._util_samples[index].append(
                     node.channel_utilization_percent(self.mesh.now)
+                )
+                self._tx_util_samples[index].append(
+                    node.utilization_tx_percent(self.mesh.now)
                 )
             self.mesh.at(self.mesh.now + interval_ms, tick)
 
@@ -1657,6 +1667,19 @@ class Campaign:
                     [
                         sum(samples) / len(samples)
                         for samples in self._util_samples
+                        if samples
+                    ]
+                ),
+                # AirTime::utilizationTXPercent, per node: sixty one-minute buckets holding only
+                # this node's own transmissions. A different question from the line above and over a
+                # different window - what it SENT in the last hour, not what it HEARD in the last
+                # minute - and the one a regional duty cycle is enforced against. Reported as the
+                # run's mean per node, and as the worst node, because a duty limit binds per device
+                # and a mesh whose median is comfortable can still have a repeater over the line.
+                "node_air_util_tx_percent": self._dist(
+                    [
+                        sum(samples) / len(samples)
+                        for samples in self._tx_util_samples
                         if samples
                     ]
                 ),

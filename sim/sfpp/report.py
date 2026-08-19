@@ -69,12 +69,6 @@ def report_one(r, indent=""):
     t = r["traffic"]
     a(
         f"{indent}  aggregate demand {t['channel_utilisation']:.2f}x"
-        + (
-            f" · node channel util median {t['node_channel_util_percent']['median']:.0f}%"
-            f" p90 {t['node_channel_util_percent']['p90']:.0f}%"
-            if t.get("node_channel_util_percent")
-            else ""
-        )
         + " · "
         + (
         f"{t['transmissions']} transmissions · {t['queue_drops']} queue drops"
@@ -85,6 +79,20 @@ def report_one(r, indent=""):
             else ""
         )
     )
+    # Two different measurements over two different windows, so they get a line each rather than
+    # being averaged into one "utilisation": chutil is what a node HEARD busy over sixty seconds,
+    # air-util-TX is what it SENT over sixty minutes. The spread is the point in both - a median
+    # says nothing about the repeater carrying the mesh, and a duty cycle binds per device.
+    for key, label, unit in (
+        ("node_channel_util_percent", "node chutil  ", "%"),
+        ("node_air_util_tx_percent", "node airutil ", "%"),
+    ):
+        d = t.get(key)
+        if d:
+            a(
+                f"{indent}  {label} min {d['min']:.1f}{unit}  p10 {d['p10']:.1f}{unit}"
+                f"  mean {d['mean']:.1f}{unit}  p90 {d['p90']:.1f}{unit}  max {d['max']:.1f}{unit}"
+            )
 
     by = r.get("by_class") or {}
     if by:
