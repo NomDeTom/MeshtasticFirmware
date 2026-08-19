@@ -26,10 +26,42 @@ tree's own discrete-event simulator - `discrete_event_sim.py`, `mac.py`, `node.p
 **upstream's, models roughly 2.1-era behaviour, and is never called by anything here.** If you are
 looking for firmware behaviour, it is in `sfpp/mesh.py` and nowhere else.
 
-**It is not** regulatory evidence, a substitute for hardware, or a model of terrain, clutter or
-mobility. Duty cycle is not enforced: airtime figures are what the protocol _asks for_, not what a
-region permits. **§10 is the full list of what is simplified, assumed and absent, and every result
-from this tool is bounded by it.**
+**It is not** regulatory evidence, a substitute for hardware, or a model of mobility. Terrain and
+clutter are modelled only when `--scenario` asks for them (§5.1h); without it the world is flat.
+Duty cycle is not enforced: airtime figures are what the protocol _asks for_, not what a region
+permits, though `node_air_util_tx_percent` now reports what each node would have to declare.
+**§10 is the full list of what is simplified, assumed and absent, and every result from this tool is
+bounded by it.**
+
+### The two rules the transport is held to
+
+Everything in `sfpp/mesh.py` obeys these. They are not style preferences - most of the real bugs
+found in this simulator have been one of them broken somewhere, and each looked like a plausible
+number until it was traced back.
+
+**1. A node knows only what it can hear or perceive.** No node reads another's state, another's
+position, or the shape of the mesh. What this looks like in practice:
+
+- a relay byte is one byte, so two peers can share it and the receiver cannot tell which sent -
+  `resolve_unique_last_byte` returns nothing rather than guessing;
+- a traceroute is believed only where the immediate relay corroborates it, because the rest of the
+  path is hearsay;
+- an evicted peer is forgotten, and a stored route decays on its own clocks, because a node cannot
+  know a route went stale;
+- channel utilisation is the union of the stretches the radio sensed occupied, not the sum of the
+  transmissions it could hear. **A receiver cannot count the transmitters it collided with**: it has
+  one energy detector, and on failure it learns that an Rx failed, not why or how many were talking.
+  That one was wrong until `18a7293`, and read as 184% of wall-clock before it was found.
+
+**2. Only the observer has full knowledge, and only ever for measurement.** The run computes
+quantities no device could: `truth`, the topological distance to every reachable node; the
+reachability ceiling; the union across archives; the silent-loss audit. **None of them may reach a
+decision a node makes** - they exist so a result can be compared against what was actually possible.
+If an omniscient quantity starts feeding behaviour, the run stops measuring the protocol and starts
+measuring the observer.
+
+(Unrelated naming: `sfpp/oracle.cpp` and `check_oracle.py` are a differential test of the PinSketch
+port against the firmware's C++, not the observer described here.)
 
 ### The one gap worth knowing before you read any result
 
