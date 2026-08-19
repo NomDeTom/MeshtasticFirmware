@@ -158,6 +158,19 @@ class Placement:
         return rng.sample(clients, min(count, len(clients)))
 
     @staticmethod
+    def random_any(mesh, count, rng, hops=None):
+        """Any node at all, chosen at random, whatever it already is.
+
+        The other strategies each answer "where should an operator put one", and every one of them
+        is bounded by something: `routers` and `beside-router` cannot exceed the number of routers
+        the mesh happens to have - four, on the Batumi snapshot - so asking either for six gets four
+        and no complaint. This one is bounded only by the node count, which makes it the strategy for
+        asking how the archive scales rather than where it goes, and the honest control for any claim
+        that a deliberate arrangement beat chance.
+        """
+        return rng.sample(range(len(mesh.nodes)), min(count, len(mesh.nodes)))
+
+    @staticmethod
     def hops_apart(mesh, count, rng, hops=3):
         """Servers whose pairwise separation is as close to `hops` as the graph allows."""
         n = len(mesh.nodes)
@@ -186,8 +199,14 @@ class Placement:
         "alternate-routers": alternate_routers.__func__,
         "beside-router": beside_router.__func__,
         "random-clients": random_clients.__func__,
+        "random-any": random_any.__func__,
         "hops-apart": hops_apart.__func__,
     }
+
+    # Strategies whose reach is set by the mesh rather than by the request, so asking for more than
+    # the mesh can offer is answered with what it has. Named here so a run can say so out loud
+    # instead of quietly returning a shorter list.
+    ROLE_BOUNDED = {"routers", "alternate-routers", "beside-router"}
 
 
 class Counters:
@@ -527,13 +546,41 @@ class Campaign:
 
     # ---- setup ------------------------------------------------------------------------
 
+    def server_count(self):
+        """How many archives this run wants, as a count.
+
+        A value below 1 is read as a share of the mesh rather than a count, so a scaling sweep can
+        hold the archive density fixed while the node count moves: `--servers 0.05` is five per
+        hundred nodes at every scale, where `--servers 3` is three whether the mesh is 92 nodes or
+        368. Zero servers is a legitimate answer and means the same as --baseline.
+        """
+        value = self.opts.servers
+        if value is None:
+            return 0
+        if 0 < value < 1:
+            return max(1, round(value * len(self.mesh.nodes)))
+        return int(value)
+
     def _place_servers(self, archive=True):
         """Choose the archive positions. With `archive=False` they are marked and instrumented but
         run nothing, so the same nodes in the same places can be measured as ordinary nodes.
         """
         strategy = Placement.BY_NAME[self.opts.place]
-        indexes = strategy(self.mesh, self.opts.servers, self.rng, self.opts.hops_apart)
+        wanted = self.server_count()
+        indexes = strategy(self.mesh, wanted, self.rng, self.opts.hops_apart)
         self.designated = sorted(indexes)
+        # What was asked for against what the mesh could offer. A role-bounded strategy silently
+        # returning a shorter list is how "6 servers" and "4 servers" end up as the same row in a
+        # sweep, indistinguishable once the requested number is the only one written down.
+        self.servers_requested = wanted
+        self.servers_short = wanted - len(self.designated)
+        if self.servers_short > 0:
+            print(
+                f"note: --place {self.opts.place} could place {len(self.designated)} of the "
+                f"{wanted} servers asked for; this mesh has "
+                f"{sum(1 for n in self.mesh.nodes if n.role == M.ROUTER)} routers",
+                file=sys.stderr,
+            )
         if not archive:
             return
         for i in indexes:
@@ -1776,6 +1823,11 @@ class Campaign:
             )
             report["sfpp"] = {
                 "servers": sorted(self.servers),
+                # Requested and placed, separately. A role-bounded strategy asked for more than the
+                # mesh has returns fewer, and a sweep that records only the request turns several
+                # different questions into one indistinguishable row.
+                "servers_requested": getattr(self, "servers_requested", None),
+                "servers_placed": len(self.designated),
                 "separation_hops": self.server_separation(),
                 "held_per_server": [len(s.held) for s in self.servers.values()],
                 "held_fraction_mean": (
@@ -2754,7 +2806,16 @@ def build_parser():
         help="abandon a walk after this many round trips per object, so a runaway is visible",
     )
     ap.add_argument("--baseline", action="store_true", help="no SF++ servers at all")
-    ap.add_argument("--servers", type=int, default=3)
+    ap.add_argument(
+        "--servers",
+        type=float,
+        default=3,
+        help="how many archives to place. A value below 1 is a share of the mesh instead of a "
+        "count, so --servers 0.05 holds the archive density fixed as --mirror changes the node "
+        "count. Strategies bounded by role (routers, beside-router, alternate-routers) cannot "
+        "exceed the mesh's router count and say so when they fall short; random-any is bounded "
+        "only by the number of nodes",
+    )
     ap.add_argument("--place", default="spread", choices=sorted(Placement.BY_NAME))
     ap.add_argument("--hops-apart", type=int, default=3)
 
