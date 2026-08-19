@@ -420,6 +420,19 @@ def preset_scenario(name="batumi"):
 
     terrain_path = PRESET_ROOT / f"{name}_terrain.csv"
     clutter_path = PRESET_ROOT / f"{name}_clutter.csv"
+    calibration = dict(raw.get("radio_calibration", {}) or {})
+    # How far the fit was actually trained, taken from the observations it was trained on rather
+    # than assumed. A ridge fit extrapolates without complaint, and this one's ground-elevation
+    # terms are large, positive and unbounded (+4.24 dB per 100 m of the lower endpoint alone)
+    # against a distance penalty of only -4.68*log10(km): past the observed range two high nodes
+    # gain more from their elevation than the distance takes away, and the model invents a link.
+    observed = [
+        math.dist(points[o["from"]], points[o["to"]])
+        for o in raw.get("calibration_observations", []) or []
+        if 0 <= o.get("from", -1) < len(points) and 0 <= o.get("to", -1) < len(points)
+    ]
+    if observed:
+        calibration["max_observed_link_m"] = max(observed)
     return Scenario(
         name=name,
         points=points,
@@ -433,7 +446,7 @@ def preset_scenario(name="batumi"):
         if terrain_path.exists()
         else None,
         clutter_file=clutter_path if clutter_path.exists() else None,
-        calibration=raw.get("radio_calibration", {}) or {},
+        calibration=calibration,
         fixed_geometry=True,
     )
 
@@ -787,6 +800,14 @@ def apply(conf, scenario, terrain=True, clutter=True, link_calibration=True):
     ):
         if source in calibration:
             setattr(conf, target, float(calibration[source]))
+
+    # The envelope the fit has support over. Beyond it the caller falls back to the raw budget,
+    # because a linear model asked about a distance it never saw answers confidently and wrongly.
+    conf.LINK_CALIBRATION_MAX_M = (
+        float(calibration["max_observed_link_m"])
+        if "max_observed_link_m" in calibration
+        else None
+    )
 
     model = calibration.get("link_calibration_model", {}) if link_calibration else {}
     conf.LINK_CALIBRATION_MODEL_ENABLED = bool(model.get("coefficients"))

@@ -2028,6 +2028,13 @@ class Campaign:
                 "clutter": round(terms["clutter_db"] / pairs, 3),
                 "pairs": pairs,
             }
+            # Pairs further apart than anything the fit was trained on, which fell back to the raw
+            # budget. Reported because it is the honest measure of how much of a run's geometry the
+            # calibration covers - on a mirrored scenario it is most of it.
+            out["pairs_beyond_calibration"] = terms.get("beyond_calibration", 0)
+            out["calibration_envelope_m"] = getattr(
+                self.conf, "LINK_CALIBRATION_MAX_M", None
+            )
         return out
 
     def _hops_away_report(self):

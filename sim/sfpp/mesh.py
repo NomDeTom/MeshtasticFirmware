@@ -2527,11 +2527,26 @@ class Mesh:
         # window, so they are not a better link model in general - taking them somewhere else would
         # be transporting Batumi's ridges and rooftops to a place that does not have them.
         calibrated = bool(getattr(conf, "LINK_CALIBRATION_MODEL_ENABLED", False))
+        # A fit answers any distance it is asked about, including ones it has never seen. Batumi's
+        # was trained on 296 links reaching 23.2 km - three of them past 20 km and none past 30 -
+        # and its ground-elevation terms are positive and unbounded against a log-distance penalty
+        # that grows far more slowly. Mirrored past one tile that stops being an approximation: at
+        # four tiles a tenth of the links ran beyond 42 km and the longest reached 60.6 km, none of
+        # which the fit has any support for. Past the envelope the raw budget answers instead - it
+        # is only a physical path loss, but it is a physical path loss everywhere.
+        calibration_max = getattr(conf, "LINK_CALIBRATION_MAX_M", None)
         # Three loss terms, three separate claims, kept apart so a result can price them apart:
         # distance is geometry, terrain is a public elevation model, clutter is a land-cover raster.
         # Both obstruction functions return 0.0 with their grid disabled, which is what makes a
         # no-terrain run bit-identical to every run made before the ground existed.
-        self.loss_terms = {"terrain_db": 0.0, "clutter_db": 0.0, "pairs": 0}
+        self.loss_terms = {
+            "terrain_db": 0.0,
+            "clutter_db": 0.0,
+            "pairs": 0,
+            # Pairs the fit was asked about and refused, so a run can say how much of
+            # its geometry the calibration actually covered.
+            "beyond_calibration": 0,
+        }
 
         for i in range(n):
             for j in range(i + 1, n):
@@ -2563,7 +2578,10 @@ class Mesh:
                 # The per-pair Gaussian skew is kept on top, for the asymmetry that is a property of
                 # the link rather than of either radio. Drawn once, above, and reused.
                 skew = self._skew[i][j]
-                if calibrated:
+                in_envelope = calibration_max is None or d <= calibration_max
+                if calibrated and not in_envelope:
+                    self.loss_terms["beyond_calibration"] += 1
+                if calibrated and in_envelope:
                     # A scenario that ships fitted coefficients has measured what its links
                     # actually do, and that beats this budget: on Batumi the fit is trained on 296
                     # observed links, and the raw budget disagrees with them badly enough to break
