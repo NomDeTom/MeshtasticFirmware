@@ -4,3 +4,8 @@ oracle
 *.db
 *.db-wal
 *.db-shm
+
+# Scenario cache: SRTM tiles, fetched map payloads, and the clutter rasters --mirror writes.
+# All regenerable from the preset plus the flag, and it lands inside the vendored tree, where
+# UPSTREAM requires `git diff` against upstream to show our changes and nothing else.
+meshtasticator/cache/
