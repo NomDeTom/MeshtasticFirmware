@@ -202,6 +202,7 @@ assumed without saying so.
 | `--scenario`              | -       | `flat`, `rolling`, `ridge`, `valleys`, `coastal`, `alpine` put ground under a **generated** mesh; `batumi` is a **real** mesh over real ground and decides its own node count and roles; `map` cuts `--bbox` out of the public map |
 | `--bbox`                  | -       | `min_lat,min_lon,max_lat,max_lon`. Required by `--scenario map`                                     |
 | `--scenario-limit`        | -       | keep at most this many nodes from a `map` fetch                                                     |
+| `--mirror`                | 1       | tile a real scenario into this many mirrored copies, ground and all. Reflected, not repeated: a translated copy lands on terrain the grid never surveyed and gets a featureless plateau. Seam-spanning pairs are outside a fitted scenario's training range |
 | `--no-terrain`            | off     | keep the scenario's geometry and flatten its ground. **The paired run that prices terrain on its own** |
 | `--no-clutter`            | off     | ignore the land-cover raster, keeping terrain                                                       |
 | `--no-link-calibration`   | off     | drop the fitted RSSI correction - a ridge fit over one city's observed links, so a run asking what the ground alone does should say so |

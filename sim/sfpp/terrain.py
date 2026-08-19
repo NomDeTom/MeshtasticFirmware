@@ -580,6 +580,125 @@ def _bbox_slug(bbox):
     return "_".join(f"{v:.4f}" for v in bbox)
 
 
+def tile_grid_for(copies):
+    """The most square arrangement of `copies` tiles, wider than it is tall."""
+    best = (1, copies)
+    for gx in range(1, int(math.isqrt(copies)) + 1):
+        if copies % gx == 0:
+            best = (copies // gx, gx)
+    return best
+
+
+def mirror(scenario, copies, gap_m=1500.0):
+    """Reflect a scenario into `copies` tiles, ground and all.
+
+    Reflection, not translation, and the difference is the whole point. `IndexedTerrainGrid`
+    interpolates rather than refusing, so a translated copy lands on ground the grid never
+    surveyed and gets a featureless plateau - the packaged Batumi grid returns the same 460 m at
+    any distance outside its box. A reflected copy sits on terrain samples as real as the
+    original's, because they ARE the original's, and every seam meets its own mirror image so the
+    ground is continuous across it.
+
+    It scales a place, not a mesh: the result is a plausible larger version of somewhere with this
+    terrain, not a claim about anywhere. A fitted scenario carries the further caveat that pairs
+    spanning a seam are outside the distance range its coefficients were fitted over.
+    """
+    if copies <= 1:
+        return scenario
+    if not scenario.fixed_geometry:
+        raise ValueError("mirror needs real geometry; a landform already covers its own area")
+
+    gx, gy = tile_grid_for(copies)
+    xs = [p[0] for p in scenario.points]
+    ys = [p[1] for p in scenario.points]
+    rows = _clutter_rows(scenario.clutter_file) if scenario.clutter_file else []
+    for x, y, _ in scenario.terrain_rows or []:
+        xs.append(x)
+        ys.append(y)
+    for x, y, _lat, _lon, _cls in rows:
+        xs.append(x)
+        ys.append(y)
+    # The tile spans everything the scenario knows about, so no data is clipped, plus a margin -
+    # without it the outermost nodes of two tiles would land on top of each other at the seam.
+    x0, x1 = min(xs) - gap_m, max(xs) + gap_m
+    y0, y1 = min(ys) - gap_m, max(ys) + gap_m
+    w, h = x1 - x0, y1 - y0
+
+    def place(x, y, i, j):
+        u = x - x0
+        v = y - y0
+        return (
+            x0 + i * w + (u if i % 2 == 0 else w - u),
+            y0 + j * h + (v if j % 2 == 0 else h - v),
+        )
+
+    points, terrain, clutter = [], [], []
+    seen_clutter = set()
+    for i in range(gx):
+        for j in range(gy):
+            for x, y in scenario.points:
+                points.append(place(x, y, i, j))
+            for x, y, z in scenario.terrain_rows or []:
+                terrain.append((*place(x, y, i, j), z))
+            for x, y, lat, lon, cls in rows:
+                px, py = place(x, y, i, j)
+                # A reflection fixes the tile boundary, so adjacent tiles would each contribute the
+                # same column. Duplicates break ClutterGrid.is_regular, and an irregular grid falls
+                # back to scanning every sample on every lookup - which is minutes per build, not
+                # seconds. Dropping the repeat keeps the raster regular and loses nothing.
+                key = (round(px, 3), round(py, 3))
+                if key in seen_clutter:
+                    continue
+                seen_clutter.add(key)
+                clutter.append((px, py, lat, lon, cls))
+
+    n = gx * gy
+    path = scenario.clutter_file
+    if clutter:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        path = CACHE_ROOT / f"{scenario.name}-mirror{gx}x{gy}-clutter.csv"
+        with path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["x_m", "y_m", "lat", "lon", "clutter_class"])
+            for px, py, lat, lon, cls in clutter:
+                writer.writerow([px, py, lat, lon, cls])
+
+    def repeat(seq):
+        return list(seq) * n if seq else list(seq)
+
+    return Scenario(
+        name=f"{scenario.name}-x{n}",
+        points=points,
+        antenna_height=repeat(scenario.antenna_height),
+        origin=scenario.origin,
+        absolute_altitude=repeat(scenario.absolute_altitude),
+        roles=repeat(scenario.roles),
+        hop_limits=repeat(scenario.hop_limits),
+        antenna_gain=repeat(scenario.antenna_gain),
+        terrain_rows=terrain,
+        clutter_file=path,
+        calibration=scenario.calibration,
+        fixed_geometry=True,
+    )
+
+
+def _clutter_rows(path):
+    """The raster as (x_m, y_m, lat, lon, class), for a transform that has to rewrite x and y."""
+    out = []
+    with Path(path).open(encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            out.append(
+                (
+                    float(row["x_m"]),
+                    float(row["y_m"]),
+                    row.get("lat", ""),
+                    row.get("lon", ""),
+                    row.get("clutter_class", "open"),
+                )
+            )
+    return out
+
+
 def synthetic_scenario(landform, area, seed, name=None):
     """Ground under a generated mesh. No geometry of its own - `build()` still places the nodes."""
     if landform not in LANDFORMS:

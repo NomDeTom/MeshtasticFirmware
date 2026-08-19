@@ -406,6 +406,9 @@ class Campaign:
             limit=getattr(opts, "scenario_limit", None),
             offline=getattr(opts, "offline", False),
         )
+        mirror = int(getattr(opts, "mirror", 1) or 1)
+        if mirror > 1 and self.scenario is not None:
+            self.scenario = TR.mirror(self.scenario, mirror)
         self.terrain = TR.apply(
             self.conf,
             self.scenario,
@@ -2513,6 +2516,15 @@ def build_parser():
         "(flat, rolling, ridge, valleys, coastal, alpine) puts terrain under a generated mesh; "
         "a preset name (batumi) is a real mesh over real ground and decides its own node count; "
         "`map` cuts --bbox out of the public map. Omit for the flat world",
+    )
+    ap.add_argument(
+        "--mirror",
+        type=int,
+        default=1,
+        help="tile a real scenario into this many mirrored copies, ground and all, to ask what a "
+        "bigger mesh of the same kind of place does. Reflected rather than repeated, because a "
+        "translated copy lands on terrain the grid never surveyed. Pairs across a seam are outside "
+        "the range a fitted scenario's coefficients were trained on",
     )
     ap.add_argument(
         "--bbox",
