@@ -38,6 +38,7 @@ again to ask what that term alone was worth.
 """
 
 import csv
+import heapq
 import json
 import math
 import os
@@ -80,10 +81,23 @@ class IndexedTerrainGrid:
 
     NEAREST = 8
 
+    # Below this many samples the index is slower than the scan it replaces, and measurably: the
+    # packaged Batumi grid is 42 points about 4 km apart, so the ring has to widen two or three
+    # times - re-sorting its candidates on each pass - to prove it has the nearest eight, where
+    # heapq over all 42 answers in one. Profiling a 92-node Batumi build put 1.48 s of 5.19 s in
+    # the ring search alone. The index earns its keep on an SRTM tile, not on a preset.
+    SCAN_BELOW = 512
+
     def __init__(self, samples):
         self.samples = list(samples)
         if not self.samples:
             raise ValueError("terrain grid has no samples")
+        self.scan_only = len(self.samples) < self.SCAN_BELOW
+        if self.scan_only:
+            self._buckets = {}
+            self._cache = {}
+            self.cell = 1.0
+            return
         xs = sorted({x for x, _, _ in self.samples})
         ys = sorted({y for _, y, _ in self.samples})
         # The bucket side is the grid's own spacing where it has one, and the bounding box divided
@@ -135,6 +149,25 @@ class IndexedTerrainGrid:
         return value
 
     def _compute(self, x, y):
+        if self.scan_only:
+            # Exactly the vendored calculation, and the parity tests hold both paths to it.
+            weighted_sum = 0.0
+            weight_total = 0.0
+            for distance, elevation in heapq.nsmallest(
+                self.NEAREST,
+                (
+                    (math.hypot(x - sx, y - sy), elevation)
+                    for sx, sy, elevation in self.samples
+                ),
+                key=lambda item: item[0],
+            ):
+                if distance < 0.01:
+                    return elevation
+                weight = 1.0 / (distance * distance)
+                weighted_sum += elevation * weight
+                weight_total += weight
+            return weighted_sum / weight_total
+
         cx = int(math.floor(x / self.cell))
         cy = int(math.floor(y / self.cell))
 
