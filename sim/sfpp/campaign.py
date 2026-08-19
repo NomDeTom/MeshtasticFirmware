@@ -23,6 +23,7 @@ import os
 import random
 import shutil
 import statistics
+from dataclasses import replace
 import sys
 import tempfile
 import time
@@ -72,6 +73,9 @@ MIX = (
     T.Class("telemetry", T.TELEMETRY_APP, 2.0, 24, 6, 1.0),
     T.Class("nodeinfo", T.NODEINFO_APP, 0.33, 40, 8, 1.0),
     T.Class("text", T.TEXT_MESSAGE_APP, 1.2, 53, 20, 0.4, archived=True),
+    # Rate filled in from --dm-per-hour; zero here so a run that does not ask for DMs is identical
+    # to every run made before they existed.
+    T.Class("dm", T.TEXT_MESSAGE_APP, 0.0, 53, 20, 0.4, directed=True),
 )
 
 
@@ -481,11 +485,28 @@ class Campaign:
             terrain=self.terrain,
         )
         self.root_hash = bytes(range(16))
+        # Who anyone ever types on. Assigned before the generator picks its DM pool, and at random
+        # rather than by degree: whether a node has a user is a fact about its owner, not about how
+        # well sited it is, and choosing the worst-connected nodes would make an unattended mesh look
+        # cheaper than it is.
+        originating = float(getattr(opts, "dm_originator_fraction", 1.0))
+        if originating < 1.0:
+            silent = self.rng.sample(
+                range(len(self.mesh.nodes)),
+                len(self.mesh.nodes) - max(1, round(originating * len(self.mesh.nodes))),
+            )
+            for i in silent:
+                self.mesh.nodes[i].originates_dm = False
         self.generator = T.Generator(
             self.mesh,
             self.rng,
             self.root_hash,
-            mix=MIX,
+            mix=tuple(
+                replace(c, per_hour=float(getattr(opts, "dm_per_hour", 0.0)))
+                if c.directed
+                else c
+                for c in MIX
+            ),
             congestion_scaling=not opts.no_congestion_scaling,
             congestion_mode=getattr(opts, "congestion_mode", "adaptive"),
             online_cap=opts.max_num_nodes,
@@ -493,10 +514,13 @@ class Campaign:
             broadcast_interval_s=opts.broadcast_interval_s,
             diurnal=opts.diurnal,
             start_hour=opts.start_hour,
+            archive_dms=getattr(opts, "archive_dms", False),
             position_throttle=opts.position_throttle,
             telemetry_throttle=opts.telemetry_throttle,
         )
         self.counters = Counters()
+        # packet id -> (hops, latency_ms) for DMs that reached the node they were addressed to.
+        self.dm_delivered = {}
         # Which route an addressed SR message takes. `hop-by-hop` is the fiction every published
         # chain cost was measured under; `transport` is the real one.
         self.dm_transport = getattr(opts, "dm_transport", "hop-by-hop")
@@ -645,6 +669,15 @@ class Campaign:
         if packet.kind == "text":
             h = self.hops_away_hist[node.index]
             h[hops] = h.get(hops, 0) + 1
+        # A DM counts as received only at the node it was addressed to. Every other node that heard
+        # it relayed it; the flood reaching a bystander is not delivery, and counting it as one is
+        # how an addressed protocol gets credited with a broadcast's reach.
+        if packet.kind == "dm":
+            sent = self.generator.dm_sent.get(packet.id)
+            if sent is not None and sent[1] == node.index:
+                self.dm_delivered.setdefault(
+                    packet.id, (hops, self.mesh.now - sent[2])
+                )
 
     def _on_receive(self, node, packet, rssi, snr):
         self._note_class_reception(node, packet)
@@ -1672,6 +1705,8 @@ class Campaign:
             # run, which is the honest label for one: every figure here rests on the geometry, so a
             # JSON that does not say which geometry cannot be compared with one that does.
             "ground": self._ground_report(),
+            # Null unless DMs were asked for. Delivery judged at the addressed recipient.
+            "dm": self._dm_report(),
             # Null when the preset and node count are a combination a real mesh is in. A note, not a
             # guard, so an out-of-range number cannot be quoted later as though it came from one.
             "outside_deployed_range": M.preset_realism(self.opts.preset, self.opts.nodes),
@@ -2071,6 +2106,51 @@ class Campaign:
             }
         return out
 
+    def _dm_report(self):
+        """Did the DM reach the node it was addressed to?
+
+        Reported whenever DMs were generated, archived or not, because it is the measure an addressed
+        protocol has to be judged on and it is not the broadcast figure. A DM that fifty nodes
+        relayed and the recipient never decoded is a failure; `text_reception_mean` would score it as
+        a success fifty times over.
+
+        `no_key` is separated from `lost` on purpose. The firmware never composes a PKI packet for a
+        peer whose key it does not hold, so that DM never reached the air at all - a different
+        failure from one the mesh dropped, and the one an operator meets first when a peer has aged
+        out of the hot store.
+        """
+        sent = len(self.generator.dm_sent)
+        no_key = self.generator.dm_no_key
+        unaddressable = self.generator.dm_no_addressable
+        if not sent and not no_key and not unaddressable:
+            return None
+        delivered = len(self.dm_delivered)
+        hops = [h for h, _ in self.dm_delivered.values()]
+        latency = [ms for _, ms in self.dm_delivered.values()]
+        attempted = sent + no_key + unaddressable
+        return {
+            "attempted": attempted,
+            "composed": sent,
+            "no_key": no_key,
+            # The user had nobody to pick: this node held no peer's key yet. Early-run, before
+            # nodeinfo has spread, and the reason a first DM from a fresh node has nowhere to go.
+            "no_addressable_peer": unaddressable,
+            "delivered": delivered,
+            # Of the DMs that reached the air. The honest success rate for the transport.
+            "reception": round(delivered / sent, 4) if sent else 0.0,
+            # Of everything the user tried to send, including what was never composed.
+            "reception_of_attempted": round(delivered / attempted, 4) if attempted else 0.0,
+            "lost": sent - delivered,
+            "archived": bool(getattr(self.opts, "archive_dms", False)),
+            "hops": self._dist(hops) if hops else None,
+            "latency_ms": self._dist(latency) if latency else None,
+            # Both counted over the same set - nodes eligible to be either end of a DM - because
+            # "69 of 65" is what comparing two different populations looks like.
+            "eligible_nodes": len(self.generator.dm_targets),
+            "originating_nodes": len(self.generator.dm_pool),
+            "emitting_nodes": len(self.generator.emitters.get("dm", ())),
+        }
+
     def _ground_report(self):
         """What the run stood on, and what each loss term cost per pair.
 
@@ -2454,6 +2534,30 @@ def build_parser():
         metavar="NAME=VALUE",
         help="override one rule, repeatable. Specific pre-2.5 pathologies live here rather than as "
         "a profile, e.g. --profile-flag clamp_cw=true for the unclamped Arduino map() window",
+    )
+    ap.add_argument(
+        "--dm-per-hour",
+        type=float,
+        default=0.0,
+        help="direct messages per originating node per hour. Zero by default, because every result "
+        "published before this existed was measured without them. Ends are drawn from CLIENT and "
+        "CLIENT_MUTE only - a router is infrastructure on a mast, and the addressed traffic it sees "
+        "in the field is an admin session, which is modelled separately",
+    )
+    ap.add_argument(
+        "--dm-originator-fraction",
+        type=float,
+        default=1.0,
+        help="share of nodes anyone ever types on. Below 1.0 sprinkles unattended nodes - a solar "
+        "repeater, a sensor, an owner who reads and never writes - which still relay everything and "
+        "are still valid destinations, but never start a conversation",
+    )
+    ap.add_argument(
+        "--archive-dms",
+        action="store_true",
+        help="put DMs in the archive as well as on the air. Off by default: SF++ archives broadcast "
+        "text on the primary channel, so by default a DM is contention the archive cannot help with, "
+        "and turning this on measures a protocol change rather than the shipped one",
     )
     ap.add_argument(
         "--diurnal",

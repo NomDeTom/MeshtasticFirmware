@@ -145,6 +145,37 @@ def report_one(r, indent=""):
         f"{indent}  routing ceiling     {b['reach_ceiling_mean']:.3f}"
         f"   (beyond it {b['missed_beyond_hop_limit']:.3f}, lost inside it {b['missed_within_reach']:.3f})"
     )
+    # A primary line, beside text reach, because a DM is judged at the node it was addressed to and
+    # the broadcast figure says nothing about it. Absent only when no DMs were asked for.
+    dm = r.get("dm")
+    if dm:
+        flag = ""
+        if dm["reception"] < 0.5 and dm["composed"]:
+            flag = "   <- under half of composed DMs arrived"
+        a(
+            f"{indent}  DM success          {dm['reception']:.3f}"
+            f"  ({dm['delivered']}/{dm['composed']} composed"
+            + (f", {dm['no_key']} no key" if dm["no_key"] else "")
+            + (
+                f", {dm['no_addressable_peer']} no addressable peer"
+                if dm["no_addressable_peer"]
+                else ""
+            )
+            + f") · of all attempted {dm['reception_of_attempted']:.3f}"
+            + flag
+        )
+        h, lat = dm.get("hops"), dm.get("latency_ms")
+        if h and lat:
+            a(
+                f"{indent}  DM delivered        hops p10 {h['p10']:.1f} median {h['median']:.1f}"
+                f" p90 {h['p90']:.1f} max {h['max']:.0f}"
+                f" · latency median {lat['median']/1000:.1f}s p90 {lat['p90']/1000:.1f}s"
+            )
+        a(
+            f"{indent}  DM population       {dm['emitting_nodes']} emitting of "
+            f"{dm['originating_nodes']} attended of {dm['eligible_nodes']} eligible"
+            + ("  · archived" if dm["archived"] else "  · not archived (contention only)")
+        )
 
     s = r.get("sfpp")
     if s:

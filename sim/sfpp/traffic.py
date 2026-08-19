@@ -20,6 +20,12 @@ POSITION_APP = 3
 NODEINFO_APP = 4
 TELEMETRY_APP = 67
 
+# Role names, as mesh.py spells them. Duplicated rather than imported: this module deliberately does
+# not depend on the transport, and they are wire-level strings that cannot change without the
+# firmware changing.
+CLIENT = "CLIENT"
+CLIENT_MUTE = "CLIENT_MUTE"
+
 HASH_SIZE = 16  # SFPP_HASH_SIZE
 BROADCAST = 0xFFFFFFFF
 
@@ -33,6 +39,9 @@ class Class:
     sigma_bytes: float
     node_fraction: float  # share of nodes that emit this class at all
     archived: bool = False
+    # Addressed to one peer rather than broadcast. A DM is PKI-encrypted and asks for an ack, so it
+    # exercises next-hop routing and the retry ladder where a broadcast exercises the flood.
+    directed: bool = False
 
 
 # Payload sizes are the Data protobuf, which is what airtime is charged on after the 16-byte header.
@@ -41,6 +50,9 @@ DEFAULT_MIX = (
     Class("telemetry", TELEMETRY_APP, 2.0, 24, 6, 1.0),
     Class("nodeinfo", NODEINFO_APP, 1.0, 40, 8, 1.0),
     Class("text", TEXT_MESSAGE_APP, 1.2, 53, 20, 0.4, archived=True),
+    # Direct messages. Rate 0 by default: --dm-per-hour turns them on, because every result
+    # published before they existed was measured without them and they are not free.
+    Class("dm", TEXT_MESSAGE_APP, 0.0, 53, 20, 0.4, directed=True),
 )
 
 
@@ -222,6 +234,7 @@ class Generator:
         congestion_input="hotstore",
         broadcast_interval_s=None,
         diurnal="flat",
+        archive_dms=False,
         start_hour=8.0,
     ):
         self.mesh = mesh
@@ -299,7 +312,7 @@ class Generator:
         # deserves to be a knob rather than an assumption.
         self.broadcast_interval_s = broadcast_interval_s
         self.diurnal = diurnal
-        self.diurnal_classes = {"text", "position"}
+        self.diurnal_classes = {"text", "position", "dm"}
         self.start_hour = start_hour
         self.emitters = {}
         self.objects = (
@@ -309,9 +322,47 @@ class Generator:
             []
         )  # message_hash in origination order; the chain counter follows it
         self.originated = {c.name: 0 for c in mix}
+        self.archive_dms = archive_dms
+        # DM outcomes. `dm_sent` is packet id -> (sender, target, sent_at); the campaign resolves
+        # each against whether the target ever saw it, so success is measured at the intended
+        # recipient rather than inferred from the flood.
+        self.dm_sent = {}
+        self.dm_no_key = 0
+        self.dm_no_addressable = 0
 
         node_count = len(mesh.nodes)
+        # Who can be either end of a DM. A router is a piece of infrastructure on a mast: people do
+        # not chat from it and nobody DMs it, and the traffic addressed to one in the field is an
+        # admin session, which the campaign models separately. CLIENT_MUTE is included as a
+        # recipient and a sender - a muted node does not REBROADCAST, which is not the same as not
+        # having a user - so the pool is every node that is not router-like.
+        self.dm_pool = [
+            i
+            for i, node in enumerate(mesh.nodes)
+            if node.role in (CLIENT, CLIENT_MUTE) and node.originates_dm
+        ]
+        # A node that receives but never starts one: an unattended sensor, a node whose owner reads
+        # and never writes. It still relays, and it is still a destination.
+        self.dm_targets = [
+            i
+            for i, node in enumerate(mesh.nodes)
+            if node.role in (CLIENT, CLIENT_MUTE)
+        ]
         for cls in mix:
+            if cls.directed:
+                # A class with no rate draws NOTHING, not even its emitter set. rng.sample() would
+                # advance the shared stream and shift every schedule after it, so a run that asks for
+                # no DMs would stop matching the same run made before DMs existed - which is the one
+                # regression check this branch relies on most.
+                if cls.per_hour <= 0 or not self.dm_pool:
+                    self.emitters[cls.name] = set()
+                    continue
+                # Only nodes that originate, and only from the DM pool - `node_fraction` then says
+                # what share of those actually have someone typing on them.
+                pool = self.dm_pool
+                count = min(len(pool), max(1, int(round(len(pool) * cls.node_fraction))))
+                self.emitters[cls.name] = set(rng.sample(pool, count))
+                continue
             count = max(1, int(round(node_count * cls.node_fraction)))
             chosen = rng.sample(range(node_count), count)
             self.emitters[cls.name] = set(chosen)
@@ -413,6 +464,50 @@ class Generator:
                 # proportionally less often, and one on a small 2.5 mesh sends more often.
                 if self.rng.random() > self.congestion_floor / self.node_congestion(node):
                     return
+            if cls.directed:
+                # One peer, chosen fresh each time. Real DMs run in conversations rather than to a
+                # uniform random stranger, but a persistent pairing would make the result depend on
+                # which pairs the draw happened to place near each other; uniform keeps the airtime
+                # honest without claiming to model who talks to whom.
+                # People DM someone they can see. The firmware's DM UI lists the peers whose keys
+                # this node holds, so a target it cannot encrypt to is one the user could not have
+                # picked - drawing uniformly from the whole mesh instead makes the measurement mostly
+                # about key availability (91% of attempts on a 2 h Batumi run) rather than delivery.
+                radio = self.mesh.nodes[node]
+                peers = [
+                    p
+                    for p in self.dm_targets
+                    if p != node and radio.knows_key(p)
+                ]
+                if not peers:
+                    # Nobody addressable yet - early in a run, before nodeinfo has spread. A real
+                    # outcome, and the reason an operator's first DM on a fresh node fails.
+                    self.dm_no_addressable += 1
+                    return
+                target = self.rng.choice(peers)
+                packet = self.mesh.originate(
+                    node,
+                    cls.portnum,
+                    size,
+                    kind=cls.name,
+                    destination=target,
+                    want_ack=True,
+                    pki=True,
+                    payload=None if self.archive_dms else b"",
+                )
+                if packet is None:
+                    # No key for the peer, so the firmware never composes it. Counted, because an
+                    # undeliverable DM is a real outcome and not the same as a lost one.
+                    self.dm_no_key += 1
+                    return
+                self.dm_sent[packet.id] = (node, target, self.mesh.now)
+                if self.archive_dms:
+                    obj = self._make_object(node, packet.id, size, destination=target)
+                    packet.payload = obj.message_hash
+                    self.objects[obj.message_hash] = obj
+                    self.text_order.append(obj.message_hash)
+                self.originated[cls.name] += 1
+                return
             if cls.archived:
                 packet = self.mesh.originate(
                     node, cls.portnum, size, kind=cls.name, payload=None
@@ -429,7 +524,7 @@ class Generator:
 
         self.mesh.at(when, emit)
 
-    def _make_object(self, node, packet_id, size):
+    def _make_object(self, node, packet_id, size, destination=BROADCAST):
         """The object the archive would hold: ciphertext stands in at the same length.
 
         The capture the earlier runs used was already decrypted, so it did the same thing. Length
@@ -438,12 +533,12 @@ class Generator:
         """
         encrypted = self.rng.randbytes(size)
         return TextObject(
-            destination=BROADCAST,
+            destination=destination,
             sender=node,
             packet_id=packet_id,
             rx_time=int(self.mesh.now),
             root_hash=self.root_hash,
             encrypted_bytes=encrypted,
-            message_hash=message_hash_of(encrypted, BROADCAST, node, packet_id),
+            message_hash=message_hash_of(encrypted, destination, node, packet_id),
             commit_hash=b"\x00" * HASH_SIZE,
         )

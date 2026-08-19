@@ -1236,6 +1236,7 @@ class Node:
         "app",
         "busy_until",
         "sense_until",
+        "originates_dm",
         "queue_depth",
         # 2.8 state
         "node_num",
@@ -1300,6 +1301,10 @@ class Node:
             {}
         )  # packet id -> cancellation record, so a rebroadcast can be dropped
         self.app = None  # whatever the campaign attaches; the mesh never inspects it
+        # Whether anyone ever types on this node. False is an unattended deployment - a solar
+        # repeater, a sensor, a node whose owner reads and never writes - which still relays
+        # everything and is still a valid destination, but never starts a conversation.
+        self.originates_dm = True
         self.busy_until = 0.0  # a radio transmits one packet at a time
         # The end of the last stretch this radio sensed the channel occupied. Separate from
         # `busy_until`, which is only our own transmission: this one is what the energy detector
