@@ -12,6 +12,8 @@ full ray tracer, but it captures the important Batumi-mesh case where hills and
 ridges matter more than flat-earth distance alone.
 """
 
+import heapq
+import itertools
 import math
 
 
@@ -21,10 +23,21 @@ NODE_Z_REFERENCE_SEA_LEVEL = "sea_level"
 MAX_REASONABLE_STRUCTURE_HEIGHT_M = 850.0
 
 
+def normalize_longitude_delta(lon, origin_lon):
+    """Return shortest signed longitude delta in degrees."""
+    return ((lon - origin_lon + 180.0) % 360.0) - 180.0
+
+
+def normalize_longitude(lon):
+    """Normalize longitude to the conventional [-180, 180] range."""
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
 def latlon_to_xy(lat, lon, origin_lat, origin_lon):
     """Project WGS84 lat/lon to local x/y meters with an equirectangular map."""
     origin_lat_rad = math.radians(origin_lat)
-    x = math.radians(lon - origin_lon) * EARTH_RADIUS_M * math.cos(origin_lat_rad)
+    lon_delta = normalize_longitude_delta(lon, origin_lon)
+    x = math.radians(lon_delta) * EARTH_RADIUS_M * math.cos(origin_lat_rad)
     y = math.radians(lat - origin_lat) * EARTH_RADIUS_M
     return x, y
 
@@ -37,15 +50,21 @@ def xy_to_latlon(x, y, origin_lat, origin_lon):
         raise ValueError("origin latitude is too close to a pole for local x/y projection")
 
     lat = origin_lat + math.degrees(y / EARTH_RADIUS_M)
-    lon = origin_lon + math.degrees(x / (EARTH_RADIUS_M * origin_cos))
+    lon = normalize_longitude(origin_lon + math.degrees(x / (EARTH_RADIUS_M * origin_cos)))
     return lat, lon
 
 
 class TerrainGrid:
     """Small scattered terrain sample grid with inverse-distance interpolation."""
 
+    # Grids are compared by this token in the terrain loss cache key. Object
+    # ids can be reused after garbage collection, so a recycled address must
+    # not revive cache entries computed against an earlier grid.
+    _cache_token_counter = itertools.count(1)
+
     def __init__(self, samples):
         self.samples = samples
+        self.cache_token = next(TerrainGrid._cache_token_counter)
 
     @classmethod
     def from_rows(cls, rows):
@@ -71,10 +90,11 @@ class TerrainGrid:
         weighted_sum = 0.0
         weight_total = 0.0
 
-        nearest = sorted(
+        nearest = heapq.nsmallest(
+            8,
             ((math.hypot(x - sx, y - sy), elevation) for sx, sy, elevation in self.samples),
             key=lambda item: item[0],
-        )[:8]
+        )
 
         for distance, elevation in nearest:
             if distance < 0.01:
@@ -184,7 +204,7 @@ def terrain_obstruction_loss(conf, tx_point, rx_point, freq):
         round(rx_point.y, 2),
         round(rx_point.z, 2),
         round(freq, 0),
-        id(getattr(conf, "TERRAIN_GRID", None)),
+        getattr(grid, "cache_token", id(grid)),
         conf.GEO_ORIGIN_LAT,
         conf.GEO_ORIGIN_LON,
         conf.TERRAIN_PROFILE_SAMPLES,

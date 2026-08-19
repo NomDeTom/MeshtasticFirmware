@@ -20,10 +20,16 @@ from lib.terrain import latlon_to_xy
 DEFAULT_MAP_NODES_URL = "https://meshtastic.liamcottle.net/api/v1/nodes"
 
 
-def decode_map_coordinate(value):
+def decode_map_coordinate(value, integer_scaled=False):
     """Decode Meshtastic map integer coordinates into decimal degrees."""
     if value is None:
         return None
+    if integer_scaled and isinstance(value, int) and not isinstance(value, bool):
+        return value / 1e7
+    if integer_scaled and isinstance(value, str):
+        stripped = value.strip()
+        if stripped and stripped.lstrip("+-").isdigit():
+            return int(stripped) / 1e7
     coordinate = float(value)
     if abs(coordinate) > 180:
         coordinate /= 1e7
@@ -34,7 +40,10 @@ def decode_map_altitude(value):
     """Return a finite positive map altitude in meters, or None for placeholders."""
     if value is None:
         return None
-    altitude = float(value)
+    try:
+        altitude = float(value)
+    except (TypeError, ValueError):
+        return None
     if not math.isfinite(altitude) or altitude <= 0:
         return None
     return altitude

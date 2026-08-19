@@ -16,6 +16,25 @@ Local deviations from that tree, and the only ones:
   .github/  removed - a nested workflow directory in a firmware repo is confusing even
             though GitHub does not read it.
 
+  Four fixes cherry-picked forward from Komzpa/Meshtasticator codex/split-input-terrain
+  (b0530ee8, 2026-08-17). That branch is a narrower slice of the tree, not a superset - it
+  deletes clutter, dcr, dtp, link_model, osm_clutter, presets and radio_loss - so it cannot
+  be merged wholesale, and only these four are taken. Re-syncing to any later tree that
+  carries them should drop these, not merge them:
+
+    lib/terrain.py    TerrainGrid.cache_token, a monotonic counter, replaces id(grid) in the
+                      terrain-loss cache key. CPython reuses an address after the object at
+                      it is collected, so a new grid could inherit a dead one's cached losses.
+    lib/terrain.py    elevation_at uses heapq.nsmallest(8, ...) rather than sorted(...)[:8].
+                      Same answer - nsmallest is documented as equivalent, ties included, and
+                      sfpp/test_terrain.py pins that against three shapes of input.
+    lib/terrain.py    latlon_to_xy / xy_to_latlon normalise the longitude delta, so a bbox or
+                      a mesh spanning the antimeridian projects to metres correctly.
+    lib/map_input.py  decode_map_coordinate takes integer_scaled, decoding 1e7-scaled ints and
+                      digit strings explicitly instead of inferring from abs(value) > 180;
+                      decode_map_altitude returns None for an unparseable altitude rather
+                      than raising.
+
 Formatting is exempted in .trunk/trunk.yaml so `git diff` against the upstream branch shows
 our changes and nothing else.
 
