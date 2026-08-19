@@ -2254,6 +2254,23 @@ def make_config(
     return conf
 
 
+class _CalNode:
+    """What `lib.link_model.calculate_link_budget` reads off a node, and nothing else.
+
+    It wants `.position` with x/y/z, `.antenna_gain` and `.antenna_height`. This transport keeps
+    its nodes as flat records with separate transmit and receive gains, so one of these is built
+    per direction rather than per node: the same node is a different endpoint depending on which
+    way the packet is travelling.
+    """
+
+    __slots__ = ("position", "antenna_gain", "antenna_height")
+
+    def __init__(self, position, antenna_gain, antenna_height):
+        self.position = position
+        self.antenna_gain = antenna_gain
+        self.antenna_height = antenna_height
+
+
 class Mesh:
     """Event-driven flood over a fixed set of nodes.
 
@@ -2468,6 +2485,7 @@ class Mesh:
         """RSSI for every ordered pair, once. 60 nodes is 3540 path-loss calls; it is not the cost."""
         import lib.phy as phy
         from lib.clutter import clutter_obstruction_loss
+        from lib.link_model import calculate_link_budget
         from lib.terrain import terrain_obstruction_loss
 
         from . import terrain as terrain_mod
@@ -2501,6 +2519,14 @@ class Mesh:
         points = [
             terrain_mod.Point(node.x, node.y, node.altitude) for node in self.nodes
         ]
+        heights = [
+            node.antenna_height_m if node.antenna_height_m is not None else conf.HM
+            for node in self.nodes
+        ]
+        # Only where the scenario carried a fit. These coefficients are one city, 296 links and one
+        # window, so they are not a better link model in general - taking them somewhere else would
+        # be transporting Batumi's ridges and rooftops to a place that does not have them.
+        calibrated = bool(getattr(conf, "LINK_CALIBRATION_MODEL_ENABLED", False))
         # Three loss terms, three separate claims, kept apart so a result can price them apart:
         # distance is geometry, terrain is a public elevation model, clutter is a land-cover raster.
         # Both obstruction functions return 0.0 with their grid disabled, which is what makes a
@@ -2537,8 +2563,38 @@ class Mesh:
                 # The per-pair Gaussian skew is kept on top, for the asymmetry that is a property of
                 # the link rather than of either radio. Drawn once, above, and reused.
                 skew = self._skew[i][j]
-                self.rssi[i][j] = base + self.tx_gain[i] + self.rx_gain[j] + skew
-                self.rssi[j][i] = base + self.tx_gain[j] + self.rx_gain[i] - skew
+                if calibrated:
+                    # A scenario that ships fitted coefficients has measured what its links
+                    # actually do, and that beats this budget: on Batumi the fit is trained on 296
+                    # observed links, and the raw budget disagrees with them badly enough to break
+                    # the mesh into 15 pieces that the observations show as one. The vendored
+                    # function is called rather than reimplemented so the number is exactly the one
+                    # the preset was fitted to produce; the obstruction terms above are already in
+                    # its cache, so the second pass over them is a lookup.
+                    #
+                    # Our per-node gains go in as the endpoints' antenna gain, which is where the
+                    # fit expects them - `raw_snr` is one of its features. The snapshot's own gains
+                    # are all zero, so a default run reproduces the preset and a run with
+                    # --amplifier-mix asks what an amplifier would do to a mesh measured without one.
+                    self.rssi[i][j] = (
+                        calculate_link_budget(
+                            conf,
+                            _CalNode(points[i], conf.GL + self.tx_gain[i], heights[i]),
+                            _CalNode(points[j], conf.GL + self.rx_gain[j], heights[j]),
+                        ).rssi_dbm
+                        + skew
+                    )
+                    self.rssi[j][i] = (
+                        calculate_link_budget(
+                            conf,
+                            _CalNode(points[j], conf.GL + self.tx_gain[j], heights[j]),
+                            _CalNode(points[i], conf.GL + self.rx_gain[i], heights[i]),
+                        ).rssi_dbm
+                        - skew
+                    )
+                else:
+                    self.rssi[i][j] = base + self.tx_gain[i] + self.rx_gain[j] + skew
+                    self.rssi[j][i] = base + self.tx_gain[j] + self.rx_gain[i] - skew
 
         # The widest lift any configured duct can produce, so the candidate set is built once and a
         # delivery only has to filter it. Without this a ducted reception would mean scanning all n
