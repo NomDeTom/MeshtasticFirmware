@@ -1235,6 +1235,7 @@ class Node:
         "pending",
         "app",
         "busy_until",
+        "sense_until",
         "queue_depth",
         # 2.8 state
         "node_num",
@@ -1300,6 +1301,10 @@ class Node:
         )  # packet id -> cancellation record, so a rebroadcast can be dropped
         self.app = None  # whatever the campaign attaches; the mesh never inspects it
         self.busy_until = 0.0  # a radio transmits one packet at a time
+        # The end of the last stretch this radio sensed the channel occupied. Separate from
+        # `busy_until`, which is only our own transmission: this one is what the energy detector
+        # saw, ours and everyone else's, and it exists so overlapping signals are charged once.
+        self.sense_until = 0.0
         self.queue_depth = 0
 
         # A real 32-bit node number, so two nodes can share a last byte as they do on a real mesh.
@@ -1575,6 +1580,26 @@ class Node:
                     self.util_ring[self.util_index] = 0.0
             self.util_epoch += elapsed * 10000.0
         self.util_ring[self.util_index] += ms
+
+    def sense_busy(self, start, end):
+        """Charge the channel-busy time this radio could actually observe over [start, end].
+
+        A receiver has one energy detector and one channel. Two signals overlapping in time are one
+        busy stretch to it, not two: it cannot count transmitters, and when the packet fails it
+        learns only that an Rx failed - not why, and not how many were talking. Charging each
+        overlapping transmission its full airtime attributes knowledge no radio has, and lets the
+        figure exceed 100% of wall-clock, which is not a thing a channel can do.
+
+        Only the part not already covered is charged, so the ring accumulates the union of the busy
+        stretches. Callers charge at the transmission's END, which is the order deliveries fire in,
+        so a running high-water mark is exactly the union rather than an approximation of it.
+        """
+        charged = max(0.0, end - max(start, self.sense_until))
+        if end > self.sense_until:
+            self.sense_until = end
+        if charged:
+            self.log_airtime(end, charged)
+        return charged
 
     def channel_utilization_percent(self, now):
         self.log_airtime(now, 0.0)  # roll the ring forward before reading it
@@ -3303,7 +3328,9 @@ class Mesh:
         duration = self.airtime_ms(packet.length, packet.coding_rate)
         radio = self.nodes[node]
         radio.busy_until = self.now + duration
-        radio.log_airtime(self.now, duration)
+        # Air-util-TX is charged here because a radio never overlaps itself, so start time is fine.
+        # Channel utilisation is charged in _deliver instead, with the receivers, so every interval
+        # reaches sense_busy() in end order and the union is exact.
         radio.log_tx_airtime(self.now, duration)
         packet.relay_node = radio.relay_byte
         packet.relay_index = node  # instrumentation only; see the slot comment
@@ -3362,11 +3389,13 @@ class Mesh:
         # decoded or not, and that figure is what sizes the contention window for our own traffic.
         # Under a duct that figure rises for everyone, which is how an operator's mesh gets slower on
         # the evening it appears to get bigger.
-        duration = tx.end - tx.start
         cad_floor = sensitivity - 3
+        # The transmitter first: its own transmission occupied its channel too, and charging it here
+        # rather than at start keeps every interval arriving in end order.
+        self.nodes[tx.tx_node].sense_busy(tx.start, tx.end)
         for rx in audience:
             if self.rssi[tx.tx_node][rx] + lift >= cad_floor:
-                self.nodes[rx].log_airtime(self.now, duration)
+                self.nodes[rx].sense_busy(tx.start, tx.end)
 
         for rx in audience:
             rssi = self.rssi[tx.tx_node][rx] + lift
@@ -3487,6 +3516,7 @@ class Mesh:
         self.cancel(node.tx_token)
         node.tx_token = None
         node.busy_until = 0.0
+        node.sense_until = 0.0
         self.stats["nodes_taken_down"] += 1
         return True
 
