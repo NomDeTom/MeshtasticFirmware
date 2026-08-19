@@ -723,7 +723,8 @@ diameter column reads fragmented rather than a number.
 | `designated`   | the archive-sited nodes' own reception, with the archive off or on, plus held and the reconciled gain                                                                                                                 |
 | `observers`    | per-observer direct against overheard, and replay placement error                                                                                                                                                     |
 | `sfpp`         | held, union, adverts, objects moved, bytes and airtime by message type, decode failures, misdecodes, escalations, bystander pickups, **`silent_losses`**, the at-rest audit, drift telemetry, and the stretch metrics |
-| `admin`        | per hop of separation: `attempts`, `no_key_for_target` (never composed - PKI needs the target's key), `addressable`, `request_delivered`, `session_completed`, and two rates - `success_rate` over everything tried, `success_given_key` over the ones that could be addressed. Present only with `--admin-probes-per-hour` |
+| `admin`        | per hop of separation, and **per session rather than per request** - a change that took on the third press is a change that took: `sessions`, `requests_sent`, `attempts_per_session`, `request_delivered`, `session_completed`, `success_rate`, `completed_on_attempt` (everything in `1` means the retries are dead weight), and **`failed_because`** splitting `no_key` / `request_lost` / `reply_lost`, counted once per failed session on its final attempt. `keys_preloaded` records the assumption. Present only with `--admin-probes-per-hour` |
+| `dm`           | direct messages, judged **at the node addressed** - `composed`, `delivered`, `reception`, `lost`, plus `no_key` and `no_addressable_peer` (nobody in the node list yet) and `reception_of_attempted` over all three outcomes. `hops` and `latency_ms` distributions at the recipient, and the population - `eligible_nodes` / `originating_nodes` / `emitting_nodes`. Present only with `--dm-per-hour` |
 | `link_quality` | every directed link graded by margin over sensitivity: `comfortable` (≥10 dB), `adequate` (5-10), **`fragile`** (<5, so a little fading removes it), plus **`one_way_links`** (heard one way only - the amplifier signature) and `near_miss` (pairs within 6 dB *below* sensitivity, i.e. what the cliff hides) |
 | `hops_away`    | how far away each node's NodeDB believes its peers are, against the topology's own answer - the belief and the truth side by side                                                                                    |
 | `hop_scaling`  | the firmware's hop histogram: truth, what a node observed, and what its estimator inferred per hop, plus the recommendation it would make                                                                            |
@@ -756,20 +757,75 @@ the last packet returns zero.
 - `per_node_share_of_unreachable_delivered` and `nodes_with_zero_delivered` - the tail, because the
   mean is dragged up by nodes that had little to recover
 
-### 7.2 Reading it
+### 7.2 What counts as success
+
+Four questions, four denominators. **They are not comparable to each other**, and the commonest
+misreading of this tool is treating one as a proxy for another. Each is a primary line on the text
+report.
+
+| Metric | The question | Denominator |
+| --- | --- | --- |
+| `baseline.text_reception_mean` | of all nodes, what share received a broadcast? | every node, every broadcast |
+| `dm.reception` | did the DM reach **the one node it was addressed to**? | DMs that reached the air |
+| `admin.<hops>.success_rate` | did the operator's change take, within the attempts they made? | sessions the operator wanted |
+| `sfpp.held_fraction_mean` | what does an archive **hold**? | objects originated |
+
+A worked example, one 3 h Batumi run: text reach 0.873, DM success 0.966, admin 0.760 at one hop,
+archive held 0.933. The DM figure being higher than the broadcast figure does **not** mean DMs work
+better - a DM needs to reach one node and gets acknowledgements and retries, while text reach is the
+fraction of *all* nodes that heard it. Different denominators, not a comparison.
+
+**Each question separates its own failure modes**, which is the part a single rate cannot do:
+
+- **Broadcast** splits reachability from loss. `reach_ceiling_mean` is what was reachable at all,
+  `missed_beyond_hop_limit` is what no hop limit could have carried, `missed_within_reach` is what
+  was reachable and lost anyway. The example run reads 1.000 / 0.000 / 0.127 - everything was
+  reachable, nothing died to the hop limit, and all the loss was contention. That triple answers
+  "would more hops help", which the mean alone cannot.
+- **DM** splits `delivered` from `no_key` (never composed - the sender holds no key for the peer) and
+  `no_addressable_peer` (the sender's node list was empty, which is the state a fresh node is in
+  before nodeinfo spreads). Only the first is a mesh failure; the other two never reached the air.
+- **Admin** splits `request_lost` from `reply_lost`, so an asymmetric session failure is visible. In
+  the example run, 1 hop failed 4 outbound against 2 return - the request leg is the weaker one, and
+  a rate alone would have hidden which. `attempts_per_session` says what the successes cost.
+
+**The safety gate must read zero.** `sfpp.silent_losses` is the design-falsifying counter, and the
+text report prints `← STOP, this falsifies the design` beside it if it is not. Read it with
+`audit_checksum_agrees_sets_differ` (the at-rest audit disagreeing with the checksum), `misdecodes`
+and `decode_failures`. A run with a good reception figure and a non-zero silent-loss count is not a
+good run.
+
+**Loss attribution counters are opportunities, not rates.** `lost_to_collision`,
+`lost_to_phy`, `lost_to_half_duplex`, `lost_to_noise_excursion`, `queue_drops`, `hops_exhausted`,
+`next_hop_unresolved`, `reliable_failures` all count **per reception opportunity**: one broadcast
+heard by fifty nodes can produce fifty collision losses. The example run shows 207,917 collision
+losses alongside a healthy 0.873 reach, and that is not a contradiction. What the counters are good
+for is the *ratio* between them - `lost_to_collision` far exceeding `lost_to_phy` says the mesh is
+contention-limited rather than range-limited, which is a different problem with a different fix.
+
+**One metric here is not user-facing success.** `held` and `union` are what an archive *has*. There
+is no client hydration path, so nothing measures a user asking a server for what they missed; the
+only measured end-user gain from the archive is bystander pickup. Every other metric on this page is
+a delivery measurement. That one is inventory.
+
+### 7.3 Reading it
 
 Every per-node quantity is `min / p10 / median / mean / p90 / max`. **Prefer the worst node to the
 mean**: on a stretched mesh the result is bimodal - nodes near an archive gain a great deal, nodes past
 the last archive gain nothing - and a mean describes neither.
 
-### 7.3 The report and the charts
+### 7.4 The report and the charts
 
 Both are written by the run itself, into `reports/` and `figures/` beside the JSON, so an unattended
 run leaves a complete result and no post-processing step to forget. `--no-charts` skips only the
 charts; the JSON and the text report are written either way.
 
-The report is the per-portnum statistics with the archived class marked and listed first, the reach
-and routing-ceiling summary, what only an archive could have delivered, and the `silent_losses` gate.
+The report is the per-portnum statistics with the archived class marked and listed first, then the
+four delivery figures of §7.2 as primary lines - text reach, the routing ceiling and its loss split,
+DM success with its failure split and recipient-side hops and latency, and admin success per hop of
+separation with `failed_because` and what the successes cost in attempts - followed by what only an
+archive could have delivered, and the `silent_losses` gate. The two utilisation distributions get a
+line each, because they answer different questions over different windows.
 The charts are per-class reception spread with the worst node marked, airtime by class, and the
 stretch metrics where present - each footered with the transport commit, seed and duration, so a
 figure cannot be read against the wrong code.
