@@ -1,0 +1,315 @@
+# trunk-ignore-all(checkov/CKV_GHA_7): the dispatch inputs select a ref, a landform and a seed;
+# each is validated in the plan job and reaches a shell only through env:, never spliced into it.
+# One scheduled sweep of the SF++ campaign: every block, a fresh random seed base, and one landform
+# drawn for the whole run. Each block is its own job because sweep.py has no internal parallelism -
+# a single job running all 87 in sequence is about six hours of simulator time, which is the job
+# ceiling, and one slow block would take the run down with it.
+#
+# The run's results are committed to a data-only branch (see RESULTS_BRANCH). Artifacts alone would
+# not do: they expire, and the explorer has to be able to look further back than that.
+name: Sim Sweep
+
+on:
+  schedule:
+    # 02:10 UTC. Not on the hour: GitHub delays cron under load, and the top of the hour is where
+    # every scheduled workflow on the platform queues at once.
+    - cron: 10 2 * * *
+  workflow_dispatch:
+    inputs:
+      sim_ref:
+        description: Branch or SHA holding sim/ - the sweep runs this tree's code
+        type: string
+        required: false
+        default: sfpp-sr-sim
+      scenario:
+        description: Ground under the mesh. `random` draws one; `flat` is no terrain at all
+        type: choice
+        required: false
+        default: random
+        options: [random, flat, rolling, ridge, valleys, coastal, alpine, none]
+      seed_base:
+        description: Replay an earlier run by giving its seed base. Empty draws a new one
+        type: string
+        required: false
+        default: ""
+      blocks:
+        description: Space-separated block names. Empty means every block sweep.py declares
+        type: string
+        required: false
+        default: ""
+      seeds:
+        description: Seeds per cell. One is the nightly default; the archive accumulates the rest
+        type: string
+        required: false
+        default: "1"
+
+permissions: {}
+
+# One sweep at a time. Two runs would each push a directory to the results branch and the second
+# would spend its collate job resolving a conflict it has no way to resolve.
+concurrency:
+  group: sim-sweep
+  cancel-in-progress: false
+
+env:
+  RESULTS_BRANCH: sim-results
+  SIM_REF: ${{ inputs.sim_ref || 'sfpp-sr-sim' }}
+
+jobs:
+  plan:
+    name: Draw the run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.draw.outputs.matrix }}
+      blocks: ${{ steps.draw.outputs.blocks }}
+      seed_base: ${{ steps.draw.outputs.seed_base }}
+      scenario: ${{ steps.draw.outputs.scenario }}
+      grid: ${{ steps.draw.outputs.grid }}
+      run_id: ${{ steps.draw.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SIM_REF }}
+          persist-credentials: false
+
+      - name: Draw a seed base, a landform, and the block list
+        id: draw
+        shell: bash
+        working-directory: sim
+        # Dispatch inputs are free text and reach python through the environment only, never spliced
+        # into a shell or a python source line.
+        env:
+          IN_SCENARIO: ${{ inputs.scenario }}
+          IN_SEED_BASE: ${{ inputs.seed_base }}
+          IN_BLOCKS: ${{ inputs.blocks }}
+        run: |
+          set -euo pipefail
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import datetime, json, os, secrets, sys
+          from sfpp.sweep import BLOCKS
+
+          # Landforms only. `map` fetches from the public map and `batumi` decides its own node
+          # count, which the blocks that sweep --nodes contradict; neither belongs in an unattended
+          # run. See sim/README.md §5.1h.
+          LANDFORMS = ["flat", "rolling", "ridge", "valleys", "coastal", "alpine"]
+
+          asked = (os.environ.get("IN_SCENARIO") or "random").strip() or "random"
+          if asked == "random":
+              scenario = secrets.choice(LANDFORMS)
+          elif asked in ("none", ""):
+              scenario = ""
+          else:
+              scenario = asked
+          if scenario and scenario not in LANDFORMS:
+              sys.exit(f"unknown landform {scenario!r}; have {', '.join(LANDFORMS)}")
+
+          # A whole run shares one seed base, so every block in it saw the same draw and the run is
+          # replayable from a single number. sweep.py would otherwise draw its own per invocation,
+          # which with one job per block means 87 unrelated draws and nothing to replay.
+          seed_base = (os.environ.get("IN_SEED_BASE") or "").strip()
+          if not seed_base:
+              seed_base = str(secrets.randbelow(9_000_000) + 1_000_000)
+          if not seed_base.isdigit():
+              sys.exit(f"seed base must be a number, got {seed_base!r}")
+
+          asked_blocks = (os.environ.get("IN_BLOCKS") or "").split()
+          unknown = [b for b in asked_blocks if b not in BLOCKS]
+          if unknown:
+              sys.exit(f"unknown block(s): {', '.join(unknown)}")
+          blocks = asked_blocks or sorted(BLOCKS)
+
+          print(f"matrix={json.dumps(blocks)}")
+          print(f"blocks={' '.join(blocks)}")
+          print(f"seed_base={seed_base}")
+          print(f"scenario={scenario}")
+          print(f"grid={'--scenario ' + scenario if scenario else ''}")
+          print(f"run_id={datetime.date.today().isoformat()}-{seed_base}")
+          PY
+          cat "$GITHUB_OUTPUT"
+
+  sweep:
+    name: ${{ matrix.block }}
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      # Below the plan's concurrency allowance, so a sweep never occupies every runner the account
+      # has and blocks a PR check behind 87 queued simulator jobs.
+      max-parallel: 12
+      matrix:
+        block: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SIM_REF }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      # The simulator is standard library only; matplotlib is here for the per-block charts, which
+      # the run writes itself. Without it the run still produces its JSON and its text report.
+      - name: Install the chart dependency
+        run: pip install --quiet "matplotlib>=3.5"
+
+      - name: ${{ matrix.block }}
+        working-directory: sim
+        env:
+          BLOCK: ${{ matrix.block }}
+          SEEDS: ${{ inputs.seeds || '1' }}
+          SEED_BASE: ${{ needs.plan.outputs.seed_base }}
+          GRID: ${{ needs.plan.outputs.grid }}
+        run: |
+          set -euo pipefail
+          args=(--block "$BLOCK" --seeds "$SEEDS" --seed-base "$SEED_BASE" --out out)
+          if [ -n "$GRID" ]; then args+=(--grid "$GRID"); fi
+          python3 -u -m sfpp.sweep "${args[@]}"
+
+      - uses: actions/upload-artifact@v7
+        if: always() # a block that failed halfway still wrote the cells it finished
+        with:
+          name: block-${{ matrix.block }}
+          path: sim/out
+          if-no-files-found: warn
+          # These artifacts are the run's raw data - every cell's full report, its text statistics
+          # and its charts, about 17 MB a night. The results branch gets the digest only: git keeps
+          # every blob it has ever seen, so committing the raw nightly would add several GB a year
+          # to the repository permanently and no later deletion would reclaim it. 90 days is the
+          # longest retention a public repository offers, and the window in which a question about
+          # a specific cell can still be answered from the numbers rather than by re-running it.
+          retention-days: 90
+
+  collate:
+    name: Collate and publish
+    needs: [plan, sweep]
+    if: ${{ !cancelled() }} # a run where some blocks failed is still worth collating - the digest names them
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the simulator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SIM_REF }}
+          path: sim-src
+          persist-credentials: false
+
+      - name: Check out the repository for the results branch
+        # Credentials persist here and only here: this is the checkout that pushes. The ref is
+        # whatever the repository's default is - the results branch is selected in the next step,
+        # because on the very first run it does not exist yet.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: results
+          fetch-depth: 1
+
+      - name: Select or start the results branch
+        working-directory: results
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git fetch --depth 1 origin "$RESULTS_BRANCH" 2>/dev/null; then
+            git checkout -B "$RESULTS_BRANCH" FETCH_HEAD
+            echo "results branch $RESULTS_BRANCH checked out at $(git rev-parse --short HEAD)"
+          else
+            # Orphan: this branch carries run data, not firmware. Nothing in its history is a
+            # commit anyone builds from, and it must never be merged into a code branch.
+            git checkout --orphan "$RESULTS_BRANCH"
+            git rm -rqf . >/dev/null 2>&1 || true
+            echo "started $RESULTS_BRANCH as an orphan - this is the first run"
+          fi
+          mkdir -p runs
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Download every block's output
+        uses: actions/download-artifact@v8
+        with:
+          pattern: block-*
+          path: incoming
+          merge-multiple: true
+
+      - name: Collate the run
+        id: collate
+        working-directory: sim-src/sim
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+          SEED_BASE: ${{ needs.plan.outputs.seed_base }}
+          SCENARIO: ${{ needs.plan.outputs.scenario }}
+          PLANNED: ${{ needs.plan.outputs.blocks }}
+        run: |
+          set -euo pipefail
+          dest="$GITHUB_WORKSPACE/results/runs/$RUN_ID"
+          mkdir -p "$dest"
+          # Raw block JSONs stay in the artifact; only the digest is written into the checkout that
+          # gets committed. See the retention note on the upload step above.
+          python3 -m sfpp.collate --runs "$GITHUB_WORKSPACE/incoming" --out "$dest" --expect "$PLANNED" \
+            --run-id "$RUN_ID" --seed-base "$SEED_BASE" --scenario "${SCENARIO:-flat}"
+          # The gate's verdict decides this workflow's colour, but only after the results are safely
+          # committed - a run that found a silent loss is the one run whose data must not be lost.
+          # The digest reaches python through the environment, not through the script text.
+          DEST="$dest" python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os
+          gate = json.load(open(os.path.join(os.environ["DEST"], "summary.json")))["gate"]
+          print(f"ok={str(gate['ok']).lower()}")
+          print(f"failures={len(gate['failures'])}")
+          print(f"missing={gate['blocks_missing']}")
+          PY
+
+      - name: Publish to the results branch
+        working-directory: results
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A runs
+          if git diff --cached --quiet; then
+            echo "nothing new to publish"
+            exit 0
+          fi
+          git commit -q -m "runs: sweep $RUN_ID"
+          # Concurrent pushes should not happen (see the concurrency group) but a retry costs less
+          # than a lost run.
+          for attempt in 1 2 3 4; do
+            git pull --rebase -q origin "$RESULTS_BRANCH" 2>/dev/null || true
+            if git push -q origin "HEAD:$RESULTS_BRANCH"; then
+              echo "published $RUN_ID"
+              exit 0
+            fi
+            sleep $((attempt * 4))
+          done
+          echo "::error title=Results not published::the run collated but could not be pushed to $RESULTS_BRANCH"
+          exit 1
+
+      - name: Job summary
+        if: always()
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          trend="results/runs/$RUN_ID/trend.md"
+          if [ -f "$trend" ]; then
+            # The step summary is capped at 1 MiB; a full 87-block trend is far below that, but a
+            # future block set need not be.
+            head -c 900000 "$trend" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No trend report was produced - the collate step did not get that far." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail the run if the standing gate failed
+        # Last, deliberately: silent losses falsify the design, so the run goes red - but only once
+        # its data is on the results branch where it can be read.
+        if: ${{ steps.collate.outputs.ok == 'false' }}
+        run: |
+          echo "::error title=Silent losses::${{ steps.collate.outputs.failures }} cell(s) closed a checksum over two unequal sets. See the job summary."
+          exit 1

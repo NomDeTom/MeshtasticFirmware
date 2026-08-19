@@ -1,0 +1,101 @@
+# trunk-ignore-all(checkov/CKV_GHA_7): the dispatch inputs select a ref, a landform and a seed;
+# each is validated in the plan job and reaches a shell only through env:, never spliced into it.
+# Rolls every sweep the results branch holds into one page, and rewrites it in place.
+#
+# Separate from the sweep that produces the runs, and scheduled rather than chained, for two
+# reasons: a sweep that fails halfway still leaves runs worth rolling up, and the page has to be
+# rebuildable after an old run is pruned or a digest is corrected without re-running any simulation.
+name: Sim Results Explorer
+
+on:
+  schedule:
+    # 06:20 UTC, comfortably after the sweep that starts at 02:10 has finished writing its run.
+    - cron: 20 6 * * *
+  workflow_dispatch:
+    inputs:
+      sim_ref:
+        description: Branch or SHA holding sim/ - the explorer runs this tree's code
+        type: string
+        required: false
+        default: sfpp-sr-sim
+      window:
+        description: Roll up only the most recent N runs. Empty means every run in the branch
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: sim-explorer
+  cancel-in-progress: true
+
+env:
+  RESULTS_BRANCH: sim-results
+  SIM_REF: ${{ inputs.sim_ref || 'sfpp-sr-sim' }}
+
+jobs:
+  explorer:
+    name: Rebuild the explorer
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the simulator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SIM_REF }}
+          path: sim-src
+          persist-credentials: false
+
+      - name: Check out the results branch
+        # Credentials persist here and only here: this is the checkout that pushes.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RESULTS_BRANCH }}
+          path: results
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Roll every run into the page
+        working-directory: sim-src/sim
+        env:
+          WINDOW: ${{ inputs.window }}
+        run: |
+          set -euo pipefail
+          args=(--archive "$GITHUB_WORKSPACE/results/runs" --out "$GITHUB_WORKSPACE/results")
+          if [ -n "$WINDOW" ]; then args+=(--window "$WINDOW"); fi
+          python3 -m sfpp.explorer "${args[@]}"
+
+      - name: Publish
+        working-directory: results
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A index.html INDEX.md
+          if git diff --cached --quiet; then
+            echo "explorer unchanged - no new runs since the last rebuild"
+            exit 0
+          fi
+          git commit -q -m "explorer: roll up $(ls runs | wc -l) run(s)"
+          for attempt in 1 2 3 4; do
+            git pull --rebase -q origin "$RESULTS_BRANCH" 2>/dev/null || true
+            if git push -q origin "HEAD:$RESULTS_BRANCH"; then
+              echo "explorer published"
+              exit 0
+            fi
+            sleep $((attempt * 4))
+          done
+          echo "::error title=Explorer not published::rebuilt but could not push to $RESULTS_BRANCH"
+          exit 1
+
+      - name: Job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f results/INDEX.md ]; then
+            head -c 900000 results/INDEX.md >> "$GITHUB_STEP_SUMMARY"
+          fi
