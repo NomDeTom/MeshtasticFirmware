@@ -2007,9 +2007,16 @@ class Campaign:
         out = dict(self.scenario.summary())
         out["terrain_applied"] = self.terrain is not None
         out["clutter_applied"] = bool(getattr(self.conf, "CLUTTER_ENABLED", False))
-        out["link_calibration_applied"] = bool(
+        # Loaded, NOT applied, and the distinction is the whole point of reporting it. A scenario
+        # can carry a fitted RSSI correction - Batumi's is a ridge fit over 296 observed links -
+        # and this transport does not call it: _build_links layers its own per-node transmit and
+        # receive gains onto the raw budget, and the fit was trained against a budget without them.
+        # Saying "applied" here because the coefficients parsed would be a lie in the one field a
+        # reader would check before trusting a link.
+        out["link_calibration_loaded"] = bool(
             getattr(self.conf, "LINK_CALIBRATION_MODEL_ENABLED", False)
         )
+        out["link_calibration_applied"] = False
         terms = getattr(self.mesh, "loss_terms", None)
         if terms and terms.get("pairs"):
             pairs = terms["pairs"]
