@@ -5045,6 +5045,18 @@ def build(
                 nodes[i].role = role
             taken += want
 
+    # A real snapshot knows what each node is configured as, and that beats anything derived from
+    # degree: `--router-fraction` and `--role-mix` are ways of guessing at a role distribution, and
+    # a mesh that recorded its own has nothing to guess. Applied over whichever of those ran, and
+    # before the version filter below so an old-profile node still downgrades correctly.
+    if scenario is not None and scenario.roles:
+        for node, role in zip(nodes, scenario.roles):
+            if role:
+                node.role = role
+    if scenario is not None and scenario.hop_limits:
+        # Per-node hop limits from the snapshot outrank --hop-spread for the same reason.
+        mesh.node_hop_limit = [int(h) for h in scenario.hop_limits]
+
     # A role exists only from the release that introduced it - ROUTER_LATE v2.5.18, CLIENT_BASE
     # v2.7.9 - so a node on an older profile cannot be configured into one and runs as CLIENT.
     for node in nodes:
