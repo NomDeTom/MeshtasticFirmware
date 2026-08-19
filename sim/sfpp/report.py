@@ -177,6 +177,34 @@ def report_one(r, indent=""):
             + ("  · archived" if dm["archived"] else "  · not archived (contention only)")
         )
 
+    # Can an operator configure a node this far out, and when not, what stopped it. Primary, beside
+    # DM success: a mesh whose text reach looks healthy can still be one where nothing past two hops
+    # can be administered, and the reason matters more than the rate.
+    admin = r.get("admin")
+    if admin:
+        a("")
+        for hops in sorted(admin, key=int):
+            d = admin[hops]
+            if not d.get("sessions"):
+                continue
+            why = ", ".join(
+                f"{k.replace('_', ' ')} {v}"
+                for k, v in (d.get("failed_because") or {}).items()
+                if v
+            )
+            on = d.get("completed_on_attempt") or {}
+            retried = sum(v for k, v in on.items() if k != "1")
+            a(
+                f"{indent}  ADMIN {hops} hop{'s' if hops != '1' else ' '}       "
+                f"{d['success_rate']:.3f}  ({d['session_completed']}/{d['sessions']} sessions"
+                f", {d['attempts_per_session']:.2f} tries each)"
+                + (f" · needed a retry {retried}" if retried else "")
+                + (f" · failed: {why}" if why else "")
+            )
+        first = admin.get(sorted(admin, key=int)[0]) if admin else None
+        if first and not first.get("keys_preloaded"):
+            a(f"{indent}  ADMIN assumption    keys NOT preloaded - no_key failures are reachable")
+
     s = r.get("sfpp")
     if s:
         u = s.get("structurally_unreachable") or {}

@@ -66,6 +66,16 @@ ADMIN_REQUEST_BYTES = 32
 ADMIN_REPLY_BYTES = 48
 # How long each leg is given before it is judged. Generous against the retry ladder's own budget.
 ADMIN_LEG_TIMEOUT_MS = 120_000.0
+# AdminModule.h:109, kOutstandingAdminRequestMs = 300 * 1000, "same window as the session passkey".
+# The whole round trip has to land inside this or the firmware stops accepting the response: the
+# request's slot has expired and the reply is no longer vouched for by anything.
+ADMIN_SESSION_TIMEOUT_MS = 300_000.0
+# What a person does when a configuration change does not take: presses it again, twice, then stops.
+# Not a firmware constant - the firmware has no retry loop here at all - so it is an assumption about
+# the operator, stated as one and adjustable with --admin-attempts. The key half of the model is not
+# an assumption: admin authorisation lives in config.security.admin_key[3], separate from NodeDB and
+# immune to its eviction, so a session's outcome is the timing rather than key availability.
+ADMIN_DEFAULT_ATTEMPTS = 3
 
 # The traffic mix. NodeInfo is every three hours in the firmware's defaults, not hourly.
 MIX = (
@@ -1496,10 +1506,23 @@ class Campaign:
         if rate <= 0:
             return
         max_hops = int(getattr(self.opts, "admin_max_hops", 5))
+        # A session is one thing the operator wanted; a try is one request on the air. With
+        # --admin-attempts above 1 they differ, and the difference is the whole point: how often a
+        # configuration change needs pressing again.
+        self.admin_sessions = {h: 0 for h in range(1, max_hops + 1)}
         self.admin_attempts = {h: 0 for h in range(1, max_hops + 1)}
         self.admin_delivered = {h: 0 for h in range(1, max_hops + 1)}
         self.admin_completed = {h: 0 for h in range(1, max_hops + 1)}
         self.admin_no_key = {h: 0 for h in range(1, max_hops + 1)}
+        # Why the session ended the way it did, counted once per session on its FINAL attempt. A
+        # session that failed twice and worked on the third is a success, not two failures.
+        self.admin_failure = {
+            h: {"no_key": 0, "request_lost": 0, "reply_lost": 0}
+            for h in range(1, max_hops + 1)
+        }
+        # Which attempt carried it. All in slot 1 means retries are dead weight; a tail means they
+        # are doing the work, and that is the argument for the operator pressing it again.
+        self.admin_on_attempt = {h: {} for h in range(1, max_hops + 1)}
         # Topological distance from every node, once: which node sits n hops away is a property of
         # the mesh, not of what has been heard.
         self._admin_targets = {}
@@ -1526,9 +1549,35 @@ class Campaign:
             self.mesh.at(when, probe)
             when += self.rng.expovariate(1.0 / mean_gap_ms)
 
-    def _admin_session(self, src, target, hops):
-        """One request out, one reply back. Both must land for the session to count."""
+    def _admin_session(self, src, target, hops, attempt=1):
+        """One request out, one reply back, retried until the operator gives up.
+
+        The firmware has no retry loop here - `--admin-attempts` is an assumption about the person,
+        who presses the button again when the setting does not take and stops after a few goes. The
+        round trip has to land inside ADMIN_SESSION_TIMEOUT_MS, which is the firmware's own
+        outstanding-request window (AdminModule.h:109): past it the request's slot has expired and
+        the reply is no longer vouched for by anything, so a late answer is not a completed session.
+
+        Failure is attributed once per session, on the last attempt, and by cause - a session that
+        failed twice and worked on the third is a success, not two failures.
+        """
+        if attempt == 1:
+            self.admin_sessions[hops] += 1
         self.admin_attempts[hops] += 1
+        limit = int(getattr(self.opts, "admin_attempts", ADMIN_DEFAULT_ATTEMPTS))
+        last = attempt >= limit
+
+        def retry_or_fail(reason):
+            if last:
+                self.admin_failure[hops][reason] += 1
+            else:
+                # A person does not retry instantly. One session window is the natural spacing:
+                # it is how long they would wait before deciding nothing happened.
+                self.mesh.at(
+                    self.mesh.now + ADMIN_SESSION_TIMEOUT_MS,
+                    lambda: self._admin_session(src, target, hops, attempt + 1),
+                )
+
         request = self.mesh.originate(
             src,
             M.ADMIN_PORTNUM,
@@ -1537,16 +1586,21 @@ class Campaign:
             destination=target,
             want_ack=True,
             pki=True,
+            assume_key=bool(getattr(self.opts, "admin_preloaded_keys", True)),
         )
         if request is None:
-            # No key for the target, so the firmware never composes the packet. A real failure and
-            # the one an operator meets first once the peer has aged out of the hot store.
+            # Only reachable with the preloaded-key assumption turned off. The firmware never
+            # composes a PKI packet for a peer whose key it does not hold, so this never reached the
+            # air - a different failure from one the mesh dropped, and not one a retry can fix.
             self.admin_no_key[hops] += 1
+            self.admin_failure[hops]["no_key"] += 1
             return
         request_id = request.id
+        started = self.mesh.now
 
         def on_arrival():
             if request_id not in self.mesh.nodes[target].seen:
+                retry_or_fail("request_lost")
                 return
             self.admin_delivered[hops] += 1
             reply = self.mesh.originate(
@@ -1558,14 +1612,23 @@ class Campaign:
                 want_ack=True,
                 pki=True,
                 request_id=request_id,
+                assume_key=bool(getattr(self.opts, "admin_preloaded_keys", True)),
             )
             if reply is None:
+                retry_or_fail("reply_lost")
                 return
             reply_id = reply.id
 
             def on_return():
-                if reply_id in self.mesh.nodes[src].seen:
+                seen = reply_id in self.mesh.nodes[src].seen
+                # Inside the firmware's window, or the slot has expired and the answer is refused.
+                in_window = (self.mesh.now - started) <= ADMIN_SESSION_TIMEOUT_MS
+                if seen and in_window:
                     self.admin_completed[hops] += 1
+                    counts = self.admin_on_attempt[hops]
+                    counts[attempt] = counts.get(attempt, 0) + 1
+                else:
+                    retry_or_fail("reply_lost")
 
             # Give the reply the same budget the request had before judging it.
             self.mesh.at(self.mesh.now + ADMIN_LEG_TIMEOUT_MS, on_return)
@@ -1573,30 +1636,41 @@ class Campaign:
         self.mesh.at(self.mesh.now + ADMIN_LEG_TIMEOUT_MS, on_arrival)
 
     def _admin_report(self):
-        if not getattr(self, "admin_attempts", None):
+        """Whether an operator can configure a node this far away, and when not, why not.
+
+        Rates are per SESSION - one thing the operator wanted - not per request on the air, because
+        a change that took on the third press is a change that took. `attempts_per_session` is how
+        much pressing that cost, and `failed_because` says what stopped the ones that never took.
+        """
+        if not getattr(self, "admin_sessions", None):
             return None
         out = {}
-        for hops in sorted(self.admin_attempts):
-            tried = self.admin_attempts[hops]
-            addressable = tried - self.admin_no_key[hops]
+        for hops in sorted(self.admin_sessions):
+            sessions = self.admin_sessions[hops]
+            done = self.admin_completed[hops]
+            tries = self.admin_attempts[hops]
+            reasons = self.admin_failure[hops]
             out[str(hops)] = {
-                "attempts": tried,
-                # Never composed: no key for the target in any tier, so the operator cannot address
-                # the node at all. A different failure from not reaching it, and the one that gets
-                # worse as the mesh outgrows the hot store.
-                "no_key_for_target": self.admin_no_key[hops],
-                "addressable": addressable,
-                "request_delivered": self.admin_delivered[hops],
-                "session_completed": self.admin_completed[hops],
-                # Over everything attempted: what an operator actually experiences.
-                "success_rate": (
-                    round(self.admin_completed[hops] / tried, 4) if tried else None
+                "sessions": sessions,
+                "requests_sent": tries,
+                "attempts_per_session": (
+                    round(tries / sessions, 2) if sessions else None
                 ),
-                # Over the ones that could be addressed: what the mesh's reach alone costs.
-                "success_given_key": (
-                    round(self.admin_completed[hops] / addressable, 4)
-                    if addressable
-                    else None
+                "request_delivered": self.admin_delivered[hops],
+                "session_completed": done,
+                # What the operator experiences: did the change take, within the attempts they made.
+                "success_rate": round(done / sessions, 4) if sessions else None,
+                # Which attempt carried it. Everything in "1" means the retries are dead weight.
+                "completed_on_attempt": {
+                    str(k): v for k, v in sorted(self.admin_on_attempt[hops].items())
+                },
+                # Counted once per failed session, on its last attempt. `no_key` is only reachable
+                # with --no-admin-preloaded-keys: it means the packet was never composed, so no
+                # amount of retrying would have helped.
+                "failed_because": dict(reasons),
+                "failed": sum(reasons.values()),
+                "keys_preloaded": bool(
+                    getattr(self.opts, "admin_preloaded_keys", True)
                 ),
             }
         return out
@@ -2534,6 +2608,23 @@ def build_parser():
         metavar="NAME=VALUE",
         help="override one rule, repeatable. Specific pre-2.5 pathologies live here rather than as "
         "a profile, e.g. --profile-flag clamp_cw=true for the unclamped Arduino map() window",
+    )
+    ap.add_argument(
+        "--admin-attempts",
+        type=int,
+        default=ADMIN_DEFAULT_ATTEMPTS,
+        help="how many times an operator presses a configuration change before giving up. Not a "
+        "firmware constant - the firmware has no retry loop here - so it is an assumption about the "
+        "person. Each attempt gets the firmware's own 300 s outstanding-request window",
+    )
+    ap.add_argument(
+        "--no-admin-preloaded-keys",
+        dest="admin_preloaded_keys",
+        action="store_false",
+        help="gate admin sessions on the hot store's PKI keys. The default does not, and that is "
+        "firmware-authentic: admin authorisation is config.security.admin_key[3] in SecurityConfig, "
+        "separate from NodeDB and unaffected by its eviction, so a session's outcome is the session "
+        "timing rather than key availability. Pass this to measure the eviction question instead",
     )
     ap.add_argument(
         "--dm-per-hour",

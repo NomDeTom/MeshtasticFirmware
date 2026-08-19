@@ -4818,11 +4818,20 @@ class Mesh:
         reply_id=0,
         opaque=False,
         pki=False,
+        assume_key=False,
     ):
         """Inject a packet from a node's application layer, as if it had composed it.
 
         Mirrors Router::send: we add our own packet to the history first, so the copies we hear
         coming back are recognised as our own, and set the next hop before it goes out.
+
+        `assume_key` skips the PKI gate for a peer whose key did not come from the hot store. It
+        exists for the admin path, and it is firmware-authentic rather than a convenience: admin
+        authorisation lives in `config.security.admin_key[3]` - three 32-byte keys in SecurityConfig,
+        compared directly at AdminModule.cpp:184 - which is separate persistent config, not NodeDB.
+        It is provisioned out of band or baked in via USERPREFS, and it survives every eviction the
+        hot store performs. Gating an admin session on NodeDB would measure eviction rather than
+        whether the session completes.
 
         `pki` marks a DM that has to be encrypted to the destination's public key. Without a key in
         any tier the packet is never composed, which is what evicting a peer actually costs: not a
@@ -4834,7 +4843,12 @@ class Mesh:
             # caller register a message that never existed.
             self.stats["sends_while_offline"] += 1
             return None
-        if pki and destination != BROADCAST and not radio.knows_key(destination):
+        if (
+            pki
+            and destination != BROADCAST
+            and not assume_key
+            and not radio.knows_key(destination)
+        ):
             self.stats["dm_blocked_no_key"] += 1
             return None
         signed = False

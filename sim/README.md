@@ -160,6 +160,8 @@ under `--grid` carries the grid in its filename, which is the usual reason one i
 | `--amplify-worst`        | 0.0              | fit a high amplifier to this share of the worst-connected nodes, after the links exist. The field pathology: the node nobody can hear gets a PA and is then heard by everyone while still hearing almost nobody |
 | `--admin-probes-per-hour` | 0.0             | attempt this many admin sessions per hour, spread over 1..N hops of separation. A session is a PKI DM out and a reply back, and **both legs must land** |
 | `--admin-max-hops`       | 5                | the largest separation admin sessions are attempted at |
+| `--admin-attempts`       | 3                | how many times an operator presses a change before giving up. **Not a firmware constant** - the firmware has no retry loop here - so it is an assumption about the person. Each attempt gets the firmware's own 300 s outstanding-request window (`AdminModule.h:109`) |
+| `--no-admin-preloaded-keys` | on | gate admin sessions on the hot store's PKI keys. The default does not, and that is **firmware-authentic**: admin authorisation is `config.security.admin_key[3]` in SecurityConfig (`AdminModule.cpp:184`), separate persistent config that NodeDB eviction cannot touch - so a session's outcome is its timing, not key availability. Pass this to measure the eviction question instead |
 | `--favourite-routers`    | off              | router-like nodes favourite each other, so relays between them keep their hop limit                                   |
 
 ### 4.2 Hop limits
