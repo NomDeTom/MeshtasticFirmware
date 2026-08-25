@@ -643,7 +643,7 @@ std::unique_ptr<RadioInterface> initLoRa()
             if (screen) {
                 screen->showSimpleBanner("Rebooting...");
             }
-            rebootAtMsec = millis() + 5000;
+            rebootAtMsec = Deadline::in(5000);
         }
     }
     return rIf;

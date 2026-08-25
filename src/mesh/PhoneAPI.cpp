@@ -2080,7 +2080,7 @@ bool PhoneAPI::handleLockdownAuthInline(const meshtastic_LockdownAuth &la)
         revokeAllAuth();
         queueLockdownStatus(meshtastic_LockdownStatus_State_LOCKED, "", 0, 0, 0);
         zeroPassphrase();
-        rebootAtMsec = millis() + DEFAULT_REBOOT_SECONDS * 1000;
+        rebootAtMsec = Deadline::in(DEFAULT_REBOOT_SECONDS * 1000);
         return true;
     }
 

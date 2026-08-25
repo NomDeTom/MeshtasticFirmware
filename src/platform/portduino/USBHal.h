@@ -2,6 +2,7 @@
 #define PI_HAL_LGPIO_H
 
 // include RadioLib
+#include "mesh/Throttle.h" // Deadline, for the rebootAtMsec declaration below
 #include "platform/portduino/PortduinoGlue.h"
 #include <RadioLib.h>
 #include <csignal>
@@ -11,7 +12,7 @@
 #include <sys/time.h> // gettimeofday(), previously pulled in via libusb.h
 #include <unistd.h>
 
-extern uint32_t rebootAtMsec;
+extern Deadline rebootAtMsec;
 
 // include the library for Raspberry GPIO pins
 
@@ -88,7 +89,7 @@ class Ch341Hal : public RadioLibHal
             return;
         }
         auto res = pinedio_set_pin_mode(&pinedio, pin, mode);
-        if (res < 0 && rebootAtMsec == 0) {
+        if (res < 0 && !rebootAtMsec.armed()) {
             LOG_ERROR("USBHal pinMode: Can't set pin %u mode to %u: %d", pin, mode, res);
         }
     }
@@ -102,7 +103,7 @@ class Ch341Hal : public RadioLibHal
             return;
         }
         auto res = pinedio_digital_write(&pinedio, pin, value);
-        if (res < 0 && rebootAtMsec == 0) {
+        if (res < 0 && !rebootAtMsec.armed()) {
             LOG_ERROR("USBHal digitalWrite: Can't write pin %u: %d", pin, res);
             portduino_status.LoRa_in_error = true;
         }
@@ -117,7 +118,7 @@ class Ch341Hal : public RadioLibHal
             return 0;
         }
         auto res = pinedio_digital_read(&pinedio, pin);
-        if (res < 0 && rebootAtMsec == 0) {
+        if (res < 0 && !rebootAtMsec.armed()) {
             LOG_ERROR("USBHal digitalRead: Can't read pin %u: %d", pin, res);
             portduino_status.LoRa_in_error = true;
             return 0;

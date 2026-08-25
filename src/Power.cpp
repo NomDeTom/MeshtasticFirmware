@@ -838,13 +838,13 @@ bool Power::setup()
 void Power::powerCommandsCheck()
 {
     // 0 means "not scheduled" for both, and reads as long expired - test it first.
-    if (rebootAtMsec && Throttle::deadlinePassed(rebootAtMsec)) {
+    if (rebootAtMsec.passed()) {
         LOG_INFO("Rebooting");
         reboot();
     }
 
-    if (shutdownAtMsec && Throttle::deadlinePassed(shutdownAtMsec)) {
-        shutdownAtMsec = 0;
+    if (shutdownAtMsec.passed()) {
+        shutdownAtMsec.disarm();
         shutdown();
     }
 }
@@ -886,7 +886,7 @@ void Power::reboot()
     HAL_NVIC_SystemReset();
 #else
     // 0 disarms; UINT32_MAX would read as long expired and reboot-loop.
-    rebootAtMsec = 0;
+    rebootAtMsec.disarm();
     LOG_WARN("FIXME implement reboot for this platform. Note that some settings "
              "require a restart to be applied");
 #endif

@@ -111,7 +111,7 @@ bool RadioLibInterface::canSendImmediately()
             LOG_ERROR("Hardware Failure! busyTx >60s");
             RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_TRANSMIT_FAILED);
             // reboot in 5 seconds when this condition occurs.
-            rebootAtMsec = lastTxStart + 65000;
+            rebootAtMsec = Deadline::at(lastTxStart + 65000);
         }
         if (busyRx) {
             LOG_WARN("Can not send yet, busyRx");

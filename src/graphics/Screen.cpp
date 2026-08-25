@@ -1153,7 +1153,7 @@ int32_t Screen::runOnce()
 #endif
     }
 #endif
-    if (!NotificationRenderer::isOverlayBannerShowing() && rebootAtMsec != 0 && !suppressRebootBanner) {
+    if (!NotificationRenderer::isOverlayBannerShowing() && rebootAtMsec.armed() && !suppressRebootBanner) {
         showSimpleBanner("Rebooting...", 0);
     }
 

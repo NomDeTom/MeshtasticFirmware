@@ -7,6 +7,7 @@
 #include "detect/ScanI2C.h"
 #include "graphics/Screen.h"
 #include "memGet.h"
+#include "mesh/Throttle.h"
 #include "mesh/generated/meshtastic/config.pb.h"
 #include "mesh/generated/meshtastic/telemetry.pb.h"
 #include <SPI.h>
@@ -89,8 +90,8 @@ const char *getDeviceName();
 
 extern uint32_t timeLastPowered;
 
-extern uint32_t rebootAtMsec;
-extern uint32_t shutdownAtMsec;
+extern Deadline rebootAtMsec;
+extern Deadline shutdownAtMsec;
 extern bool suppressRebootBanner;
 
 #if defined(MESHTASTIC_ENCRYPTED_STORAGE) && defined(MESHTASTIC_PHONEAPI_ACCESS_CONTROL)

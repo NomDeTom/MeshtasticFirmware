@@ -1274,8 +1274,8 @@ void setup()
 }
 
 #endif
-uint32_t rebootAtMsec;     // If not zero we will reboot at this time (used to reboot shortly after the update completes)
-uint32_t shutdownAtMsec;   // If not zero we will shutdown at this time (used to shutdown from python or mobile client)
+Deadline rebootAtMsec;     // If not zero we will reboot at this time (used to reboot shortly after the update completes)
+Deadline shutdownAtMsec;   // If not zero we will shutdown at this time (used to shutdown from python or mobile client)
 bool suppressRebootBanner; // If true, suppress "Rebooting..." overlay (used for OTA handoff)
 
 #if defined(MESHTASTIC_ENCRYPTED_STORAGE) && defined(MESHTASTIC_PHONEAPI_ACCESS_CONTROL)
@@ -1382,7 +1382,7 @@ void loop()
         if (nodeDB->disableLockdownToPlaintext()) {
             LOG_INFO("Lockdown: disabled, reboot to normal mode");
             PhoneAPI::broadcastLockdownStatus(meshtastic_LockdownStatus_State_DISABLED, "", 0, 0, 0);
-            rebootAtMsec = millis() + DEFAULT_REBOOT_SECONDS * 1000;
+            rebootAtMsec = Deadline::in(DEFAULT_REBOOT_SECONDS * 1000);
         } else {
             // Revert failed mid-way (a file couldn't be decrypted/rewritten).
             // The DEK file is still present (it's deleted last), so the device
@@ -1418,7 +1418,7 @@ void loop()
     static uint32_t lastSessionCheckMs = 0;
     if (millis() - lastSessionCheckMs > 1000) {
         lastSessionCheckMs = millis();
-        if (rebootAtMsec == 0 && EncryptedStorage::isUnlocked() && EncryptedStorage::isSessionExpired()) {
+        if (!rebootAtMsec.armed() && EncryptedStorage::isUnlocked() && EncryptedStorage::isSessionExpired()) {
             // The session expired. Two paths:
             //   1. Budget remains (bootsRemaining > 0): decrement the
             //      on-flash boot count in place, revoke per-connection
@@ -1436,7 +1436,7 @@ void loop()
                 EncryptedStorage::lockNow();
                 PhoneAPI::revokeAllAuth();
                 PhoneAPI::broadcastLockdownStatus(meshtastic_LockdownStatus_State_LOCKED, "session_budget_exhausted", 0, 0, 0);
-                rebootAtMsec = millis() + DEFAULT_REBOOT_SECONDS * 1000;
+                rebootAtMsec = Deadline::in(DEFAULT_REBOOT_SECONDS * 1000);
             } else {
                 uint8_t newBoots = EncryptedStorage::consumeSessionBoot();
                 LOG_WARN("Lockdown: session expired, next budget slot (boots=%u left)", newBoots);
@@ -1500,7 +1500,7 @@ void loop()
     if (portduino_config.lora_spi_dev == "ch341" && ch341Hal != nullptr) {
         ch341Hal->checkError();
     }
-    if (portduino_status.LoRa_in_error && rebootAtMsec == 0) {
+    if (portduino_status.LoRa_in_error && !rebootAtMsec.armed()) {
         LOG_ERROR("LoRa error detected, recovering");
         router->addInterface(nullptr);
         if (portduino_config.lora_spi_dev == "ch341") {
@@ -1526,7 +1526,7 @@ void loop()
             if (screen) {
                 screen->showSimpleBanner("Rebooting...");
             }
-            rebootAtMsec = millis() + 25;
+            rebootAtMsec = Deadline::in(25);
         }
     }
 #if HAS_TFT
