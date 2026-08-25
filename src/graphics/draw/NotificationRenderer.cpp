@@ -1228,7 +1228,8 @@ void NotificationRenderer::drawTextInput(OLEDDisplay *display, OLEDDisplayUiStat
 
 bool NotificationRenderer::isOverlayBannerShowing()
 {
-    // Here 0 means "show indefinitely", so it must short-circuit the comparison.
+    // Two ways to still be showing: a timed banner whose deadline has not arrived, or an interactive
+    // one with no expiry at all. pending() is both - forever() is armed and never passes.
     return strlen(alertBannerMessage) > 0 && alertBannerUntil.pending();
 }
 
