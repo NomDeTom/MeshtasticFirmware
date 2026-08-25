@@ -46,7 +46,7 @@ int bannerSignalBars = -1;
 InputEvent NotificationRenderer::inEvent;
 int8_t NotificationRenderer::curSelected = 0;
 char NotificationRenderer::alertBannerMessage[256] = {0};
-uint32_t NotificationRenderer::alertBannerUntil = 0;  // 0 is a special case meaning forever
+Deadline NotificationRenderer::alertBannerUntil = Deadline::forever();
 uint8_t NotificationRenderer::alertBannerOptions = 0; // last x lines are selectable options
 const char **NotificationRenderer::optionsArrayPtr = nullptr;
 const int *NotificationRenderer::optionsEnumPtr = nullptr;
@@ -254,7 +254,7 @@ void NotificationRenderer::drawBannercallback(OLEDDisplay *display, OLEDDisplayU
     // Handle text_input notifications first - they have their own timeout/banner logic
     if (current_notification_type == notificationTypeEnum::text_input) {
         // Check for timeout and reset if needed for text input
-        if (alertBannerUntil > 0 && Throttle::deadlinePassed(alertBannerUntil)) {
+        if (alertBannerUntil.passed()) {
             resetBanner();
             return;
         }
@@ -263,7 +263,7 @@ void NotificationRenderer::drawBannercallback(OLEDDisplay *display, OLEDDisplayU
     }
 
     // 0 means "no deadline set", and reads as long expired - test it first.
-    if (alertBannerUntil > 0 && Throttle::deadlinePassed(alertBannerUntil)) {
+    if (alertBannerUntil.passed()) {
         resetBanner();
     }
 
@@ -353,7 +353,7 @@ void NotificationRenderer::drawNumberPicker(OLEDDisplay *display, OLEDDisplayUiS
     } else if (inEvent.inputEvent == INPUT_BROKER_LEFT) {
         curSelected--;
     } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-               alertBannerUntil != 0) {
+               alertBannerUntil.expires()) {
         resetBanner();
         return;
     }
@@ -436,7 +436,7 @@ void NotificationRenderer::drawHexPicker(OLEDDisplay *display, OLEDDisplayUiStat
     } else if (inEvent.inputEvent == INPUT_BROKER_LEFT) {
         curSelected--;
     } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-               alertBannerUntil != 0) {
+               alertBannerUntil.expires()) {
         resetBanner();
         return;
     }
@@ -541,7 +541,7 @@ void NotificationRenderer::drawAlphanumericPicker(OLEDDisplay *display, OLEDDisp
     } else if (inEvent.inputEvent == INPUT_BROKER_LEFT) {
         curSelected--;
     } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-               alertBannerUntil != 0) {
+               alertBannerUntil.expires()) {
         resetBanner();
         return;
     }
@@ -617,7 +617,7 @@ void NotificationRenderer::drawNodePicker(OLEDDisplay *display, OLEDDisplayUiSta
         resetBanner();
         return;
     } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-               alertBannerUntil != 0) {
+               alertBannerUntil.expires()) {
         resetBanner();
         return;
     }
@@ -777,7 +777,7 @@ void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisp
             resetBanner();
             return;
         } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-                   alertBannerUntil != 0) {
+                   alertBannerUntil.expires()) {
             resetBanner();
             return;
         }
@@ -1229,7 +1229,7 @@ void NotificationRenderer::drawTextInput(OLEDDisplay *display, OLEDDisplayUiStat
 bool NotificationRenderer::isOverlayBannerShowing()
 {
     // Here 0 means "show indefinitely", so it must short-circuit the comparison.
-    return strlen(alertBannerMessage) > 0 && (alertBannerUntil == 0 || !Throttle::deadlinePassed(alertBannerUntil));
+    return strlen(alertBannerMessage) > 0 && alertBannerUntil.pending();
 }
 
 bool NotificationRenderer::isMenuShowing()

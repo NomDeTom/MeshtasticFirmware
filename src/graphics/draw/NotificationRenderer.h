@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mesh/Throttle.h"
+
 #include "OLEDDisplay.h"
 #include "OLEDDisplayUi.h"
 #include "graphics/Screen.h"
@@ -19,7 +21,7 @@ class NotificationRenderer
     static char inKeypress;
     static int8_t curSelected;
     static char alertBannerMessage[256];
-    static uint32_t alertBannerUntil; // 0 is a special case meaning forever
+    static Deadline alertBannerUntil; // forever() while the banner waits on the user
     static const char **optionsArrayPtr;
     static const int *optionsEnumPtr;
     static uint8_t alertBannerOptions; // last x lines are selectable options
