@@ -86,19 +86,18 @@ int32_t ExternalNotificationModule::runOnce()
 #if defined(HAS_I2S_SPEAKER_NRF52)
         isRtttlPlaying = isRtttlPlaying || nrf52RtttlPlayer.isPlaying();
 #endif
-        // isNagging is the armed flag; nagCycleCutoff holds a real deadline only while it is set
-        // (UINT32_MAX once stopped, 1 at boot), so short-circuit before the comparison.
-        const bool nagWindowExpired = !isNagging || Throttle::deadlinePassed(nagCycleCutoff);
+        // Not nagging, or nagging but out of time. pending() is both, so there is no separate flag
+        // to keep in step and no sentinel to test before the comparison.
+        const bool nagWindowExpired = !nagCycleCutoff.pending();
         if (nagWindowExpired && !isRtttlPlaying) {
             // Turn off external notification immediately when timeout is reached, regardless of song state
-            nagCycleCutoff = UINT32_MAX;
+            nagCycleCutoff = Deadline();
             ExternalNotificationModule::stopNow();
-            isNagging = false;
             return INT32_MAX; // save cycles till we're needed again
         }
 
         // If the output is turned on, turn it back off after the given period of time.
-        if (isNagging) {
+        if (nagCycleCutoff.armed()) {
             delay = (moduleConfig.external_notification.output_ms ? moduleConfig.external_notification.output_ms
                                                                   : EXT_NOTIFICATION_MODULE_OUTPUT_MS);
             // externalTurnedOn[] is when each output was last toggled, so these are intervals.
@@ -151,7 +150,7 @@ int32_t ExternalNotificationModule::runOnce()
         if (moduleConfig.external_notification.use_i2s_as_buzzer) {
             if (audioThread->isPlaying()) {
                 // Continue playing
-            } else if (isNagging && !Throttle::deadlinePassed(nagCycleCutoff)) {
+            } else if (nagCycleCutoff.pending()) {
                 audioThread->beginRttl(rtttlConfig.ringtone, strlen_P(rtttlConfig.ringtone));
             }
             // we need fast updates to play the RTTTL
@@ -163,7 +162,7 @@ int32_t ExternalNotificationModule::runOnce()
         if (canBuzz() && buzzerShouldAlert) {
             if (nrf52RtttlPlayer.isPlaying()) {
                 nrf52RtttlPlayer.play();
-            } else if (isNagging && !Throttle::deadlinePassed(nagCycleCutoff)) {
+            } else if (nagCycleCutoff.pending()) {
                 nrf52RtttlPlayer.begin(rtttlConfig.ringtone);
             }
             delay = EXT_NOTIFICATION_FAST_THREAD_MS;
@@ -173,7 +172,7 @@ int32_t ExternalNotificationModule::runOnce()
         if (moduleConfig.external_notification.use_pwm && config.device.buzzer_gpio && canBuzz() && buzzerShouldAlert) {
             if (rtttl::isPlaying()) {
                 rtttl::play();
-            } else if (isNagging && !Throttle::deadlinePassed(nagCycleCutoff)) {
+            } else if (nagCycleCutoff.pending()) {
                 // start the song again if we have time left
                 rtttl::begin(config.device.buzzer_gpio, rtttlConfig.ringtone);
             }
@@ -276,7 +275,7 @@ bool ExternalNotificationModule::getExternal(uint8_t index)
 // Allow other firmware components to determine whether a notification is ongoing
 bool ExternalNotificationModule::nagging()
 {
-    return isNagging;
+    return nagCycleCutoff.armed();
 }
 
 void ExternalNotificationModule::stopNow()
@@ -303,9 +302,8 @@ void ExternalNotificationModule::stopNow()
 #endif
 
     // Prevent the state machine from immediately re-triggering outputs after a manual stop.
-    isNagging = false;
     buzzerShouldAlert = false;
-    nagCycleCutoff = UINT32_MAX;
+    nagCycleCutoff = Deadline();
 
 #ifdef HAS_I2S
     // GPIO0 is used as mclk for I2S audio and set to OUTPUT by the sound library
@@ -449,11 +447,10 @@ ProcessMessage ExternalNotificationModule::handleReceived(const meshtastic_MeshP
                                                     (moduleConfig.external_notification.alert_message_buzzer && !is_muted)));
 
             if (genericShouldAlert || vibraShouldAlert || buzzerShouldAlert) {
-                nagCycleCutoff = millis() + (moduleConfig.external_notification.nag_timeout
-                                                 ? (moduleConfig.external_notification.nag_timeout * 1000)
-                                                 : moduleConfig.external_notification.output_ms);
-                LOG_INFO("Toggling nagCycleCutoff to %lu", nagCycleCutoff);
-                isNagging = true;
+                nagCycleCutoff = Deadline::in(moduleConfig.external_notification.nag_timeout
+                                                  ? (moduleConfig.external_notification.nag_timeout * 1000)
+                                                  : moduleConfig.external_notification.output_ms);
+                LOG_INFO("Nagging for %ldms", (long)nagCycleCutoff.msFromNow());
             }
 
             if (genericShouldAlert) {
@@ -566,7 +563,9 @@ void ExternalNotificationModule::handleSetRingtone(const char *from_msg)
 
 int ExternalNotificationModule::handleInputEvent(const InputEvent *event)
 {
-    if (nagCycleCutoff != UINT32_MAX) {
+    // Only swallow the event when a nag is actually running. This used to ask whether the raw value
+    // differed from the stopped sentinel, which was also true at boot, where it was neither.
+    if (nagCycleCutoff.armed()) {
         stopNow();
         return 1;
     }

@@ -4,6 +4,7 @@
 #include "concurrency/OSThread.h"
 #include "configuration.h"
 #include "input/InputBroker.h"
+#include "mesh/Throttle.h" // Deadline, for nagCycleCutoff
 
 #ifdef HAS_RGB_LED
 #include "AmbientLightingThread.h"
@@ -60,7 +61,9 @@ class ExternalNotificationModule : public SinglePortModule, private concurrency:
 
     int handleInputEvent(const InputEvent *arg);
 
-    uint32_t nagCycleCutoff = 1;
+    /// Armed for as long as a nag is running; disarmed is "not nagging". This is the whole of the
+    /// nag state - there is no separate flag to keep in step with it.
+    Deadline nagCycleCutoff;
 
     void setExternalState(uint8_t index = 0, bool on = false);
     bool getExternal(uint8_t index = 0);
@@ -86,8 +89,6 @@ class ExternalNotificationModule : public SinglePortModule, private concurrency:
     virtual int32_t runOnce() override;
 
     virtual bool wantPacket(const meshtastic_MeshPacket *p) override;
-
-    bool isNagging = false;
 
     bool isSilenced = false;
     bool buzzerShouldAlert = false;
