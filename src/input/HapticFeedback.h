@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mesh/Throttle.h"
+
 #include "configuration.h"
 
 #ifdef HAPTIC_FEEDBACK_PIN
@@ -20,13 +22,14 @@ class HapticFeedback : public concurrency::OSThread
     int32_t runOnce() override;
 
   private:
-    uint32_t pulseOffAt = 0;
-    uint32_t delayedPulseAt = 0;
+    Deadline pulseOffAt;
+    Deadline delayedPulseAt;
     uint16_t delayedPulseDuration = 0;
 
     void motorWrite(bool on);
     // Reschedule to the soonest pending event so later arms don't clobber earlier wakes.
     void scheduleNext();
+    int32_t msUntilNextPulse() const;
 };
 
 extern HapticFeedback *hapticFeedback;

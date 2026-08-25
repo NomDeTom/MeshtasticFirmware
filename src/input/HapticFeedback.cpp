@@ -35,60 +35,55 @@ void HapticFeedback::motorWrite(bool on)
 void HapticFeedback::pulse(uint16_t durationMs)
 {
     motorWrite(true);
-    pulseOffAt = Time::deadlineIn(durationMs); // 0 is the "no pulse" sentinel
+    pulseOffAt = Deadline::in(durationMs);
     scheduleNext();
 }
 
 void HapticFeedback::armDelayedPulse(uint16_t delayMs, uint16_t durationMs)
 {
-    delayedPulseAt = Time::deadlineIn(delayMs);
+    delayedPulseAt = Deadline::in(delayMs);
     delayedPulseDuration = durationMs;
     scheduleNext();
 }
 
 void HapticFeedback::cancelDelayedPulse()
 {
-    delayedPulseAt = 0;
+    delayedPulseAt = Deadline();
+}
+
+// Milliseconds until whichever of the two pending pulses is due first, or -1 when neither is armed.
+int32_t HapticFeedback::msUntilNextPulse() const
+{
+    const Deadline next = Deadline::sooner(pulseOffAt, delayedPulseAt);
+    if (next.disarmed())
+        return -1;
+    const int32_t delay = next.msFromNow();
+    return delay > 0 ? delay : 0;
 }
 
 void HapticFeedback::scheduleNext()
 {
-    uint32_t now = millis();
-    uint32_t next = 0;
-    if (pulseOffAt != 0)
-        next = pulseOffAt;
-    if (delayedPulseAt != 0 && (next == 0 || (int32_t)(delayedPulseAt - next) < 0))
-        next = delayedPulseAt;
-    if (next == 0)
+    const int32_t delay = msUntilNextPulse();
+    if (delay < 0)
         return;
-    int32_t delay = (int32_t)(next - now);
-    setIntervalFromNow(delay > 0 ? (unsigned long)delay : 0);
+    setIntervalFromNow((unsigned long)delay);
 }
 
 int32_t HapticFeedback::runOnce()
 {
-    uint32_t now = millis();
-
-    if (pulseOffAt != 0 && (int32_t)(now - pulseOffAt) >= 0) {
+    if (pulseOffAt.passed()) {
         motorWrite(false);
-        pulseOffAt = 0;
+        pulseOffAt = Deadline();
     }
 
-    if (delayedPulseAt != 0 && (int32_t)(now - delayedPulseAt) >= 0) {
+    if (delayedPulseAt.passed()) {
         uint16_t dur = delayedPulseDuration;
-        delayedPulseAt = 0;
-        pulse(dur);
+        delayedPulseAt = Deadline();
+        pulse(dur); // re-arms pulseOffAt and calls scheduleNext()
     }
 
-    uint32_t next = 0;
-    if (pulseOffAt != 0)
-        next = pulseOffAt;
-    if (delayedPulseAt != 0 && (next == 0 || (int32_t)(delayedPulseAt - next) < 0))
-        next = delayedPulseAt;
-    if (next == 0)
-        return 60 * 1000;
-    int32_t delay = (int32_t)(next - now);
-    return delay > 0 ? delay : 0;
+    const int32_t delay = msUntilNextPulse();
+    return delay < 0 ? 60 * 1000 : delay;
 }
 
 #endif // HAPTIC_FEEDBACK_PIN

@@ -19,9 +19,9 @@
 // The predicates live beside their only caller in src/gps/GPS.cpp rather than in a header of their
 // own; the native test build compiles that file, so declaring the prototypes here is enough. A
 // signature change breaks the link rather than silently diverging from the definition.
-bool fixHoldInForce(uint32_t fixHoldEnds, uint32_t threadIntervalMs);
-bool holdJustExpired(uint32_t fixHoldEnds);
-bool shouldArmFixHold(bool hasValidLocation, uint8_t prevFixQual, uint32_t fixHoldEnds, uint32_t threadIntervalMs);
+bool fixHoldInForce(Deadline fixHoldEnds, uint32_t threadIntervalMs);
+bool holdJustExpired(Deadline fixHoldEnds);
+bool shouldArmFixHold(bool hasValidLocation, uint8_t prevFixQual, Deadline fixHoldEnds, uint32_t threadIntervalMs);
 
 // GPS_THREAD_INTERVAL, spelled out so the suite does not pull in GPS.h and its hardware deps.
 static constexpr uint32_t kThreadInterval = 200;
@@ -39,9 +39,9 @@ void tearDown(void)
 }
 
 // Arms a hold at the current test time and returns the resulting fixHoldEnds.
-static uint32_t armHoldNow(uint32_t holdMs = kHoldMs)
+static Deadline armHoldNow(uint32_t holdMs = kHoldMs)
 {
-    return Time::getMillis() + holdMs;
+    return Deadline::in(holdMs);
 }
 
 // --- the reasons to arm ---
@@ -50,14 +50,14 @@ static uint32_t armHoldNow(uint32_t holdMs = kHoldMs)
 void test_arms_on_the_first_lock_of_a_cycle(void)
 {
     Time::setTestMillis(50 * 1000);
-    TEST_ASSERT_TRUE(shouldArmFixHold(false, 3, 0, kThreadInterval));
+    TEST_ASSERT_TRUE(shouldArmFixHold(false, 3, Deadline(), kThreadInterval));
 }
 
 // Lock after the receiver was off: down() zeroes fixQual, so prev_fixQual is 0 on the way back up.
 void test_arms_on_the_first_lock_after_the_gps_was_off(void)
 {
     Time::setTestMillis(50 * 1000);
-    TEST_ASSERT_TRUE(shouldArmFixHold(true, 0, 0, kThreadInterval));
+    TEST_ASSERT_TRUE(shouldArmFixHold(true, 0, Deadline(), kThreadInterval));
 }
 
 // The regression. A publish that did not sleep leaves hasValidLocation set, prev_fixQual non-zero
@@ -66,14 +66,14 @@ void test_arms_on_the_first_lock_after_the_gps_was_off(void)
 void test_arms_after_a_publish_cleared_the_hold_without_sleeping(void)
 {
     Time::setTestMillis(50 * 1000);
-    TEST_ASSERT_TRUE_MESSAGE(shouldArmFixHold(true, 3, 0, kThreadInterval),
-                             "fixHoldEnds == 0 means 'not holding', which is a reason to arm");
+    TEST_ASSERT_TRUE_MESSAGE(shouldArmFixHold(true, 3, Deadline(), kThreadInterval),
+                             "a disarmed hold means 'not holding', which is a reason to arm");
 }
 
 void test_arms_once_the_hold_has_expired(void)
 {
     Time::setTestMillis(50 * 1000);
-    const uint32_t fixHoldEnds = armHoldNow();
+    const Deadline fixHoldEnds = armHoldNow();
 
     Time::advanceTestMillis(kHoldMs + kThreadInterval);
     TEST_ASSERT_TRUE(shouldArmFixHold(true, 3, fixHoldEnds, kThreadInterval));
@@ -84,7 +84,7 @@ void test_arms_once_the_hold_has_expired(void)
 void test_does_not_arm_while_a_hold_is_in_force(void)
 {
     Time::setTestMillis(50 * 1000);
-    const uint32_t fixHoldEnds = armHoldNow();
+    const Deadline fixHoldEnds = armHoldNow();
 
     Time::advanceTestMillis(kHoldMs / 2);
     TEST_ASSERT_FALSE(shouldArmFixHold(true, 3, fixHoldEnds, kThreadInterval));
@@ -95,7 +95,7 @@ void test_does_not_arm_while_a_hold_is_in_force(void)
 void test_does_not_arm_in_the_thread_interval_grace_after_the_deadline(void)
 {
     Time::setTestMillis(50 * 1000);
-    const uint32_t fixHoldEnds = armHoldNow();
+    const Deadline fixHoldEnds = armHoldNow();
 
     Time::advanceTestMillis(kHoldMs); // exactly at the deadline
     TEST_ASSERT_FALSE(shouldArmFixHold(true, 3, fixHoldEnds, kThreadInterval));
@@ -115,7 +115,7 @@ void test_does_not_arm_in_the_thread_interval_grace_after_the_deadline(void)
 void test_does_not_arm_while_a_hold_straddling_the_wrap_is_in_force(void)
 {
     Time::setTestMillis(0xFFFFFF00u); // 256ms short of the wrap
-    const uint32_t fixHoldEnds = armHoldNow();
+    const Deadline fixHoldEnds = armHoldNow();
 
     TEST_ASSERT_FALSE(shouldArmFixHold(true, 3, fixHoldEnds, kThreadInterval));
 
@@ -130,9 +130,11 @@ void test_does_not_arm_while_a_hold_straddling_the_wrap_is_in_force(void)
 void test_holds_when_the_deadline_wraps_but_now_has_not(void)
 {
     Time::setTestMillis(0xFFFFFF00u);
-    const uint32_t fixHoldEnds = armHoldNow(); // wraps to ~0x4CFF
+    const Deadline fixHoldEnds = armHoldNow(); // wraps to ~0x4CFF
 
-    TEST_ASSERT_TRUE_MESSAGE(fixHoldEnds < Time::getMillis(), "test setup: the deadline must have wrapped");
+    // raw() rather than the usual predicates: the premise here is about the representation - that
+    // the stored value really did wrap below now - which is the one thing predicates cannot show.
+    TEST_ASSERT_TRUE_MESSAGE(fixHoldEnds.raw() < Time::getMillis(), "test setup: the deadline must have wrapped");
     TEST_ASSERT_FALSE(shouldArmFixHold(true, 3, fixHoldEnds, kThreadInterval));
 }
 
@@ -145,9 +147,9 @@ void test_no_hold_means_arm_but_does_not_mean_expired(void)
 {
     Time::setTestMillis(50 * 1000);
 
-    TEST_ASSERT_FALSE_MESSAGE(fixHoldInForce(0, kThreadInterval), "a hold that was never armed is not in force");
-    TEST_ASSERT_TRUE_MESSAGE(shouldArmFixHold(true, 3, 0, kThreadInterval), "...so it is a reason to arm one");
-    TEST_ASSERT_FALSE_MESSAGE(holdJustExpired(0), "...but not a reason to publish and sleep");
+    TEST_ASSERT_FALSE_MESSAGE(fixHoldInForce(Deadline(), kThreadInterval), "a hold that was never armed is not in force");
+    TEST_ASSERT_TRUE_MESSAGE(shouldArmFixHold(true, 3, Deadline(), kThreadInterval), "...so it is a reason to arm one");
+    TEST_ASSERT_FALSE_MESSAGE(holdJustExpired(Deadline()), "...but not a reason to publish and sleep");
 }
 
 // holdJustExpired()'s sentinel guard is load-bearing on every cycle, not just past the half-range:
@@ -155,15 +157,15 @@ void test_no_hold_means_arm_but_does_not_mean_expired(void)
 void test_only_an_armed_hold_can_expire(void)
 {
     Time::setTestMillis(50 * 1000);
-    const uint32_t fixHoldEnds = armHoldNow();
+    const Deadline fixHoldEnds = armHoldNow();
 
     TEST_ASSERT_FALSE_MESSAGE(holdJustExpired(fixHoldEnds), "still inside the hold");
 
     Time::advanceTestMillis(kHoldMs); // the deadline itself, no grace interval at this site
     TEST_ASSERT_TRUE_MESSAGE(holdJustExpired(fixHoldEnds), "the deadline is the moment to publish and sleep");
 
-    TEST_ASSERT_TRUE_MESSAGE(!fixHoldInForce(0, 0), "test premise: the negation alone calls an unarmed hold expired");
-    TEST_ASSERT_FALSE_MESSAGE(holdJustExpired(0), "so the sentinel test is what keeps it from expiring");
+    TEST_ASSERT_TRUE_MESSAGE(!fixHoldInForce(Deadline(), 0), "test premise: the negation alone calls an unarmed hold expired");
+    TEST_ASSERT_FALSE_MESSAGE(holdJustExpired(Deadline()), "so the armed() test is what keeps it from expiring");
 }
 
 // The `fixHoldEnds != 0` term inside fixHoldInForce() looks redundant, and for the first half of
@@ -181,14 +183,14 @@ void test_the_sentinel_guard_is_load_bearing_past_the_half_range(void)
                               "test premise: past half-range the sentinel reads as a future deadline");
 
     // ...so the explicit sentinel test is the only thing keeping the answer right.
-    TEST_ASSERT_FALSE_MESSAGE(fixHoldInForce(0, kThreadInterval), "an unarmed hold is never in force");
-    TEST_ASSERT_TRUE_MESSAGE(shouldArmFixHold(true, 3, 0, kThreadInterval), "...so a hold must still be armed");
+    TEST_ASSERT_FALSE_MESSAGE(fixHoldInForce(Deadline(), kThreadInterval), "an unarmed hold is never in force");
+    TEST_ASSERT_TRUE_MESSAGE(shouldArmFixHold(true, 3, Deadline(), kThreadInterval), "...so a hold must still be armed");
 }
 
 void test_hold_in_force_tracks_the_deadline(void)
 {
     Time::setTestMillis(50 * 1000);
-    const uint32_t fixHoldEnds = armHoldNow();
+    const Deadline fixHoldEnds = armHoldNow();
 
     TEST_ASSERT_TRUE(fixHoldInForce(fixHoldEnds, kThreadInterval));
 

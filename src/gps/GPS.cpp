@@ -1433,21 +1433,24 @@ void GPS::publishUpdate()
 /// Is a post-lock ephemeris hold currently in force? The `!= 0` is the "never armed" sentinel, which
 /// deadlinePassed() reads as passed for the first half of each wrap cycle and as ~24.8 days in the
 /// future for the second. No header: test_gps_fix_hold declares the prototypes itself.
-bool fixHoldInForce(uint32_t fixHoldEnds, uint32_t threadIntervalMs)
+bool fixHoldInForce(Deadline fixHoldEnds, uint32_t threadIntervalMs)
 {
-    return fixHoldEnds != 0 && !Throttle::deadlinePassed(fixHoldEnds + threadIntervalMs);
+    // Grace of one thread cycle: testing against a "now" pulled back by the interval is the same
+    // question as the old deadlinePassed(fixHoldEnds + threadIntervalMs), without building a
+    // deadline out of the sum.
+    return fixHoldEnds.armed() && !fixHoldEnds.passedAt(Time::getMillis() - threadIntervalMs);
 }
 
 /// Did an armed hold just expire? `!= 0` guards against negating fixHoldInForce() alone, which would
 /// call an unarmed hold "expired" every cycle. No grace interval: the deadline itself is go-down time.
-bool holdJustExpired(uint32_t fixHoldEnds)
+bool holdJustExpired(Deadline fixHoldEnds)
 {
-    return fixHoldEnds != 0 && !fixHoldInForce(fixHoldEnds, 0);
+    return fixHoldEnds.armed() && !fixHoldInForce(fixHoldEnds, 0);
 }
 
 /// Should a post-lock ephemeris hold be (re-)armed this cycle? "No hold in force" fires often, since
 /// every publish clears the hold, including ones that don't put the receiver back to sleep.
-bool shouldArmFixHold(bool hasValidLocation, uint8_t prevFixQual, uint32_t fixHoldEnds, uint32_t threadIntervalMs)
+bool shouldArmFixHold(bool hasValidLocation, uint8_t prevFixQual, Deadline fixHoldEnds, uint32_t threadIntervalMs)
 {
     // First lock of a cycle, first lock after the receiver was off, or nothing holding right now.
     return !hasValidLocation || prevFixQual == 0 || !fixHoldInForce(fixHoldEnds, threadIntervalMs);
@@ -1560,7 +1563,7 @@ int32_t GPS::runOnce()
                 if (holdTime > GPS_FIX_HOLD_MAX_MS)
                     holdTime = GPS_FIX_HOLD_MAX_MS;
                 // Same clock the Throttle evaluation reads, and never the "no hold" sentinel.
-                fixHoldEnds = Time::deadlineIn(holdTime);
+                fixHoldEnds = Deadline::in(holdTime);
                 LOG_DEBUG_GPS("Holding for %ums after lock", holdTime);
             }
         }
@@ -1584,7 +1587,7 @@ int32_t GPS::runOnce()
                 shouldPublish = true;
             }
             if (shouldPublish) {
-                fixHoldEnds = 0;
+                fixHoldEnds = Deadline();
                 publishUpdate();
             }
 
@@ -1594,8 +1597,8 @@ int32_t GPS::runOnce()
             }
 
 #if GPS_DEBUG
-        } else if (fixHoldEnds != 0) {
-            LOG_DEBUG("Holding for GPS data download: %d ms (numSats=%d)", fixHoldEnds - Time::getMillis(), p.sats_in_view);
+        } else if (fixHoldEnds.armed()) {
+            LOG_DEBUG("Holding for GPS data download: %d ms (numSats=%d)", fixHoldEnds.msFromNow(), p.sats_in_view);
 #endif
         }
     }

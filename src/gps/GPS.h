@@ -11,6 +11,7 @@
 #include "concurrency/OSThread.h"
 #include "input/RotaryEncoderInterruptImpl1.h"
 #include "input/UpDownInterruptImpl1.h"
+#include "mesh/Throttle.h"
 #include "modules/PositionModule.h"
 
 #ifdef SENSECAP_INDICATOR
@@ -197,7 +198,7 @@ class GPS : private concurrency::OSThread
     uint8_t fixType = 0;      // fix type from GPGSA
 #endif
 
-    uint32_t fixHoldEnds = 0;
+    Deadline fixHoldEnds;
     uint32_t rx_gpio = 0;
     uint32_t tx_gpio = 0;
 

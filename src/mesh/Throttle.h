@@ -107,6 +107,25 @@ class Deadline
     /// passed() against a caller-supplied "now", for a loop testing many deadlines against one read.
     bool passedAt(uint32_t nowMs) const { return isReal() && Throttle::deadlinePassedAt(nowMs, at_); }
 
+    /// Milliseconds until this fires - negative once it has passed. Same ~24.8-day range as passed().
+    ///
+    /// Disarmed and forever() have no arrival time, so both answer INT32_MAX: "not soon". That is
+    /// what a scheduler wants, but it means a caller distinguishing the two must ask armed() first.
+    int32_t msFromNow() const { return msFrom(Time::getMillis()); }
+    int32_t msFrom(uint32_t nowMs) const { return isReal() ? (int32_t)(at_ - nowMs) : INT32_MAX; }
+
+    /// The earlier of two deadlines, for a scheduler picking its next wake-up. A disarmed one never
+    /// wins; forever() loses to any real deadline; two disarmed ones give back a disarmed Deadline.
+    static Deadline sooner(Deadline a, Deadline b)
+    {
+        if (a.disarmed())
+            return b;
+        if (b.disarmed())
+            return a;
+        const uint32_t now = Time::getMillis(); // one read, so the two comparisons agree
+        return a.msFrom(now) <= b.msFrom(now) ? a : b;
+    }
+
     void disarm() { at_ = kDisarmed; }
 
     /// Raw stored value - logging and serialisation only. See the note above.

@@ -4,6 +4,7 @@
 
 #include "Observer.h"
 #include "TouchDrvGT911.hpp"
+#include "UptimeClock.h"
 #include "Wire.h"
 #include "buzz.h"
 #include "concurrency/OSThread.h"
@@ -555,7 +556,7 @@ struct TouchLightSleepEndObserver {
         }
 
         touchStateEpoch++;
-        touchResumeAtMs = millis();
+        touchResumeAtMs = Time::getSafeMillis(); // never 0: 0 is the "never light-slept" reading below
         touchIndicatorRefreshPending = !isTouchInputEnabled();
 #ifdef MESHTASTIC_INCLUDE_NICHE_GRAPHICS
         // Clear sleep-time touch overlay after wake.
