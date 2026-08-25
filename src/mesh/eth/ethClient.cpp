@@ -34,7 +34,10 @@
 // NTP
 EthernetUDP ntpUDP;
 NTPClient timeClient(ntpUDP, config.network.ntp_server);
-uint32_t ntp_renew = 0;
+// Disarmed is the boot state and means "due now": a periodic refresh that has never run is owed one.
+// Static-init, so it cannot be Deadline::in(0) - there is no clock yet. A real deadline is only ever
+// the wait between runs, so the only states here are "waiting" and "due".
+Deadline ntp_renew;
 #endif
 
 EthernetUDP syslogClient;
@@ -85,7 +88,7 @@ static int32_t reconnectETH()
 
             ethStartupComplete = false;
 #ifndef DISABLE_NTP
-            ntp_renew = 0;
+            ntp_renew = Deadline(); // link-up: renew immediately, don't serve stale time
 #endif
 
 #ifdef PIN_ETHERNET_RESET
@@ -197,9 +200,11 @@ static int32_t reconnectETH()
     }
 
 #ifndef DISABLE_NTP
-    // 0 here means "renew now" (forced at link-up). deadlinePassed(0) only reads as passed for the
-    // first half of each wrap cycle, so treat 0 as always-due rather than relying on that.
-    if (isEthernetAvailable() && (ntp_renew == 0 || Throttle::deadlinePassed(ntp_renew))) {
+    // A renewal is due unless we are inside a wait. Disarmed counts as due here - that is this
+    // site's reading of it, and the reason the old code needed `ntp_renew == 0 ||`: nothing that was
+    // never scheduled has "passed", so passed() alone cannot answer this and neither could the
+    // sentinel, which deadlinePassed() only read as due for half of each wrap cycle.
+    if (isEthernetAvailable() && !ntp_renew.pending()) {
 
         LOG_INFO("Update NTP time from %s", config.network.ntp_server);
         if (timeClient.update()) {
@@ -211,10 +216,10 @@ static int32_t reconnectETH()
 
             perhapsSetRTC(RTCQualityNTP, &tv);
 
-            ntp_renew = millis() + 43200 * 1000; // success, refresh every 12 hours
+            ntp_renew = Deadline::in(43200 * 1000); // success, refresh every 12 hours
         } else {
             LOG_ERROR("NTP Update failed");
-            ntp_renew = millis() + 300 * 1000; // failure, retry every 5 minutes
+            ntp_renew = Deadline::in(300 * 1000); // failure, retry every 5 minutes
         }
         timeClient.end(); // W5100S: release UDP socket for other services
     }
