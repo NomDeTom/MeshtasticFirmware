@@ -61,6 +61,48 @@ void test_advanceTestMillis_steps_clock()
     TEST_ASSERT_EQUAL_UINT32(1500, Time::getMillis());
 }
 
+// The one tick per ~49.7-day wrap that reads 0 would be indistinguishable from an unset stamp.
+void test_getSafeMillis_skips_zero()
+{
+    Time::setTestMillis(0);
+    TEST_ASSERT_EQUAL_UINT32(0, Time::getMillis());
+    TEST_ASSERT_EQUAL_UINT32(1, Time::getSafeMillis());
+}
+
+void test_getSafeMillis_passes_every_other_value()
+{
+    Time::setTestMillis(1);
+    TEST_ASSERT_EQUAL_UINT32(1, Time::getSafeMillis());
+    Time::setTestMillis(UINT32_MAX);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, Time::getSafeMillis());
+}
+
+// deadlineIn() arms a deadline that is never 0, including when the sum wraps onto it exactly.
+void test_deadlineIn_skips_a_sum_that_lands_on_zero()
+{
+    Time::setTestMillis(UINT32_MAX);
+    TEST_ASSERT_EQUAL_UINT32(1, Time::deadlineIn(1)); // UINT32_MAX + 1 wraps to 0
+    TEST_ASSERT_EQUAL_UINT32(1, Time::deadlineIn(2)); // and the tick after is genuinely 1
+}
+
+void test_deadlineIn_is_now_plus_delay()
+{
+    Time::setTestMillis(1000);
+    TEST_ASSERT_EQUAL_UINT32(1500, Time::deadlineIn(500));
+    TEST_ASSERT_EQUAL_UINT32(1000, Time::deadlineIn(0));
+}
+
+// skipZero() is the shared primitive under both, for a deadline composed from some base other than
+// now. constexpr, so the value is folded when the operand is known.
+void test_skipZero_maps_only_zero()
+{
+    static_assert(Time::skipZero(0) == 1, "0 must step to 1");
+    static_assert(Time::skipZero(1) == 1, "1 is already safe");
+    TEST_ASSERT_EQUAL_UINT32(1, Time::skipZero(0));
+    TEST_ASSERT_EQUAL_UINT32(42, Time::skipZero(42));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, Time::skipZero(UINT32_MAX));
+}
+
 // Advancing past 0xFFFFFFFF wraps like millis() does, rather than saturating. This is the property
 // the Throttle wrap tests are built on, so it is worth pinning here too.
 void test_advanceTestMillis_wraps_like_millis()
@@ -336,6 +378,11 @@ void setup()
     UNITY_BEGIN();
     RUN_TEST(test_getMillis_returns_injected_value);
     RUN_TEST(test_advanceTestMillis_steps_clock);
+    RUN_TEST(test_getSafeMillis_skips_zero);
+    RUN_TEST(test_getSafeMillis_passes_every_other_value);
+    RUN_TEST(test_deadlineIn_skips_a_sum_that_lands_on_zero);
+    RUN_TEST(test_deadlineIn_is_now_plus_delay);
+    RUN_TEST(test_skipZero_maps_only_zero);
     RUN_TEST(test_advanceTestMillis_wraps_like_millis);
     RUN_TEST(test_monotonic_matches_millis_before_any_wrap);
     RUN_TEST(test_monotonic_counts_a_wrap);

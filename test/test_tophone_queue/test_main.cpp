@@ -4,7 +4,9 @@
 
 #if ARCH_PORTDUINO // portduino_config.maxtophone is what sizes the queue under test
 
+#include "UptimeClock.h"
 #include "configuration.h"
+#include "gps/RTC.h"
 #include "mesh/MeshService.h"
 #include "mesh/NodeDB.h"
 #include "platform/portduino/PortduinoGlue.h"
@@ -61,6 +63,14 @@ static std::vector<uint32_t> drainIds()
         service->releaseToPool(p);
     }
     return ids;
+}
+
+// Step the injected clock the way the firmware does - serviceMonotonic() must run at least once
+// per ~49.7-day window or the carry misses a wrap.
+static void advanceAndService(uint32_t deltaMs)
+{
+    Time::advanceTestMillis(deltaMs);
+    Time::serviceMonotonic();
 }
 
 static void assertIds(const std::vector<uint32_t> &expected, const char *what)
@@ -133,6 +143,53 @@ void tearDown(void)
     config.device.rebroadcast_mode = savedRebroadcastMode;
 }
 
+// perhapsSetRTC() rejects anything before BUILD_EPOCH (stamped at build time) as implausible, so
+// derive the test epoch rather than hardcoding one - same reason as test_uptime_clock's kTestEpoch.
+#ifdef BUILD_EPOCH
+static constexpr uint32_t kReconcileEpoch = (uint32_t)BUILD_EPOCH + 3600;
+#else
+static constexpr uint32_t kReconcileEpoch = 1800000000u;
+#endif
+
+// D1 regression. reconcilePendingRxTimes() dates a placeholder by the *elapsed* term
+// (nowUptimeSecs - p->rx_time). Both stamps are monotonic uptime seconds, so the answer must stay
+// exact at any age; the merged defect this replaced used raw millis and aliased past 49.7 days.
+void test_reconcile_dates_a_placeholder_exactly_past_the_wrap()
+{
+    static const uint32_t kDayMs = 24u * 60 * 60 * 1000;
+    static const uint32_t kElapsedDays = 60; // > 49.7, so a 32-bit millis delta would have aliased
+
+    resetRTCStateForTests();
+    Time::resetMonotonicForTests();
+    Time::setTestMillis(0xFFFFFF00u); // 256 ms short of the wrap
+    Time::serviceMonotonic();
+
+    // What Router::computeRxTimeStamp() leaves behind with no trusted clock: the arrival instant in
+    // uptime seconds, has_rx_time false so nothing downstream reads it as a wall clock.
+    meshtastic_MeshPacket p = basePacket(0x5001);
+    p.rx_time = Time::getUptimeSecs();
+    p.has_rx_time = false;
+    sendPacket(p);
+
+    for (uint32_t d = 0; d < kElapsedDays; d += 10)
+        advanceAndService(10 * kDayMs); // sub-wrap steps: one 60-day jump would miss the carry
+
+    struct timeval tv = {};
+    tv.tv_sec = kReconcileEpoch;
+    TEST_ASSERT_EQUAL_INT(RTCSetResultSuccess, perhapsSetRTC(RTCQualityFromNet, &tv));
+
+    service->reconcilePendingRxTimes();
+
+    meshtastic_MeshPacket *out = service->getForPhone();
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_TRUE_MESSAGE(out->has_rx_time, "reconcile must date the placeholder");
+    TEST_ASSERT_EQUAL_UINT32(kReconcileEpoch - kElapsedDays * 24 * 60 * 60, out->rx_time);
+    service->releaseToPool(out);
+
+    Time::useRealClock();
+    resetRTCStateForTests();
+}
+
 void setup()
 {
     initializeTestEnvironment();
@@ -144,6 +201,10 @@ void setup()
     RUN_TEST(test_text_evicts_oldest_when_full);
     RUN_TEST(test_low_priority_packet_still_dropped_when_full);
     RUN_TEST(test_encrypted_packet_is_not_classified_by_portnum);
+
+    printf("\n=== rx_time placeholder reconciliation ===\n");
+
+    RUN_TEST(test_reconcile_dates_a_placeholder_exactly_past_the_wrap);
 
     exit(UNITY_END());
 }

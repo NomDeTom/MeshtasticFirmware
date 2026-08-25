@@ -13,8 +13,11 @@
 // The migration demotes overflow into the warm tier, so these tests need it.
 #if WARM_NODE_COUNT > 0
 
+#include "UptimeClock.h"
+#include "gps/RTC.h"
 #include "mesh/NodeDB.h"
 #include <cstring>
+#include <sys/time.h>
 
 // Subclass shim: exposes the private maintenance paths (via the friend
 // declaration in NodeDB.h) and lets a test own the hot store directly
@@ -26,6 +29,7 @@ class NodeDBTestShim : public NodeDB
     void runDemote() { demoteOldestHotNodesToWarm(); }
     void runCleanup() { cleanupMeshDB(); }
     void stampUntrusted(NodeNum num, uint32_t uptimeSecs) { recordHeardWhileClockUntrusted(num, uptimeSecs); }
+    bool heardStamp(NodeNum num, uint32_t &out) { return getHeardAtUptimeSecs(num, out); }
 
     // Read back the role + protected category the warm tier cached for a node.
     bool warmMeta(NodeNum n, uint8_t &role, uint8_t &prot) { return warmStore.lookupMeta(n, role, prot); }
@@ -318,6 +322,123 @@ static void test_removeNodeByNum_presentNodeOnFullDb(void)
     TEST_ASSERT_NOT_NULL(db->getMeshNode(8000 + MAX_NUM_NODES - 1)); // survivors kept
 }
 
+// --- the RAM arrival sidecar: last_heard only ever holds a real epoch or 0 ---
+
+// perhapsSetRTC() rejects anything before BUILD_EPOCH (stamped at build time) as implausible, so
+// derive the test epoch rather than hardcoding one - same reason as test_uptime_clock's kTestEpoch.
+#ifdef BUILD_EPOCH
+static constexpr uint32_t kBackfillEpoch = (uint32_t)BUILD_EPOCH + 3600;
+#else
+static constexpr uint32_t kBackfillEpoch = 1800000000u;
+#endif
+static const uint32_t kDayMs = 24u * 60 * 60 * 1000;
+static const uint32_t kElapsedDays = 60; // > 49.7, so a 32-bit millis delta would have aliased
+
+// Park the injected clock 256 ms short of the wrap, then step over it in sub-wrap increments -
+// serviceMonotonic() must run at least once per window or the carry misses the wrap.
+static void beginPreWrapClock()
+{
+    resetRTCStateForTests();
+    Time::resetMonotonicForTests();
+    Time::setTestMillis(0xFFFFFF00u);
+    Time::serviceMonotonic();
+}
+
+static void advancePastTheWrap()
+{
+    for (uint32_t d = 0; d < kElapsedDays; d += 10) {
+        Time::advanceTestMillis(10 * kDayMs);
+        Time::serviceMonotonic();
+    }
+}
+
+static void applyTestEpoch()
+{
+    struct timeval tv = {};
+    tv.tv_sec = kBackfillEpoch;
+    TEST_ASSERT_EQUAL_INT(RTCSetResultSuccess, perhapsSetRTC(RTCQualityFromNet, &tv));
+}
+
+// A node heard before any trusted clock keeps its arrival in the sidecar; when the clock arrives,
+// backfillHeardAt() converts it by the elapsed term, which is exact at any age.
+static void test_backfill_datesAnUntrustedStampExactlyPastTheWrap(void)
+{
+    constexpr NodeNum heardEarly = 0x71000001;
+
+    beginPreWrapClock();
+    db->seedSelf();
+    db->push(heardEarly, 0, false, false, /*withUser=*/true, /*withKey=*/true);
+    db->stampUntrusted(heardEarly, Time::getUptimeSecs());
+
+    advancePastTheWrap();
+    applyTestEpoch();
+    db->backfillHeardAt();
+
+    meshtastic_NodeInfoLite *n = db->getMeshNode(heardEarly);
+    TEST_ASSERT_NOT_NULL(n);
+    TEST_ASSERT_EQUAL_UINT32(kBackfillEpoch - kElapsedDays * 24 * 60 * 60, n->last_heard);
+
+    uint32_t stamp = 0;
+    TEST_ASSERT_FALSE_MESSAGE(db->heardStamp(heardEarly, stamp), "a converted stamp is consumed");
+
+    Time::useRealClock();
+    resetRTCStateForTests();
+}
+
+// Backfill never moves last_heard backwards: the node may since have been re-heard on a good clock.
+static void test_backfill_doesNotRetreatALaterEpoch(void)
+{
+    constexpr NodeNum reHeard = 0x71000003;
+    const uint32_t laterEpoch = kBackfillEpoch + 1;
+
+    beginPreWrapClock();
+    db->seedSelf();
+    db->push(reHeard, laterEpoch, false, false, /*withUser=*/true, /*withKey=*/true);
+    db->stampUntrusted(reHeard, Time::getUptimeSecs());
+
+    advancePastTheWrap();
+    applyTestEpoch();
+    db->backfillHeardAt();
+
+    TEST_ASSERT_EQUAL_UINT32(laterEpoch, db->getMeshNode(reHeard)->last_heard);
+
+    Time::useRealClock();
+    resetRTCStateForTests();
+}
+
+// The write side of the same invariant: a packet carrying an uptime-seconds placeholder must leave
+// last_heard alone and route the arrival to the sidecar instead.
+static void test_updateFrom_withoutRxTime_leavesLastHeardUnset(void)
+{
+    constexpr NodeNum sender = 0x71000002;
+    constexpr uint32_t uptimeSecs = 90;
+
+    resetRTCStateForTests(); // no trusted clock, so nothing may date this sighting
+    Time::resetMonotonicForTests();
+    Time::setTestMillis(uptimeSecs * 1000);
+    Time::serviceMonotonic();
+    db->seedSelf();
+
+    meshtastic_MeshPacket p = meshtastic_MeshPacket_init_zero;
+    p.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    p.from = sender;
+    p.to = NODENUM_BROADCAST;
+    p.id = 0x1234;
+    p.rx_time = Time::getUptimeSecs(); // what Router::computeRxTimeStamp() leaves behind
+    p.has_rx_time = false;
+    db->updateFrom(p);
+
+    meshtastic_NodeInfoLite *n = db->getMeshNode(sender);
+    TEST_ASSERT_NOT_NULL(n);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, n->last_heard, "last_heard holds a real epoch or 0, never boot-relative");
+
+    uint32_t stamp = 0;
+    TEST_ASSERT_TRUE_MESSAGE(db->heardStamp(sender, stamp), "the arrival belongs in the RAM sidecar");
+    TEST_ASSERT_EQUAL_UINT32(uptimeSecs, stamp);
+
+    Time::useRealClock();
+}
+
 NDB_TEST_ENTRY void setup()
 {
     initializeTestEnvironment();
@@ -335,6 +456,10 @@ NDB_TEST_ENTRY void setup()
     RUN_TEST(test_protectedCap_refusesBeyondLimit);
     RUN_TEST(test_removeNodeByNum_absentNodeOnFullDb);
     RUN_TEST(test_removeNodeByNum_presentNodeOnFullDb);
+
+    RUN_TEST(test_backfill_datesAnUntrustedStampExactlyPastTheWrap);
+    RUN_TEST(test_backfill_doesNotRetreatALaterEpoch);
+    RUN_TEST(test_updateFrom_withoutRxTime_leavesLastHeardUnset);
     exit(UNITY_END());
 }
 NDB_TEST_ENTRY void loop() {}

@@ -2,6 +2,7 @@
 
 #ifdef HAPTIC_FEEDBACK_PIN
 
+#include "UptimeClock.h"
 #include <Arduino.h>
 
 #ifdef HAPTIC_FEEDBACK_ACTIVE_LOW
@@ -34,17 +35,13 @@ void HapticFeedback::motorWrite(bool on)
 void HapticFeedback::pulse(uint16_t durationMs)
 {
     motorWrite(true);
-    pulseOffAt = millis() + durationMs;
-    if (pulseOffAt == 0) // 0 is the "no pulse" sentinel
-        pulseOffAt = 1;
+    pulseOffAt = Time::deadlineIn(durationMs); // 0 is the "no pulse" sentinel
     scheduleNext();
 }
 
 void HapticFeedback::armDelayedPulse(uint16_t delayMs, uint16_t durationMs)
 {
-    delayedPulseAt = millis() + delayMs;
-    if (delayedPulseAt == 0)
-        delayedPulseAt = 1;
+    delayedPulseAt = Time::deadlineIn(delayMs);
     delayedPulseDuration = durationMs;
     scheduleNext();
 }
