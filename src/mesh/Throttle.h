@@ -1,4 +1,5 @@
 #pragma once
+#include "UptimeClock.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -28,19 +29,8 @@ class Throttle
     /// for that separately, first: every such value is arithmetically far in the past, so it reads
     /// as passed.
     ///
-    /// TODO(deadline-type): mistake-proof that MUST by giving a deadline its own one-field type -
-    /// Deadline::in(ms) / .armed() / .passed() / .disarm(). A hand-built `now + interval` could then
-    /// no longer land on the sentinel by accident, and "armed" would stay a question separate from
-    /// "passed" - the split that has to survive, because which way "inactive" falls is the caller's
-    /// to decide. Same size and cost as the bare uint32_t. The conversion sites, grouped by the four
-    /// meanings they give the sentinel today:
-    ///   0 = unarmed - Power.cpp rebootAtMsec/shutdownAtMsec (the cheapest pair to convert), and
-    ///                 GPS.cpp fixHoldEnds, whose arm site remaps a 0 result to 1 by hand.
-    ///   0 = forever - NotificationRenderer.cpp alertBannerUntil. Every read spells its own `> 0`
-    ///                 guard, so this third state wants naming rather than repeating.
-    ///   0 = due now - ethClient.cpp ntp_renew, forced at link-up.
-    ///   UINT32_MAX  - ExternalNotificationModule.cpp nagCycleCutoff, whose armed() also lives in a
-    ///                 second variable (isNagging) and whose arm site can land on the sentinel.
+    /// New code should store a Deadline (below) instead of a bare uint32_t: it makes that MUST
+    /// impossible to forget, and gives the "inactive" state a name rather than a magic value.
     static bool deadlinePassed(uint32_t deadlineMs);
 
     /// deadlinePassed() against a caller-supplied "now", for a loop that snapshots the time once and
@@ -51,4 +41,79 @@ class Throttle
         // the top half. Not an int32_t cast, which is implementation-defined beyond INT32_MAX.
         return (uint32_t)(nowMs - deadlineMs) < 0x80000000u;
     }
+};
+
+/// An absolute uptime deadline, in a type that cannot be confused with a plain millis value.
+///
+/// Replaces the bare `uint32_t deadline` idiom and the several different meanings this codebase gave
+/// to a magic value stored in one. Same size and cost as that uint32_t: a single member, every
+/// method inline.
+///
+/// STATES
+///   in(ms) / at(ms)  an armed deadline; passed() becomes true once it arrives.
+///   disarmed()       nothing scheduled. armed() false, passed() never true. This is the default.
+///   forever()        armed with no expiry - "show until something cancels it". armed() true,
+///                    passed() never true.
+///   in(0)            armed and already due; what a "run this on the next pass" site wants.
+///
+/// RANGE
+///   passed() is correct while the deadline is at most ~24.8 days ahead of now - half the 32-bit
+///   millis wrap. Beyond that the comparison inverts. To ask "has interval X elapsed since event Y"
+///   over the full ~49.7 days, store the event instead and use Throttle::hasElapsed().
+///
+/// SENTINELS
+///   Two raw values are reserved - 0 for disarmed, UINT32_MAX for forever. in() and at() step past
+///   both, so a computed deadline can never land on one by accident. That was the failure mode the
+///   bare-uint32_t idiom left to chance: `now + interval` landing on the magic value silently
+///   disarms the deadline (or, worse, arms it forever).
+///
+/// USAGE
+///   Deadline reboot;                          // disarmed
+///   reboot = Deadline::in(5000);              // fires 5 s from now
+///   if (reboot.passed()) { doIt(); reboot.disarm(); }   // one-shot: disarm after acting
+///   if (reboot.armed()) ...                   // "is anything scheduled" - never test raw() != 0
+///
+/// Do not compare raw() against anything. It exists for logging and for the few places that must
+/// serialise the value; the comparison it looks like you want is passed().
+class Deadline
+{
+  public:
+    constexpr Deadline() = default;
+
+    /// Arm delayMs from now. delayMs of 0 means "already due".
+    static Deadline in(uint32_t delayMs) { return Deadline(sanitise(Time::getMillis() + delayMs)); }
+
+    /// Arm at an absolute uptime stamp, for a caller that already computed one.
+    static Deadline at(uint32_t whenMs) { return Deadline(sanitise(whenMs)); }
+
+    static constexpr Deadline disarmed() { return Deadline(kDisarmed); }
+    static constexpr Deadline forever() { return Deadline(kForever); }
+
+    /// Is anything scheduled? True for forever(), false only for disarmed().
+    constexpr bool armed() const { return at_ != kDisarmed; }
+
+    /// Has the deadline arrived? Always false when disarmed or forever.
+    bool passed() const { return isReal() && Throttle::deadlinePassed(at_); }
+
+    /// passed() against a caller-supplied "now", for a loop testing many deadlines against one read.
+    bool passedAt(uint32_t nowMs) const { return isReal() && Throttle::deadlinePassedAt(nowMs, at_); }
+
+    void disarm() { at_ = kDisarmed; }
+
+    /// Raw stored value - logging and serialisation only. See the note above.
+    constexpr uint32_t raw() const { return at_; }
+
+  private:
+    static constexpr uint32_t kDisarmed = 0;
+    static constexpr uint32_t kForever = UINT32_MAX;
+
+    explicit constexpr Deadline(uint32_t at) : at_(at) {}
+
+    /// A real deadline is one the arithmetic may be applied to - neither reserved value.
+    constexpr bool isReal() const { return at_ != kDisarmed && at_ != kForever; }
+
+    /// Step a computed value off both reserved values. 1 ms early at most, once per wrap each.
+    static constexpr uint32_t sanitise(uint32_t ms) { return (ms == kDisarmed || ms == kForever) ? 1 : ms; }
+
+    uint32_t at_ = kDisarmed;
 };

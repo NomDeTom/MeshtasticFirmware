@@ -213,6 +213,97 @@ void test_execute_survives_millis_wrap()
     TEST_ASSERT_EQUAL(2, executeCount);
 }
 
+// --- Deadline: the typed replacement for a bare uint32_t deadline ---
+
+void test_deadline_default_is_disarmed()
+{
+    Deadline d;
+    TEST_ASSERT_FALSE(d.armed());
+    TEST_ASSERT_FALSE(d.passed());
+    TEST_ASSERT_EQUAL_UINT32(0, d.raw());
+}
+
+void test_deadline_in_arms_and_then_passes()
+{
+    Time::setTestMillis(1000);
+    Deadline d = Deadline::in(500);
+    TEST_ASSERT_TRUE(d.armed());
+    TEST_ASSERT_FALSE(d.passed());
+    Time::setTestMillis(1499);
+    TEST_ASSERT_FALSE(d.passed());
+    Time::setTestMillis(1500);
+    TEST_ASSERT_TRUE(d.passed());
+}
+
+// A "do it on the next pass" site wants an armed deadline that has already arrived.
+void test_deadline_in_zero_is_due_now()
+{
+    Time::setTestMillis(1000);
+    Deadline d = Deadline::in(0);
+    TEST_ASSERT_TRUE(d.armed());
+    TEST_ASSERT_TRUE(d.passed());
+}
+
+void test_deadline_forever_is_armed_but_never_passes()
+{
+    Time::setTestMillis(1000);
+    Deadline d = Deadline::forever();
+    TEST_ASSERT_TRUE(d.armed());
+    TEST_ASSERT_FALSE(d.passed());
+    Time::setTestMillis(0x80000000u);
+    TEST_ASSERT_FALSE(d.passed());
+    Time::setTestMillis(UINT32_MAX);
+    TEST_ASSERT_FALSE(d.passed());
+}
+
+void test_deadline_disarm_stops_it_passing()
+{
+    Time::setTestMillis(1000);
+    Deadline d = Deadline::in(10);
+    Time::setTestMillis(2000);
+    TEST_ASSERT_TRUE(d.passed());
+    d.disarm();
+    TEST_ASSERT_FALSE(d.armed());
+    TEST_ASSERT_FALSE(d.passed());
+}
+
+// The failure the bare-uint32_t idiom left to chance: a computed deadline landing on a reserved
+// value. in() and at() must step past both, so no arithmetic result can silently disarm.
+void test_deadline_in_never_lands_on_a_reserved_value()
+{
+    Time::setTestMillis(UINT32_MAX);
+    Deadline wrapsToZero = Deadline::in(1); // UINT32_MAX + 1 == 0 == kDisarmed
+    TEST_ASSERT_TRUE_MESSAGE(wrapsToZero.armed(), "a computed 0 must not disarm");
+    TEST_ASSERT_EQUAL_UINT32(1, wrapsToZero.raw());
+
+    Deadline landsOnForever = Deadline::at(UINT32_MAX);
+    TEST_ASSERT_TRUE(landsOnForever.armed());
+    TEST_ASSERT_EQUAL_UINT32(1, landsOnForever.raw());
+    Time::setTestMillis(10);
+    TEST_ASSERT_TRUE_MESSAGE(landsOnForever.passed(), "a computed UINT32_MAX must not become forever");
+}
+
+void test_deadline_survives_the_wrap()
+{
+    Time::setTestMillis(0xFFFFFF00u); // 256 ms short of the wrap
+    Deadline d = Deadline::in(500);   // lands 244 ms past it
+    TEST_ASSERT_FALSE(d.passed());
+    Time::setTestMillis(0xFFFFFFFFu);
+    TEST_ASSERT_FALSE_MESSAGE(d.passed(), "must not fire early on the far side of the wrap");
+    Time::setTestMillis(244);
+    TEST_ASSERT_TRUE(d.passed());
+}
+
+void test_deadline_passedAt_uses_the_supplied_now()
+{
+    Time::setTestMillis(1000);
+    Deadline d = Deadline::in(500);
+    TEST_ASSERT_FALSE(d.passedAt(1499));
+    TEST_ASSERT_TRUE(d.passedAt(1500));
+    TEST_ASSERT_FALSE_MESSAGE(Deadline::forever().passedAt(UINT32_MAX), "forever ignores any now");
+    TEST_ASSERT_FALSE_MESSAGE(Deadline().passedAt(UINT32_MAX), "disarmed ignores any now");
+}
+
 void setup()
 {
     initializeTestEnvironment();
@@ -229,6 +320,15 @@ void setup()
     RUN_TEST(test_deadlinePassed_does_not_fire_early_when_deadline_wraps);
     RUN_TEST(test_deadlinePassedAt_uses_the_supplied_now);
     RUN_TEST(test_deadlinePassed_reads_disarmed_sentinels_as_passed);
+
+    RUN_TEST(test_deadline_default_is_disarmed);
+    RUN_TEST(test_deadline_in_arms_and_then_passes);
+    RUN_TEST(test_deadline_in_zero_is_due_now);
+    RUN_TEST(test_deadline_forever_is_armed_but_never_passes);
+    RUN_TEST(test_deadline_disarm_stops_it_passing);
+    RUN_TEST(test_deadline_in_never_lands_on_a_reserved_value);
+    RUN_TEST(test_deadline_survives_the_wrap);
+    RUN_TEST(test_deadline_passedAt_uses_the_supplied_now);
     RUN_TEST(test_execute_runs_first_time_then_throttles);
     RUN_TEST(test_execute_survives_millis_wrap);
     exit(UNITY_END());
