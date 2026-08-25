@@ -1435,10 +1435,10 @@ void GPS::publishUpdate()
 /// future for the second. No header: test_gps_fix_hold declares the prototypes itself.
 bool fixHoldInForce(Deadline fixHoldEnds, uint32_t threadIntervalMs)
 {
-    // Grace of one thread cycle: testing against a "now" pulled back by the interval is the same
-    // question as the old deadlinePassed(fixHoldEnds + threadIntervalMs), without building a
-    // deadline out of the sum.
-    return fixHoldEnds.armed() && !fixHoldEnds.passedAt(Time::getMillis() - threadIntervalMs);
+    // Grace of one thread cycle: the thread only looks every threadIntervalMs, so a hold that ended
+    // since the last look must still count as live for exactly one more pass. Pulling "now" back by
+    // the interval asks that without building a deadline out of a sum.
+    return fixHoldEnds.pendingAt(Time::getMillis() - threadIntervalMs);
 }
 
 /// Did an armed hold just expire? `!= 0` guards against negating fixHoldInForce() alone, which would

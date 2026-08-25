@@ -56,8 +56,12 @@ class Throttle
 ///   forever()        armed with no expiry - "show until something cancels it". armed() true,
 ///                    passed() never true.
 ///
-/// Ask armed() or its complement disarmed() for "is anything scheduled"; ask passed() for "has it
-/// arrived". They are different questions: a forever() deadline is armed and never passes.
+/// Four questions, and they do not collapse into each other:
+///   armed()   is anything scheduled?   true for forever(), false only when disarmed
+///   expires() is it timed?             false for BOTH disarmed and forever()
+///   passed()  has it arrived?          false until a timed deadline is reached
+///   pending() is it still running?     armed and not yet arrived - what !passed() is usually
+///                                      meant to say, but !passed() is also true when disarmed
 ///
 /// RANGE
 ///   passed() is correct while the deadline is at most ~24.8 days ahead of now - half the 32-bit
@@ -101,26 +105,41 @@ class Deadline
     /// rather than "not (something is scheduled)". Mirrors isWithinTimespanMs()/hasElapsed() above.
     constexpr bool disarmed() const { return at_ == kDisarmed; }
 
+    /// Does this deadline have an arrival time at all? False for the two states passed() can never
+    /// become true for: disarmed and forever(). Use it where the question is "is this one timed",
+    /// which is distinct from armed() ("is anything scheduled") and passed() ("has it arrived").
+    constexpr bool expires() const { return isReal(); }
+
     /// Has the deadline arrived? Always false when disarmed or forever.
     bool passed() const { return isReal() && Throttle::deadlinePassed(at_); }
 
     /// passed() against a caller-supplied "now", for a loop testing many deadlines against one read.
     bool passedAt(uint32_t nowMs) const { return isReal() && Throttle::deadlinePassedAt(nowMs, at_); }
 
+    /// Armed and not yet arrived - "is this still running". Prefer it to !passed(): a disarmed
+    /// deadline has not passed either, so !passed() answers true for one that was never set. That is
+    /// the sentinel guard this type exists to make unforgettable, so do not hand-write it.
+    /// forever() is pending, which is what "until something cancels it" means.
+    bool pending() const { return armed() && !passed(); }
+    bool pendingAt(uint32_t nowMs) const { return armed() && !passedAt(nowMs); }
+
     /// Milliseconds until this fires - negative once it has passed. Same ~24.8-day range as passed().
     ///
-    /// Disarmed and forever() have no arrival time, so both answer INT32_MAX: "not soon". That is
-    /// what a scheduler wants, but it means a caller distinguishing the two must ask armed() first.
+    /// Disarmed and forever() never arrive, so both answer 0. Ask expires() first when the answer
+    /// feeds a wait: 0 is also what a deadline due this instant returns, and the two want opposite
+    /// treatment. 0 rather than a large sentinel deliberately - a caller adding to the result (a
+    /// grace period, a minimum wait) would overflow a big one, and signed overflow is undefined.
     int32_t msFromNow() const { return msFrom(Time::getMillis()); }
-    int32_t msFrom(uint32_t nowMs) const { return isReal() ? (int32_t)(at_ - nowMs) : INT32_MAX; }
+    int32_t msFrom(uint32_t nowMs) const { return isReal() ? (int32_t)(at_ - nowMs) : 0; }
 
-    /// The earlier of two deadlines, for a scheduler picking its next wake-up. A disarmed one never
-    /// wins; forever() loses to any real deadline; two disarmed ones give back a disarmed Deadline.
+    /// The earlier-arriving of two deadlines, for a scheduler picking its next wake-up. Only a timed
+    /// deadline can arrive, so a disarmed or forever() one never wins; when neither expires, b comes
+    /// back unchanged - the caller was going to ask expires() before waiting on it anyway.
     static Deadline sooner(Deadline a, Deadline b)
     {
-        if (a.disarmed())
+        if (!a.expires())
             return b;
-        if (b.disarmed())
+        if (!b.expires())
             return a;
         const uint32_t now = Time::getMillis(); // one read, so the two comparisons agree
         return a.msFrom(now) <= b.msFrom(now) ? a : b;

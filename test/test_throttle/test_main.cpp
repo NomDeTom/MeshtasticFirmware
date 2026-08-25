@@ -303,6 +303,70 @@ void test_deadline_survives_the_wrap()
     TEST_ASSERT_TRUE(d.passed());
 }
 
+// The trap pending() exists to close: a disarmed deadline has not passed either, so !passed() is
+// true for one that was never set. Every hand-written guard in the tree existed for this.
+void test_deadline_pending_is_not_the_same_as_not_passed()
+{
+    Time::setTestMillis(1000);
+    Deadline never;
+    TEST_ASSERT_FALSE_MESSAGE(never.passed(), "a disarmed deadline never passes...");
+    TEST_ASSERT_FALSE_MESSAGE(never.pending(), "...and is not pending either");
+
+    Deadline live = Deadline::in(500);
+    TEST_ASSERT_TRUE(live.pending());
+    Time::setTestMillis(1500);
+    TEST_ASSERT_FALSE(live.pending());
+    TEST_ASSERT_TRUE(live.passed());
+
+    TEST_ASSERT_TRUE_MESSAGE(Deadline::forever().pending(), "forever() runs until cancelled");
+}
+
+void test_deadline_pendingAt_uses_the_supplied_now()
+{
+    Time::setTestMillis(1000);
+    Deadline d = Deadline::in(500);
+    TEST_ASSERT_TRUE(d.pendingAt(1499));
+    TEST_ASSERT_FALSE(d.pendingAt(1500));
+    TEST_ASSERT_FALSE(Deadline().pendingAt(0));
+}
+
+// expires() splits "timed" from "scheduled": forever() is armed but has no arrival time.
+void test_deadline_expires_is_false_for_both_non_arriving_states()
+{
+    Time::setTestMillis(1000);
+    TEST_ASSERT_FALSE(Deadline().expires());
+    TEST_ASSERT_FALSE(Deadline::forever().expires());
+    TEST_ASSERT_TRUE(Deadline::in(500).expires());
+    TEST_ASSERT_TRUE(Deadline::in(0).expires());
+}
+
+// 0, not a large sentinel: a caller adding a grace period to the result of a non-arriving deadline
+// would overflow a big one, and signed overflow is undefined.
+void test_deadline_msFromNow_is_zero_when_it_will_never_arrive()
+{
+    Time::setTestMillis(1000);
+    TEST_ASSERT_EQUAL_INT32(0, Deadline().msFromNow());
+    TEST_ASSERT_EQUAL_INT32(0, Deadline::forever().msFromNow());
+    TEST_ASSERT_EQUAL_INT32(500, Deadline::in(500).msFromNow());
+    Time::setTestMillis(2000);
+    TEST_ASSERT_EQUAL_INT32(-500, Deadline::at(1500).msFromNow());
+}
+
+// sooner() must not depend on the msFrom() sentinel ordering, or forever()'s 0 would beat every
+// real deadline in the future.
+void test_deadline_sooner_prefers_a_real_deadline_over_forever()
+{
+    Time::setTestMillis(1000);
+    const Deadline soon = Deadline::in(50);
+    const Deadline later = Deadline::in(5000);
+    TEST_ASSERT_EQUAL_UINT32(soon.raw(), Deadline::sooner(soon, later).raw());
+    TEST_ASSERT_EQUAL_UINT32(soon.raw(), Deadline::sooner(later, soon).raw());
+    TEST_ASSERT_EQUAL_UINT32(later.raw(), Deadline::sooner(Deadline::forever(), later).raw());
+    TEST_ASSERT_EQUAL_UINT32(later.raw(), Deadline::sooner(later, Deadline::forever()).raw());
+    TEST_ASSERT_EQUAL_UINT32(later.raw(), Deadline::sooner(Deadline(), later).raw());
+    TEST_ASSERT_FALSE(Deadline::sooner(Deadline(), Deadline::forever()).expires());
+}
+
 void test_deadline_passedAt_uses_the_supplied_now()
 {
     Time::setTestMillis(1000);
@@ -338,6 +402,11 @@ void setup()
     RUN_TEST(test_deadline_disarm_stops_it_passing);
     RUN_TEST(test_deadline_in_never_lands_on_a_reserved_value);
     RUN_TEST(test_deadline_survives_the_wrap);
+    RUN_TEST(test_deadline_pending_is_not_the_same_as_not_passed);
+    RUN_TEST(test_deadline_pendingAt_uses_the_supplied_now);
+    RUN_TEST(test_deadline_expires_is_false_for_both_non_arriving_states);
+    RUN_TEST(test_deadline_msFromNow_is_zero_when_it_will_never_arrive);
+    RUN_TEST(test_deadline_sooner_prefers_a_real_deadline_over_forever);
     RUN_TEST(test_deadline_passedAt_uses_the_supplied_now);
     RUN_TEST(test_execute_runs_first_time_then_throttles);
     RUN_TEST(test_execute_survives_millis_wrap);
