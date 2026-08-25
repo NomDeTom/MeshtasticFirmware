@@ -51,17 +51,25 @@ class Throttle
 ///
 /// STATES
 ///   Deadline()       disarmed - nothing scheduled. armed() false, passed() never true. The default.
-///   in(ms) / at(ms)  an armed deadline; passed() becomes true once it arrives.
-///   in(0)            armed and already due; what a "run this on the next pass" site wants.
-///   forever()        armed with no expiry - "show until something cancels it". armed() true,
-///                    passed() never true.
+///   in(ms) / at(ms)  a timed deadline; passed() becomes true once it arrives.
+///   in(0)            timed and already due; what a "run this on the next pass" site wants.
+///   forever()        armed with no expiry - "until something cancels it". armed() and active() are
+///                    both true; passed() never becomes true.
 ///
-/// Four questions, and they do not collapse into each other:
-///   armed()   is anything scheduled?   true for forever(), false only when disarmed
-///   expires() is it timed?             false for BOTH disarmed and forever()
-///   passed()  has it arrived?          false until a timed deadline is reached
-///   pending() is it still running?     armed and not yet arrived - what !passed() is usually
-///                                      meant to say, but !passed() is also true when disarmed
+/// THE QUESTIONS
+///   armed()     is anything scheduled?    false only when disarmed
+///   active()    is it still in force?     armed and not yet arrived - forever() included
+///   passed()    has it arrived?           true only for a timed deadline that has been reached
+///   isForever() is it the indefinite one? armed, in force, and never arriving
+///
+/// Within armed(), active() and passed() partition it: exactly one of the two is true, so armed() ==
+/// active() || passed(). isForever() splits active() again, into the deadline that is counting down
+/// and the one that never will.
+///
+/// active() is the one most sites want: it is what !passed() is usually meant to say, without the
+/// trap that a deadline which was never set has not passed either. Reach for isForever() only where
+/// a site must treat "waits on the user" differently from "will go away by itself" - it is spelled
+/// with the prefix because C++ will not let a predicate share the factory's name.
 ///
 /// RANGE
 ///   passed() is correct while the deadline is at most ~24.8 days ahead of now - half the 32-bit
@@ -79,6 +87,7 @@ class Throttle
 ///   reboot = Deadline::in(5000);              // fires 5 s from now
 ///   reboot = Deadline();                      // cancel
 ///   if (reboot.passed()) { doIt(); reboot.disarm(); }   // one-shot: disarm after acting
+///   if (reboot.active()) ...                  // "is it still counting down"
 ///   if (reboot.armed()) ...                   // "is anything scheduled" - never test raw() != 0
 ///
 /// Do not compare raw() against anything. It exists for logging and for the few places that must
@@ -95,20 +104,19 @@ class Deadline
     /// Arm at an absolute uptime stamp, for a caller that already computed one.
     static Deadline at(uint32_t whenMs) { return Deadline(sanitise(whenMs)); }
 
-    /// Armed with no expiry - "until something cancels it". passed() is never true.
+    /// Armed with no expiry - "until something cancels it". active() stays true; passed() never does.
     static constexpr Deadline forever() { return Deadline(kForever); }
 
     /// Is anything scheduled? True for forever(), false only for disarmed().
     constexpr bool armed() const { return at_ != kDisarmed; }
 
+    /// Is this the indefinite one - armed, but with no arrival time? The third state, which armed()
+    /// and passed() cannot separate on their own.
+    constexpr bool isForever() const { return at_ == kForever; }
+
     /// Complement of armed(), for the sites that read better that way - "nothing is scheduled"
     /// rather than "not (something is scheduled)". Mirrors isWithinTimespanMs()/hasElapsed() above.
     constexpr bool disarmed() const { return at_ == kDisarmed; }
-
-    /// Does this deadline have an arrival time at all? False for the two states passed() can never
-    /// become true for: disarmed and forever(). Use it where the question is "is this one timed",
-    /// which is distinct from armed() ("is anything scheduled") and passed() ("has it arrived").
-    constexpr bool expires() const { return isReal(); }
 
     /// Has the deadline arrived? Always false when disarmed or forever.
     bool passed() const { return isReal() && Throttle::deadlinePassed(at_); }
@@ -116,30 +124,31 @@ class Deadline
     /// passed() against a caller-supplied "now", for a loop testing many deadlines against one read.
     bool passedAt(uint32_t nowMs) const { return isReal() && Throttle::deadlinePassedAt(nowMs, at_); }
 
-    /// Armed and not yet arrived - "is this still running". Prefer it to !passed(): a disarmed
+    /// Is this deadline still in force - armed and not yet arrived? Prefer it to !passed(): a disarmed
     /// deadline has not passed either, so !passed() answers true for one that was never set. That is
-    /// the sentinel guard this type exists to make unforgettable, so do not hand-write it.
-    /// forever() is pending, which is what "until something cancels it" means.
-    bool pending() const { return armed() && !passed(); }
-    bool pendingAt(uint32_t nowMs) const { return armed() && !passedAt(nowMs); }
+    /// the sentinel guard this type exists to make unforgettable.
+    ///
+    /// forever() is active, which is what "until something cancels it" means. Only isForever() tells
+    /// it apart from a deadline that is genuinely counting down.
+    bool active() const { return armed() && !passed(); }
+    bool activeAt(uint32_t nowMs) const { return armed() && !passedAt(nowMs); }
 
     /// Milliseconds until this fires - negative once it has passed. Same ~24.8-day range as passed().
     ///
-    /// Disarmed and forever() never arrive, so both answer 0. Ask expires() first when the answer
-    /// feeds a wait: 0 is also what a deadline due this instant returns, and the two want opposite
-    /// treatment. 0 rather than a large sentinel deliberately - a caller adding to the result (a
-    /// grace period, a minimum wait) would overflow a big one, and signed overflow is undefined.
+    /// Disarmed and forever() never arrive, so both answer 0, which is also what a deadline due this
+    /// instant returns. Only a caller feeding the result into a wait has to tell those apart, and the
+    /// two in the tree already reject them before asking. 0 rather than a large sentinel deliberately
+    /// - a caller adding a grace period to a big one would overflow, and signed overflow is UB.
     int32_t msFromNow() const { return msFrom(Time::getMillis()); }
-    int32_t msFrom(uint32_t nowMs) const { return isReal() ? (int32_t)(at_ - nowMs) : 0; }
 
     /// The earlier-arriving of two deadlines, for a scheduler picking its next wake-up. Only a timed
-    /// deadline can arrive, so a disarmed or forever() one never wins; when neither expires, b comes
-    /// back unchanged - the caller was going to ask expires() before waiting on it anyway.
+    /// deadline can arrive, so a disarmed or forever() one never wins; when neither is timed, b comes
+    /// back unchanged - the caller was going to check before waiting on it anyway.
     static Deadline sooner(Deadline a, Deadline b)
     {
-        if (!a.expires())
+        if (!a.isReal())
             return b;
-        if (!b.expires())
+        if (!b.isReal())
             return a;
         const uint32_t now = Time::getMillis(); // one read, so the two comparisons agree
         return a.msFrom(now) <= b.msFrom(now) ? a : b;
@@ -155,6 +164,10 @@ class Deadline
     static constexpr uint32_t kForever = UINT32_MAX;
 
     explicit constexpr Deadline(uint32_t at) : at_(at) {}
+
+    /// msFromNow() against a caller-supplied "now", so sooner() compares two deadlines against one
+    /// read. Private: no site has wanted it, and msFromNow() is the question callers actually ask.
+    int32_t msFrom(uint32_t nowMs) const { return isReal() ? (int32_t)(at_ - nowMs) : 0; }
 
     /// A real deadline is one the arithmetic may be applied to - neither reserved value.
     constexpr bool isReal() const { return at_ != kDisarmed && at_ != kForever; }

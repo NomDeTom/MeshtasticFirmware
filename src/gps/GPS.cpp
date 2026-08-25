@@ -1438,7 +1438,7 @@ bool fixHoldInForce(Deadline fixHoldEnds, uint32_t threadIntervalMs)
     // Grace of one thread cycle: the thread only looks every threadIntervalMs, so a hold that ended
     // since the last look must still count as live for exactly one more pass. Pulling "now" back by
     // the interval asks that without building a deadline out of a sum.
-    return fixHoldEnds.pendingAt(Time::getMillis() - threadIntervalMs);
+    return fixHoldEnds.activeAt(Time::getMillis() - threadIntervalMs);
 }
 
 /// Did an armed hold just expire? `!= 0` guards against negating fixHoldInForce() alone, which would

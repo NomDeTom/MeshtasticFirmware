@@ -303,41 +303,44 @@ void test_deadline_survives_the_wrap()
     TEST_ASSERT_TRUE(d.passed());
 }
 
-// The trap pending() exists to close: a disarmed deadline has not passed either, so !passed() is
+// The trap active() exists to close: a disarmed deadline has not passed either, so !passed() is
 // true for one that was never set. Every hand-written guard in the tree existed for this.
-void test_deadline_pending_is_not_the_same_as_not_passed()
+void test_deadline_active_is_not_the_same_as_not_passed()
 {
     Time::setTestMillis(1000);
     Deadline never;
     TEST_ASSERT_FALSE_MESSAGE(never.passed(), "a disarmed deadline never passes...");
-    TEST_ASSERT_FALSE_MESSAGE(never.pending(), "...and is not pending either");
+    TEST_ASSERT_FALSE_MESSAGE(never.active(), "...and is not active either");
 
     Deadline live = Deadline::in(500);
-    TEST_ASSERT_TRUE(live.pending());
+    TEST_ASSERT_TRUE(live.active());
     Time::setTestMillis(1500);
-    TEST_ASSERT_FALSE(live.pending());
+    TEST_ASSERT_FALSE(live.active());
     TEST_ASSERT_TRUE(live.passed());
-
-    TEST_ASSERT_TRUE_MESSAGE(Deadline::forever().pending(), "forever() runs until cancelled");
 }
 
-void test_deadline_pendingAt_uses_the_supplied_now()
+// forever() is in force until something cancels it, so it is armed and active - it just never
+// arrives. isForever() is the only question that separates it from a deadline counting down.
+void test_deadline_forever_is_active_but_never_passes()
+{
+    Time::setTestMillis(1000);
+    const Deadline never = Deadline::forever();
+    TEST_ASSERT_TRUE(never.armed());
+    TEST_ASSERT_TRUE(never.active());
+    TEST_ASSERT_TRUE(never.isForever());
+    TEST_ASSERT_FALSE(never.passed());
+    TEST_ASSERT_FALSE_MESSAGE(Deadline().isForever(), "disarmed is not forever");
+    TEST_ASSERT_FALSE_MESSAGE(Deadline::in(500).isForever(), "nor is a timed deadline");
+}
+
+void test_deadline_activeAt_uses_the_supplied_now()
 {
     Time::setTestMillis(1000);
     Deadline d = Deadline::in(500);
-    TEST_ASSERT_TRUE(d.pendingAt(1499));
-    TEST_ASSERT_FALSE(d.pendingAt(1500));
-    TEST_ASSERT_FALSE(Deadline().pendingAt(0));
-}
-
-// expires() splits "timed" from "scheduled": forever() is armed but has no arrival time.
-void test_deadline_expires_is_false_for_both_non_arriving_states()
-{
-    Time::setTestMillis(1000);
-    TEST_ASSERT_FALSE(Deadline().expires());
-    TEST_ASSERT_FALSE(Deadline::forever().expires());
-    TEST_ASSERT_TRUE(Deadline::in(500).expires());
-    TEST_ASSERT_TRUE(Deadline::in(0).expires());
+    TEST_ASSERT_TRUE(d.activeAt(1499));
+    TEST_ASSERT_FALSE(d.activeAt(1500));
+    TEST_ASSERT_FALSE(Deadline().activeAt(0));
+    TEST_ASSERT_TRUE_MESSAGE(Deadline::forever().activeAt(UINT32_MAX), "forever is in force at any now");
 }
 
 // 0, not a large sentinel: a caller adding a grace period to the result of a non-arriving deadline
@@ -364,7 +367,7 @@ void test_deadline_sooner_prefers_a_real_deadline_over_forever()
     TEST_ASSERT_EQUAL_UINT32(later.raw(), Deadline::sooner(Deadline::forever(), later).raw());
     TEST_ASSERT_EQUAL_UINT32(later.raw(), Deadline::sooner(later, Deadline::forever()).raw());
     TEST_ASSERT_EQUAL_UINT32(later.raw(), Deadline::sooner(Deadline(), later).raw());
-    TEST_ASSERT_FALSE(Deadline::sooner(Deadline(), Deadline::forever()).expires());
+    TEST_ASSERT_TRUE_MESSAGE(Deadline::sooner(Deadline(), Deadline::forever()).isForever(), "neither can arrive");
 }
 
 void test_deadline_passedAt_uses_the_supplied_now()
@@ -402,9 +405,9 @@ void setup()
     RUN_TEST(test_deadline_disarm_stops_it_passing);
     RUN_TEST(test_deadline_in_never_lands_on_a_reserved_value);
     RUN_TEST(test_deadline_survives_the_wrap);
-    RUN_TEST(test_deadline_pending_is_not_the_same_as_not_passed);
-    RUN_TEST(test_deadline_pendingAt_uses_the_supplied_now);
-    RUN_TEST(test_deadline_expires_is_false_for_both_non_arriving_states);
+    RUN_TEST(test_deadline_active_is_not_the_same_as_not_passed);
+    RUN_TEST(test_deadline_forever_is_active_but_never_passes);
+    RUN_TEST(test_deadline_activeAt_uses_the_supplied_now);
     RUN_TEST(test_deadline_msFromNow_is_zero_when_it_will_never_arrive);
     RUN_TEST(test_deadline_sooner_prefers_a_real_deadline_over_forever);
     RUN_TEST(test_deadline_passedAt_uses_the_supplied_now);

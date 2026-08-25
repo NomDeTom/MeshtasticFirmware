@@ -353,7 +353,7 @@ void NotificationRenderer::drawNumberPicker(OLEDDisplay *display, OLEDDisplayUiS
     } else if (inEvent.inputEvent == INPUT_BROKER_LEFT) {
         curSelected--;
     } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-               alertBannerUntil.expires()) {
+               !alertBannerUntil.isForever()) {
         resetBanner();
         return;
     }
@@ -436,7 +436,7 @@ void NotificationRenderer::drawHexPicker(OLEDDisplay *display, OLEDDisplayUiStat
     } else if (inEvent.inputEvent == INPUT_BROKER_LEFT) {
         curSelected--;
     } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-               alertBannerUntil.expires()) {
+               !alertBannerUntil.isForever()) {
         resetBanner();
         return;
     }
@@ -541,7 +541,7 @@ void NotificationRenderer::drawAlphanumericPicker(OLEDDisplay *display, OLEDDisp
     } else if (inEvent.inputEvent == INPUT_BROKER_LEFT) {
         curSelected--;
     } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-               alertBannerUntil.expires()) {
+               !alertBannerUntil.isForever()) {
         resetBanner();
         return;
     }
@@ -617,7 +617,7 @@ void NotificationRenderer::drawNodePicker(OLEDDisplay *display, OLEDDisplayUiSta
         resetBanner();
         return;
     } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-               alertBannerUntil.expires()) {
+               !alertBannerUntil.isForever()) {
         resetBanner();
         return;
     }
@@ -777,7 +777,7 @@ void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisp
             resetBanner();
             return;
         } else if ((inEvent.inputEvent == INPUT_BROKER_CANCEL || inEvent.inputEvent == INPUT_BROKER_ALT_LONG) &&
-                   alertBannerUntil.expires()) {
+                   !alertBannerUntil.isForever()) {
             resetBanner();
             return;
         }
@@ -1228,9 +1228,8 @@ void NotificationRenderer::drawTextInput(OLEDDisplay *display, OLEDDisplayUiStat
 
 bool NotificationRenderer::isOverlayBannerShowing()
 {
-    // Two ways to still be showing: a timed banner whose deadline has not arrived, or an interactive
-    // one with no expiry at all. pending() is both - forever() is armed and never passes.
-    return strlen(alertBannerMessage) > 0 && alertBannerUntil.pending();
+    // Both ways to still be showing: a timed banner that has not run out, and an indefinite one.
+    return strlen(alertBannerMessage) > 0 && alertBannerUntil.active();
 }
 
 bool NotificationRenderer::isMenuShowing()

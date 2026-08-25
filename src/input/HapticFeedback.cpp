@@ -55,7 +55,7 @@ void HapticFeedback::cancelDelayedPulse()
 int32_t HapticFeedback::msUntilNextPulse() const
 {
     const Deadline next = Deadline::sooner(pulseOffAt, delayedPulseAt);
-    if (!next.expires()) // nothing that will ever arrive: disarmed, or forever()
+    if (!next.armed()) // neither pulse is scheduled
         return -1;
     const int32_t delay = next.msFromNow();
     return delay > 0 ? delay : 0;

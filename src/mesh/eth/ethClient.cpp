@@ -204,7 +204,7 @@ static int32_t reconnectETH()
     // site's reading of it, and the reason the old code needed `ntp_renew == 0 ||`: nothing that was
     // never scheduled has "passed", so passed() alone cannot answer this and neither could the
     // sentinel, which deadlinePassed() only read as due for half of each wrap cycle.
-    if (isEthernetAvailable() && !ntp_renew.pending()) {
+    if (isEthernetAvailable() && !ntp_renew.active()) {
 
         LOG_INFO("Update NTP time from %s", config.network.ntp_server);
         if (timeClient.update()) {

@@ -86,9 +86,9 @@ int32_t ExternalNotificationModule::runOnce()
 #if defined(HAS_I2S_SPEAKER_NRF52)
         isRtttlPlaying = isRtttlPlaying || nrf52RtttlPlayer.isPlaying();
 #endif
-        // Not nagging, or nagging but out of time. pending() is both, so there is no separate flag
+        // Not nagging, or nagging but out of time. active() is both, so there is no separate flag
         // to keep in step and no sentinel to test before the comparison.
-        const bool nagWindowExpired = !nagCycleCutoff.pending();
+        const bool nagWindowExpired = !nagCycleCutoff.active();
         if (nagWindowExpired && !isRtttlPlaying) {
             // Turn off external notification immediately when timeout is reached, regardless of song state
             nagCycleCutoff = Deadline();
@@ -150,7 +150,7 @@ int32_t ExternalNotificationModule::runOnce()
         if (moduleConfig.external_notification.use_i2s_as_buzzer) {
             if (audioThread->isPlaying()) {
                 // Continue playing
-            } else if (nagCycleCutoff.pending()) {
+            } else if (nagCycleCutoff.active()) {
                 audioThread->beginRttl(rtttlConfig.ringtone, strlen_P(rtttlConfig.ringtone));
             }
             // we need fast updates to play the RTTTL
@@ -162,7 +162,7 @@ int32_t ExternalNotificationModule::runOnce()
         if (canBuzz() && buzzerShouldAlert) {
             if (nrf52RtttlPlayer.isPlaying()) {
                 nrf52RtttlPlayer.play();
-            } else if (nagCycleCutoff.pending()) {
+            } else if (nagCycleCutoff.active()) {
                 nrf52RtttlPlayer.begin(rtttlConfig.ringtone);
             }
             delay = EXT_NOTIFICATION_FAST_THREAD_MS;
@@ -172,7 +172,7 @@ int32_t ExternalNotificationModule::runOnce()
         if (moduleConfig.external_notification.use_pwm && config.device.buzzer_gpio && canBuzz() && buzzerShouldAlert) {
             if (rtttl::isPlaying()) {
                 rtttl::play();
-            } else if (nagCycleCutoff.pending()) {
+            } else if (nagCycleCutoff.active()) {
                 // start the song again if we have time left
                 rtttl::begin(config.device.buzzer_gpio, rtttlConfig.ringtone);
             }
