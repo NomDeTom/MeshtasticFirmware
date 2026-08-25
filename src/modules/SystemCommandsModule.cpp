@@ -136,7 +136,7 @@ int SystemCommandsModule::handleInputEvent(const InputEvent *event)
         LOG_INFO("Reboot in %d seconds", DEFAULT_REBOOT_SECONDS);
         if (screen)
             screen->showSimpleBanner("Rebooting...", 0); // stays on screen
-        rebootAtMsec = (DEFAULT_REBOOT_SECONDS < 0) ? Deadline::disarmed() : Deadline::in(DEFAULT_REBOOT_SECONDS * 1000);
+        rebootAtMsec = (DEFAULT_REBOOT_SECONDS < 0) ? Deadline() : Deadline::in(DEFAULT_REBOOT_SECONDS * 1000);
         return true;
 
     default:

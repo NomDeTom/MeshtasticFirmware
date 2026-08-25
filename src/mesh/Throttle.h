@@ -50,11 +50,14 @@ class Throttle
 /// method inline.
 ///
 /// STATES
+///   Deadline()       disarmed - nothing scheduled. armed() false, passed() never true. The default.
 ///   in(ms) / at(ms)  an armed deadline; passed() becomes true once it arrives.
-///   disarmed()       nothing scheduled. armed() false, passed() never true. This is the default.
+///   in(0)            armed and already due; what a "run this on the next pass" site wants.
 ///   forever()        armed with no expiry - "show until something cancels it". armed() true,
 ///                    passed() never true.
-///   in(0)            armed and already due; what a "run this on the next pass" site wants.
+///
+/// Ask armed() or its complement disarmed() for "is anything scheduled"; ask passed() for "has it
+/// arrived". They are different questions: a forever() deadline is armed and never passes.
 ///
 /// RANGE
 ///   passed() is correct while the deadline is at most ~24.8 days ahead of now - half the 32-bit
@@ -70,6 +73,7 @@ class Throttle
 /// USAGE
 ///   Deadline reboot;                          // disarmed
 ///   reboot = Deadline::in(5000);              // fires 5 s from now
+///   reboot = Deadline();                      // cancel
 ///   if (reboot.passed()) { doIt(); reboot.disarm(); }   // one-shot: disarm after acting
 ///   if (reboot.armed()) ...                   // "is anything scheduled" - never test raw() != 0
 ///
@@ -78,6 +82,7 @@ class Throttle
 class Deadline
 {
   public:
+    /// Disarmed - nothing scheduled. This is also what a cancel path assigns: `d = Deadline();`
     constexpr Deadline() = default;
 
     /// Arm delayMs from now. delayMs of 0 means "already due".
@@ -86,11 +91,15 @@ class Deadline
     /// Arm at an absolute uptime stamp, for a caller that already computed one.
     static Deadline at(uint32_t whenMs) { return Deadline(sanitise(whenMs)); }
 
-    static constexpr Deadline disarmed() { return Deadline(kDisarmed); }
+    /// Armed with no expiry - "until something cancels it". passed() is never true.
     static constexpr Deadline forever() { return Deadline(kForever); }
 
     /// Is anything scheduled? True for forever(), false only for disarmed().
     constexpr bool armed() const { return at_ != kDisarmed; }
+
+    /// Complement of armed(), for the sites that read better that way - "nothing is scheduled"
+    /// rather than "not (something is scheduled)". Mirrors isWithinTimespanMs()/hasElapsed() above.
+    constexpr bool disarmed() const { return at_ == kDisarmed; }
 
     /// Has the deadline arrived? Always false when disarmed or forever.
     bool passed() const { return isReal() && Throttle::deadlinePassed(at_); }

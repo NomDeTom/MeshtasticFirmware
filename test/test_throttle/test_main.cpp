@@ -219,8 +219,17 @@ void test_deadline_default_is_disarmed()
 {
     Deadline d;
     TEST_ASSERT_FALSE(d.armed());
+    TEST_ASSERT_TRUE(d.disarmed());
     TEST_ASSERT_FALSE(d.passed());
     TEST_ASSERT_EQUAL_UINT32(0, d.raw());
+}
+
+// armed()/disarmed() are complements at every state, including forever().
+void test_deadline_disarmed_is_the_complement_of_armed()
+{
+    Time::setTestMillis(1000);
+    for (Deadline d : {Deadline(), Deadline::in(0), Deadline::in(5000), Deadline::forever()})
+        TEST_ASSERT_NOT_EQUAL(d.armed(), d.disarmed());
 }
 
 void test_deadline_in_arms_and_then_passes()
@@ -322,6 +331,7 @@ void setup()
     RUN_TEST(test_deadlinePassed_reads_disarmed_sentinels_as_passed);
 
     RUN_TEST(test_deadline_default_is_disarmed);
+    RUN_TEST(test_deadline_disarmed_is_the_complement_of_armed);
     RUN_TEST(test_deadline_in_arms_and_then_passes);
     RUN_TEST(test_deadline_in_zero_is_due_now);
     RUN_TEST(test_deadline_forever_is_armed_but_never_passes);

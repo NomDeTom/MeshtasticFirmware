@@ -1418,7 +1418,7 @@ void loop()
     static uint32_t lastSessionCheckMs = 0;
     if (millis() - lastSessionCheckMs > 1000) {
         lastSessionCheckMs = millis();
-        if (!rebootAtMsec.armed() && EncryptedStorage::isUnlocked() && EncryptedStorage::isSessionExpired()) {
+        if (rebootAtMsec.disarmed() && EncryptedStorage::isUnlocked() && EncryptedStorage::isSessionExpired()) {
             // The session expired. Two paths:
             //   1. Budget remains (bootsRemaining > 0): decrement the
             //      on-flash boot count in place, revoke per-connection
@@ -1500,7 +1500,7 @@ void loop()
     if (portduino_config.lora_spi_dev == "ch341" && ch341Hal != nullptr) {
         ch341Hal->checkError();
     }
-    if (portduino_status.LoRa_in_error && !rebootAtMsec.armed()) {
+    if (portduino_status.LoRa_in_error && rebootAtMsec.disarmed()) {
         LOG_ERROR("LoRa error detected, recovering");
         router->addInterface(nullptr);
         if (portduino_config.lora_spi_dev == "ch341") {
