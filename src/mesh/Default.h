@@ -33,7 +33,13 @@
 #define default_screen_on_secs IF_ROUTER(1, 60 * 10)
 #define default_node_info_broadcast_secs 3 * 60 * 60
 #define default_neighbor_info_broadcast_secs 6 * 60 * 60
+// Overridable ONLY for bench testing: -D default_mesh_beacon_min_broadcast_interval_secs=60
+// makes a beacon observable inside a test window instead of once an hour. It also shortens the
+// sidecar staleness window by the same factor, which stays coherent - an entry expires after one
+// beacon interval either way. This floor exists for airtime politeness; never ship it lowered.
+#ifndef default_mesh_beacon_min_broadcast_interval_secs
 #define default_mesh_beacon_min_broadcast_interval_secs 3600
+#endif
 #define min_node_info_broadcast_secs 60 * 60 // No regular broadcasts of more than once an hour
 #define min_neighbor_info_broadcast_secs 4 * 60 * 60
 #define default_map_publish_interval_secs 60 * 60

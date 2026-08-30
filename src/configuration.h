@@ -102,6 +102,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define MESHTASTIC_ENABLE_FRAME_INJECTION 0
 #endif
 
+// Bench-test only: extra beacon logging that names the baked scenario and reports which key a
+// target encrypted with. Provenance only - never key material - but it is noise on a shipping
+// build and describes internal state, so it stays off unless a test build asks for it.
+#ifndef MESHTASTIC_BEACON_TEST_LOGGING
+#define MESHTASTIC_BEACON_TEST_LOGGING 0
+#endif
+
 /// Convert a preprocessor name into a quoted string
 #define xstr(s) ystr(s)
 #define ystr(s) #s
