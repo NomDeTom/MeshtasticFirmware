@@ -189,9 +189,10 @@ template <typename T> bool LR11x0Interface<T>::init()
             return false;
     }
 
+    // res must keep begin()'s verdict; the version query is diagnostic and answers even on a part
+    // whose modem was never configured, which is how a failed begin() used to report init success.
     LR11x0VersionInfo_t version;
-    res = lora.getVersionInfo(&version);
-    if (res == RADIOLIB_ERR_NONE) {
+    if (lora.getVersionInfo(&version) == RADIOLIB_ERR_NONE) {
         LOG_DEBUG("LR11x0 Device %d, HW %d, FW %d.%d, WiFi %d.%d, GNSS %d.%d", version.device, version.hardware, version.fwMajor,
                   version.fwMinor, version.fwMajorWiFi, version.fwMinorWiFi, version.fwGNSS, version.almanacGNSS);
         transceiverFw = ((uint16_t)version.fwMajor << 8) | version.fwMinor;
