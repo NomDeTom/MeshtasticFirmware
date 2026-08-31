@@ -289,8 +289,11 @@ template <typename T> bool LR11x0Interface<T>::reconfigure()
     if (err != RADIOLIB_ERR_NONE)
         RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
 
+    // Record, don't assert: assert() is NVIC_SystemReset() on nRF52, so a radio that rejects one
+    // setting took the whole node down instead of coming up degraded with the error readable.
     err = lora.setSyncWord(syncWord);
-    assert(err == RADIOLIB_ERR_NONE);
+    if (err != RADIOLIB_ERR_NONE)
+        RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
 
     if (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_LORA_24) { // clamp if wide freq range
         limitPower(LR1120_MAX_POWER);
@@ -299,14 +302,16 @@ template <typename T> bool LR11x0Interface<T>::reconfigure()
     }
 
     err = lora.setPreambleLength(preambleLength);
-    assert(err == RADIOLIB_ERR_NONE);
+    if (err != RADIOLIB_ERR_NONE)
+        RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
 
     err = lora.setFrequency(getFreq());
     if (err != RADIOLIB_ERR_NONE)
         RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
 
     err = lora.setOutputPower(power);
-    assert(err == RADIOLIB_ERR_NONE);
+    if (err != RADIOLIB_ERR_NONE)
+        RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
 
     // Apply RX gain mode - valid in STDBY, matches resetAGC() pattern
     err = lora.setRxBoostedGainMode(config.lora.sx126x_rx_boosted_gain);

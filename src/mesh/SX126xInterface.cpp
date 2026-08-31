@@ -208,20 +208,25 @@ template <typename T> bool SX126xInterface<T>::reconfigure()
     if (err != RADIOLIB_ERR_NONE)
         RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
 
+    // Record, don't assert: assert() reboots the CPU, so a radio that rejects one setting took the
+    // whole node down instead of coming up degraded with the error readable. See issue #11220.
     err = lora.setSyncWord(syncWord);
-    if (err != RADIOLIB_ERR_NONE)
+    if (err != RADIOLIB_ERR_NONE) {
         LOG_ERROR("SX126X setSyncWord %s%d", radioLibErr, err);
-    assert(err == RADIOLIB_ERR_NONE);
+        RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
+    }
 
     err = lora.setCurrentLimit(currentLimit);
-    if (err != RADIOLIB_ERR_NONE)
+    if (err != RADIOLIB_ERR_NONE) {
         LOG_ERROR("SX126X setCurrentLimit %s%d", radioLibErr, err);
-    assert(err == RADIOLIB_ERR_NONE);
+        RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
+    }
 
     err = lora.setPreambleLength(preambleLength);
-    if (err != RADIOLIB_ERR_NONE)
+    if (err != RADIOLIB_ERR_NONE) {
         LOG_ERROR("SX126X setPreambleLength %s%d", radioLibErr, err);
-    assert(err == RADIOLIB_ERR_NONE);
+        RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
+    }
 
     err = lora.setFrequency(getFreq());
     if (err != RADIOLIB_ERR_NONE)
