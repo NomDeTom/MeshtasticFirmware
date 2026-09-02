@@ -370,7 +370,14 @@ class Runner:
                 continue
             self.stage = STAGE_FLASH
             self.wait_note(f"flashing {node.name} for {scen.id}")
-            image = entry.uf2 or entry.hex_file
+            # Prefer the nrfutil package: it streams over the bootloader's CDC instead
+            # of copying megabytes onto a USB mass-storage volume, which on this bench
+            # disturbs the external drive the run writes its evidence to.
+            image = (
+                entry.dfu_zip
+                if (entry.dfu_zip and self.platform and self.platform.nrfutil)
+                else (entry.uf2 or entry.hex_file)
+            )
             if image is None:
                 raise flasher.FlashError(f"image {entry.bake_hash} has no flashable artifact")
             f = flasher.Flasher(

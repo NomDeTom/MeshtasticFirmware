@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -25,7 +26,27 @@ from pathlib import Path
 from . import devices, ledger as ledger_mod, observer as observer_mod
 from . import platform_probe, preflight, runner, scenario, server, streams
 
-DEFAULT_RUN_ROOT = Path("bench/runs")
+# Run artifacts default to LOCAL storage, deliberately not the repo.
+#
+# Flashing re-enumerates the USB bus, and a checkout can live on an external USB drive -
+# this one does. A run writing its evidence there is recording onto a bus its own
+# activity disturbs, which showed up mid-run as WinError 433 and killed the run on a
+# single failed write. BENCH_RUNS_ROOT overrides; the repo path is used only if no local
+# home directory can be found.
+def _default_run_root() -> Path:
+    override = os.environ.get("BENCH_RUNS_ROOT")
+    if override:
+        return Path(override).expanduser()
+    home = Path.home()
+    try:
+        if home.is_dir():
+            return home / "bench-runs"
+    except OSError:
+        pass
+    return Path("bench/runs")
+
+
+DEFAULT_RUN_ROOT = _default_run_root()
 DEFAULT_NODES = Path("bench/nodes.json")
 
 
