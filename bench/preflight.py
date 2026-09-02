@@ -49,6 +49,10 @@ class PreflightReport:
     checks: list[Check] = field(default_factory=list)
     platform: dict | None = None
     nodes: list[dict] = field(default_factory=list)
+    # What the bench declared it would use, and what was actually found for each of it.
+    # Checks say whether a run may proceed; this says what it proceeded WITH, which is
+    # the part a result six months old needs in order to still mean anything.
+    resources: dict = field(default_factory=dict)
 
     @property
     def blocked(self) -> bool:
@@ -67,6 +71,7 @@ class PreflightReport:
             "blocked": self.blocked,
             "platform": self.platform,
             "nodes": self.nodes,
+            "resources": self.resources,
             "checks": [c.to_dict() for c in self.checks],
         }
 
@@ -198,7 +203,95 @@ def run_preflight(
     report.nodes = devices.describe(nodes)
     _check_nodes(report, nodes)
 
+    # -- the inventory ----------------------------------------------------------
+    _gather_resources(report, info, nodes, root)
+
     return report
+
+
+def _gather_resources(
+    report: PreflightReport,
+    info: platform_probe.PlatformInfo,
+    nodes: Sequence[devices.BenchNode],
+    root: Path,
+) -> None:
+    """Record every declared resource and what was found for it.
+
+    Preflight proved each mechanism CAN run; this records what it is running against, so
+    a run carries its own inventory rather than a reader having to reconstruct one from
+    the events. It is also the baseline the flash needs: a UF2 volume mounted before
+    anything was commanded belongs to a node stranded in its bootloader, and writing an
+    image there flashes whichever board that is.
+    """
+    declared = []
+    for node in nodes:
+        port = devices.try_resolve_port(node.serial_number) if node.serial_number else None
+        declared.append({
+            "name": node.name,
+            "role": node.role,
+            "serial_number": node.serial_number,
+            "declared_board": node.board,
+            "port": port,
+            "present": port is not None,
+        })
+    missing = [d["name"] for d in declared if not d["present"] and d["serial_number"]]
+
+    # Two probes, because the node checks take about half a minute and a bootloader can
+    # come or go inside that window - this run watched one lapse back into application
+    # mode between the two. Recording both says which, instead of implying neither.
+    at_probe = info.uf2_volume
+    standing = platform_probe.find_uf2_volume()
+    report.resources = {
+        "uf2_volume_at_probe": str(at_probe) if at_probe else None,
+        "nodes": declared,
+        "uf2_volume_at_start": str(standing) if standing else None,
+        "tools": {
+            "pio": info.pio,
+            "nrfutil": " ".join(info.nrfutil.argv) if info.nrfutil else None,
+            "uhubctl": info.uhubctl,
+        },
+        "firmware_tree": str(root),
+        "firmware_store": _store_inventory(),
+    }
+
+    if missing:
+        report.checks.append(Check(
+            "declared_nodes", BLOCK,
+            f"declared but not enumerated: {', '.join(missing)}",
+            fix="plug the node in, or correct its serial number in the node table",
+        ))
+    else:
+        report.checks.append(Check(
+            "declared_nodes", OK,
+            ", ".join(f"{d['name']}={d['port']}" for d in declared) or "none declared",
+        ))
+
+    if standing is not None:
+        # Not fatal: the flasher can finish a node it finds already in its bootloader.
+        # But it has to be SEEN, because an unrecorded one silently claims the next
+        # image written to a volume.
+        report.checks.append(Check(
+            "standing_bootloader", WARN,
+            f"a UF2 bootloader volume is already mounted at {standing}",
+            fix="a node is sitting in DFU; the run will finish it rather than flash past it",
+        ))
+
+
+def _store_inventory() -> list[dict]:
+    """What known-good images are on the shelf, and whether they still verify."""
+    try:
+        from .firmware import FirmwareStore
+
+        store = FirmwareStore()
+        return [
+            {
+                "board": i.board, "version": i.version,
+                "sha256": i.sha256[:12], "verified": store.verify(i),
+            }
+            for i in store.images.values()
+        ]
+    except Exception:  # noqa: BLE001 - an unreadable store is an empty shelf, not a crash
+        return []
 
 
 
