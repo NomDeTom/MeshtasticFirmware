@@ -490,6 +490,35 @@ class TestPreflightInventory(unittest.TestCase):
         self.assertIn("ABSENT dut", report.summary())
 
 
+class TestEntryAndExitConditions(unittest.TestCase):
+    def test_an_unmet_exit_condition_invalidates_a_passing_row(self):
+        """Assertions read what was captured; exit conditions ask who was still capturing.
+
+        A row whose assertions pass on a node that stopped being captured half way
+        through has not measured the firmware badly - it has not measured it at all, so
+        the verdict is INVALID rather than PASS.
+        """
+        from bench import scenario
+
+        result = scenario.RowResult(scenario_id="S1", verdict=scenario.PASS)
+        result.exit.append(scenario.Condition("dut captured to the end", True, "ok"))
+        self.assertTrue(result.exit_met)
+
+        result.exit.append(
+            scenario.Condition("peer captured to the end", False, "left the bus")
+        )
+        self.assertFalse(result.exit_met)
+
+    def test_entry_conditions_distinguish_found_from_made(self):
+        """A resumed run is cheap because prep was already true, and should say so."""
+        from bench import scenario
+
+        found = scenario.Condition("dut runs abc", True, "", how="satisfied")
+        made = scenario.Condition("peer runs abc", True, "", how="established")
+        self.assertEqual(found.to_dict()["how"], "satisfied")
+        self.assertEqual(made.to_dict()["how"], "established")
+
+
 class TestAbandonSurvivesADoubleClose(unittest.TestCase):
     def test_the_library_may_close_the_stream_again(self):
         """pyserial's close() is not idempotent on Windows, and two closes are normal.

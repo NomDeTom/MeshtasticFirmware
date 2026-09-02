@@ -536,6 +536,31 @@ class Scenario:
 
 
 @dataclass
+class Condition:
+    """One thing that had to be true before a row ran, or after it finished.
+
+    Entry conditions say what state the row needed and how it got there: `satisfied`
+    means the bench arrived and found it already true, which is what makes a resumed run
+    cheap; `established` means the bench had to do the work. Either is fine, and the
+    difference is exactly what a reader wants when a retry takes four minutes instead of
+    fifteen.
+
+    Exit conditions are the ones with teeth. They ask whether the instrument survived the
+    measurement - whether every node was still answering and still in its required state
+    when the window closed. A row whose assertions passed on a node that died half way
+    through has not measured what it claims to, and that is INVALID rather than PASS.
+    """
+
+    name: str
+    met: bool
+    detail: str = ""
+    how: str = ""  # entry only: "satisfied" (found true) or "established" (made true)
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "met": self.met, "detail": self.detail, "how": self.how}
+
+
+@dataclass
 class RowResult:
     """One scenario's verdict, and everything that justifies it."""
 
@@ -548,6 +573,16 @@ class RowResult:
     started_at: float | None = None
     ended_at: float | None = None
     error: str | None = None
+    entry: list[Condition] = field(default_factory=list)
+    exit: list[Condition] = field(default_factory=list)
+
+    @property
+    def entry_met(self) -> bool:
+        return all(c.met for c in self.entry)
+
+    @property
+    def exit_met(self) -> bool:
+        return all(c.met for c in self.exit)
 
     def to_dict(self) -> dict:
         return {
@@ -560,6 +595,8 @@ class RowResult:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "error": self.error,
+            "entry": [c.to_dict() for c in self.entry],
+            "exit": [c.to_dict() for c in self.exit],
         }
 
 
