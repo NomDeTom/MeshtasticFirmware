@@ -20,11 +20,41 @@ the runner asserts on them before trusting any window.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+
+
+# A bench writes continuously for hours, and its own USB activity can disturb the volume
+# it writes to. Flashing a node re-enumerates the bus, and on a bench whose artifacts live
+# on an external USB drive that surfaced mid-run as WinError 433 / Errno 22 and killed the
+# whole thing on one failed write. Evidence gathered over hours must not be lost to a blip
+# lasting milliseconds, so artifact writes retry before giving up.
+WRITE_RETRIES = 6
+WRITE_BACKOFF_S = 0.4
+
+
+def durable_write_text(path: Path, text: str, retries: int = WRITE_RETRIES) -> bool:
+    """Write a file, retrying transient OS errors. True if it landed.
+
+    Returns rather than raises: a status file that could not be written is a degraded
+    run, not a failed one, and the caller decides which.
+    """
+    last = None
+    for attempt in range(retries):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            return True
+        except OSError as exc:
+            last = exc
+            time.sleep(WRITE_BACKOFF_S * (attempt + 1))
+    logging.getLogger("bench.streams").warning("could not write %s: %s", path, last)
+    return False
+
 
 LOGS = "logs"
 PACKETS = "packets"
@@ -50,7 +80,22 @@ class _Stream:
         if self._fh is None:
             self.open()
         line = json.dumps(row, default=_fallback, ensure_ascii=False)
-        self._fh.write(line + "\n")
+        for attempt in range(3):
+            try:
+                self._fh.write(line + "\n")
+                break
+            except (OSError, ValueError):
+                # The handle can be invalidated under us when the volume blips - the
+                # bench's own USB activity disturbs an external drive it writes to.
+                # Reopen and retry rather than losing this row and every row after it.
+                try:
+                    self.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                if attempt == 2:
+                    return  # one row dropped; the stream survives
+                time.sleep(WRITE_BACKOFF_S)
+                self.open()
         self.count += 1
         self.bytes_written += len(line) + 1
         self.last_ts = time.time()

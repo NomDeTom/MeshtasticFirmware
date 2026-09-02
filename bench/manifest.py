@@ -217,6 +217,17 @@ class ImageEntry:
     def hex_file(self) -> str | None:
         return next((a for a in self.artifacts if a.endswith(".hex")), None)
 
+    @property
+    def dfu_zip(self) -> str | None:
+        """The nrfutil DFU package, if the build produced one.
+
+        Preferred over the .uf2 where possible: serial DFU streams the image over the
+        bootloader's CDC, where the UF2 path copies megabytes onto a mass-storage volume
+        the OS has just mounted over USB. On a bench whose artifacts live on an external
+        USB drive, that write disturbs the very bus the run is recording to.
+        """
+        return next((a for a in self.artifacts if a.endswith(".zip")), None)
+
 
 class DriftError(RuntimeError):
     """A scenario's current definition no longer matches the image built for it.

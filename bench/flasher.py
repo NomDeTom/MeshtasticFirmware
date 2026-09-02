@@ -115,7 +115,13 @@ class Flasher:
         )
         hardware.assert_compatible(node.name, device_model, image_hw_model)
 
-        if image.suffix.lower() == ".uf2":
+        if image.suffix.lower() == ".zip":
+            # nrfutil package: enter DFU over the protocol - no 1200-baud touch, which is
+            # the fragile part - then stream the image to the bootloader's CDC instead of
+            # writing it to a mass-storage volume mounted over the same USB bus the run
+            # is recording to.
+            result = self._flash_protocol_then_serial(node, image, port)
+        elif image.suffix.lower() == ".uf2":
             result = self._flash_uf2(node, image, port)
         else:
             result = self._flash_serial_dfu(node, image, port)
@@ -194,6 +200,59 @@ class Flasher:
         t.start()
         t.join(timeout)
         return bool(outcome.get("ok"))
+
+    def _flash_protocol_then_serial(
+        self, node: devices.BenchNode, image: Path, port: str
+    ) -> FlashResult:
+        """Protocol DFU entry, then an nrfutil serial upload.
+
+        Keeps the safe half of the UF2 path - enterDFUMode() over the API, so no
+        1200-baud touch and nothing that can strand a node - while avoiding the
+        mass-storage write. The Adafruit nRF52 bootloader serves both interfaces at once,
+        so once the node is in DFU either upload works.
+        """
+        if self.platform.nrfutil is None:
+            return FlashResult(node.name, "protocol_serial", False, "adafruit-nrfutil absent", 0.0)
+        if self.observer is not None:
+            self.observer.mark_dropped(node.name, reason="flash")
+
+        before = devices.snapshot_ports()
+        self._enter_dfu(port)
+
+        # Wait for the bootloader's own CDC to appear, confirmed by an observed
+        # transition rather than by a bootloader-shaped PID that may always have been there.
+        dfu_port = None
+        deadline = time.monotonic() + 60.0
+        while dfu_port is None and time.monotonic() < deadline:
+            time.sleep(1.0)
+            dfu_port = devices.looks_like_dfu(before)
+        if dfu_port is None:
+            self._emit("dfu_port_not_found", node=node.name)
+            return FlashResult(
+                node.name, "protocol_serial", False,
+                "node did not present a DFU serial port after enterDFUMode", 0.0)
+        self._emit("dfu_confirmed", node=node.name, port=dfu_port)
+
+        argv = [
+            *self.platform.nrfutil.argv,
+            "dfu", "serial",
+            "--package", str(image),
+            "-p", dfu_port,
+            "-b", "115200",
+            "--singlebank",
+        ]
+        result = proc.run(argv, env=dict(self.platform.nrfutil.env), timeout=300.0)
+        failure = next((m for m in DFU_FAILURE_MARKERS if m in result.output), None)
+        if failure or not result.ok:
+            return FlashResult(
+                node.name, "protocol_serial", False,
+                f"nrfutil failed ({failure or result.returncode}): {result.tail(10)}", 0.0)
+        if not self._wait_for_return(node):
+            return FlashResult(
+                node.name, "protocol_serial", False,
+                "flashed but the node did not re-appear", 0.0)
+        return FlashResult(
+            node.name, "protocol_serial", True, f"serial DFU on {dfu_port}, no volume write", 0.0)
 
     # -- path 1: protocol DFU + UF2 volume -------------------------------------
 
