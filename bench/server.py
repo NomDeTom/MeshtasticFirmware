@@ -41,7 +41,7 @@ import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from . import streams
 
@@ -293,7 +293,9 @@ def read_state(run_dir: Path) -> dict:
             ),
         },
         "counts": state.get("counts", {}),
-        "rows": _rows(results),
+        "rows": _rows(results, state.get("attempt_started_at"),
+                      state.get("pending_retry", [])),
+        "carried_over": state.get("carried_over", 0),
         "nodes": state.get("nodes", []),
         "observer": state.get("observer"),
         "capture": _capture(state, run_dir),
@@ -319,15 +321,31 @@ def _liveness(state: dict, results: dict, beat_age: float | None) -> str:
     return DIED if beat_age > DEAD_AFTER_S else RUNNING
 
 
-def _rows(results: dict) -> list[dict]:
+def _rows(
+    results: dict,
+    attempt_started_at: float | None = None,
+    pending_retry: Sequence[str] = (),
+) -> list[dict]:
     out = []
+    pending = set(pending_retry or ())
     for scenario_id, row in results.items():
         out.append(
             {
                 "id": scenario_id,
-                "verdict": row.get("verdict"),
-                "error": row.get("error"),
+                # A row queued for a retry shows as planned, not as the verdict its
+                # last attempt left behind - that verdict is about to be replaced and
+                # was never a statement about the run in front of the reader.
+                "verdict": "PLANNED" if scenario_id in pending else row.get("verdict"),
+                "pending_retry": scenario_id in pending,
+                "previous_verdict": row.get("verdict") if scenario_id in pending else None,
+                "error": None if scenario_id in pending else row.get("error"),
                 "release_representative": row.get("release_representative", True),
+                # True when this verdict was banked by an EARLIER attempt at this run id.
+                # Resuming keeps finished rows, so without this a stale verdict reads as
+                # something the run in front of you just measured.
+                "carried_over": bool(
+                    attempt_started_at and (row.get("ended_at") or 0) < attempt_started_at
+                ),
                 "images": row.get("images", {}),
                 "duration_s": (
                     round(row["ended_at"] - row["started_at"], 1)
@@ -427,6 +445,39 @@ def tail(run_dir: Path, stream: str, limit: int = 40, node: str | None = None) -
     return rows[-limit:]
 
 
+def tail_sources(run_dir: Path, rows: list[dict]) -> dict:
+    """Per-device: how many lines are in the window, and why there are none.
+
+    A device with nothing in the tail looks broken, and on this bench it usually is not:
+    it is in DFU, or leased to a flash, and has nothing to say. Silence that cannot
+    explain itself is the same defect as an assertion that passes on no evidence - so the
+    tail carries each device's last known port state alongside its line count.
+    """
+    counts: dict[str, int] = {}
+    for row in rows:
+        name = row.get("node")
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+
+    # Last port_state event per node is the authoritative account of where a device is.
+    states: dict[str, dict] = {}
+    for ev in streams.read_stream(Path(run_dir), streams.EVENTS):
+        name = ev.get("node")
+        if not name:
+            continue
+        if ev.get("kind") == "port_state":
+            states[name] = {"state": ev.get("now"), "why": ev.get("why"), "ts": ev.get("ts")}
+        elif ev.get("kind") in ("flash_start", "enter_dfu", "dfu_via"):
+            states.setdefault(name, {})["last_flash_event"] = ev.get("kind")
+
+    out = {}
+    for name in sorted(set(counts) | set(states)):
+        info = dict(states.get(name) or {})
+        info["lines"] = counts.get(name, 0)
+        out[name] = info
+    return out
+
+
 def one_line(state: dict) -> str:
     """The terse summary, suitable for a terminal or a notification."""
     pos, counts = state["position"], state.get("counts", {})
@@ -488,9 +539,11 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/status.txt":
                 self._text(one_line(read_state(run)))
             elif path == "/tail.json":
+                logs = tail(run, streams.LOGS)
                 self._json({"run": run.name,
-                            "logs": tail(run, streams.LOGS),
+                            "logs": logs,
                             "events": tail(run, streams.EVENTS, 20),
+                            "sources": tail_sources(run, logs),
                             "build": build_tail(run)})
             else:
                 self.send_error(404, "not found")
@@ -617,7 +670,11 @@ text-transform:uppercase}
 .m-planned{color:var(--mut)} .m-running{color:var(--accent)}
 .m-done{color:var(--ok)} .m-skipped{color:var(--mut);opacity:.7}
 .m-failed{color:var(--bad)}
+.m-overdue{color:var(--warn,#b26a00);font-weight:600}
+@keyframes late{50%{opacity:.45}} .m-overdue{animation:late 1.6s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.m-overdue{animation:none}}
 .chips{display:flex;flex-wrap:wrap;gap:.3rem;margin:0 0 .5rem}
+.tailnote{margin:0 0 6px;display:flex;flex-wrap:wrap;gap:10px;font-size:12px}
 .chip{background:var(--card);border:1px solid var(--rule);border-radius:999px;
 color:var(--mut);cursor:pointer;font:inherit;font-size:.76rem;padding:.15rem .6rem}
 .chip[aria-pressed="true"]{border-color:var(--accent);color:var(--fg)}
@@ -682,7 +739,7 @@ padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;ga
     <th>last</th></tr></thead><tbody></tbody></table></div>
   <h2 id="tail-head">tail</h2>
   <div class="chips" id="tailchips"></div>
-  <div class="card"><pre id="tail"></pre></div>
+  <div class="card"><div id="tailnote" class="tailnote"></div><pre id="tail"></pre></div>
   </div>
 </div>
 <script>
@@ -801,7 +858,9 @@ async function refresh() {
     ["stage", p.stage, ""],
     ["row", p.row || "-", `${p.done ?? 0} / ${p.total ?? 0} done`],
     ["elapsed", secs(p.elapsed_s), p.expected_stage_s ? "stage median " + secs(p.expected_stage_s) : ""],
-    ["pass / fail", `${c.PASS||0} / ${c.FAIL||0}`, `${c["NOT OBSERVED"]||0} not-observed, ${c.INVALID||0} invalid`],
+    ["pass / fail", `${c.PASS||0} / ${c.FAIL||0}`,
+      `${c["NOT OBSERVED"]||0} not-observed, ${c.INVALID||0} invalid` +
+      (s.carried_over ? ` &middot; ${s.carried_over} carried from an earlier attempt` : "")],
     ["heartbeat", secs(s.heartbeat_age_s) + " ago", ""],
     ["planned", secs(p.planned_total_s), p.over_plan ? "OVER PLAN" : "worst case for this table"],
   ].map(([k,v,sub]) => `<div class="card"><div class=k>${k}</div><div class=big>${cell(v)}</div>
@@ -810,6 +869,11 @@ async function refresh() {
   rows("#rows", s.rows || [], [
     d => esc(d.id),
     d => `<span class="pill ${esc((d.verdict||"").split(" ")[0])}">${esc(d.verdict)}</span>` +
+         (d.pending_retry
+            ? ` <span class=k title="queued for a retry; last attempt was ${esc(d.previous_verdict||"")}">retrying</span>`
+            : d.carried_over
+            ? ` <span class=k title="banked by an earlier attempt at this run id, not measured now">carried</span>`
+            : "") +
          (d.release_representative === false ? " <span class=warnrow>bench-only</span>" : ""),
     d => d.error ? `<span class=FAIL>${esc(d.error)}</span>`
                  : (d.outcomes||[]).map(o => `${esc(o.name)}: ${esc(o.evidence)}`).join("<br>") || "<span class=k>-</span>",
@@ -846,6 +910,7 @@ async function refresh() {
       `<span class=m-skipped>${c.skipped||0} skipped</span> &middot; ` +
       `<span class=m-planned>${c.planned||0} planned</span>` +
       (c.failed ? ` &middot; <span class=m-failed>${c.failed} failed</span>` : "") +
+      (c.overdue ? ` &middot; <span class=m-overdue>${c.overdue} overdue</span>` : "") +
       (p.over_plan ? ' &middot; <span class=FAIL>OVER PLAN</span>' : '') +
       `<div class=bar><i class="${p.over_plan ? 'over' : ''}" style="width:${pct}%"></i></div>`;
 
@@ -856,11 +921,14 @@ async function refresh() {
       const over = st.overran ? " FAIL" : "";
       return `<span class="bud${over}">${secs(st.elapsed_s)} / ${secs(st.budget_s)}</span>`;
     };
-    const mark = st => `<span class="mark m-${esc(st.status)}">${esc(st.status)}</span>`;
+    // Overdue is derived server-side from elapsed against budget, so it reads the same
+    // here as it does in the JSON an unattended run leaves behind.
+    const mark = st => `<span class="mark m-${esc(st.status)}">${esc(st.status)}` +
+      (st.over_by_s ? ` +${secs(st.over_by_s)}` : "") + `</span>`;
 
     $("#plan").innerHTML = plan.steps.map(st => {
       const kids = (st.children || []);
-      const openNow = st.status === "running";
+      const openNow = st.status === "running" || st.status === "overdue";
       const body = kids.map(k =>
         `<div class=kid>${mark(k)}<span class=nm>${esc(k.name)}</span>${timing(k)}
          <span class=k>${esc(k.outcome || k.detail || "")}</span></div>`).join("");
@@ -945,12 +1013,23 @@ async function refresh() {
     } else {
       $("#tail-head").textContent = "tail";
       const logs = t.logs || [];
-      const nodes = [...new Set(logs.map(r => r.node).filter(Boolean))].sort();
+      // Every device the run knows about gets a chip, not only those that happen to
+      // have spoken. A node in DFU emits nothing, and dropping it from the filter made
+      // it invisible exactly when the operator most wanted to know where it was.
+      const src = t.sources || {};
+      const nodes = [...new Set([
+        ...logs.map(r => r.node).filter(Boolean), ...Object.keys(src)
+      ])].sort();
       const on = n => TAILNODES === null || TAILNODES.has(n);
       $("#tailchips").innerHTML =
         `<button class=chip data-pick="all" aria-pressed="${TAILNODES===null}">all</button>` +
         `<button class=chip data-pick="none" aria-pressed="${TAILNODES!==null && TAILNODES.size===0}">none</button>` +
-        nodes.map(n => `<button class=chip data-pick="${esc(n)}" aria-pressed="${on(n)}">${esc(n)}</button>`).join("");
+        nodes.map(n => {
+          const q = (src[n]||{}).lines === 0 || !(src[n]||{}).lines;
+          const why = (src[n]||{}).state ? ` · ${esc((src[n]||{}).state)}` : "";
+          return `<button class=chip data-pick="${esc(n)}" aria-pressed="${on(n)}"
+            title="${esc(n)}${why}">${esc(n)}${q ? " <span class=k>(quiet)</span>" : ""}</button>`;
+        }).join("");
       $("#tailchips").querySelectorAll(".chip").forEach(btn => btn.onclick = () => {
         const pick = btn.dataset.pick;
         if (pick === "all") TAILNODES = null;
@@ -965,6 +1044,17 @@ async function refresh() {
       $("#tail").textContent = shown.slice(-25)
         .map(r => `${(r.node||"-").padEnd(9)} ${(r.line||r.msg||"").slice(0,150)}`).join("\\n")
         || (TAILNODES && TAILNODES.size === 0 ? "no devices selected" : "no lines yet");
+      // Name the quiet devices and say where they are, rather than leaving the operator
+      // to read an empty pane as a fault.
+      const quiet = nodes.filter(n => on(n) && !((src[n]||{}).lines));
+      $("#tailnote").innerHTML = quiet.length
+        ? quiet.map(n => {
+            const i = src[n] || {};
+            const where = i.state ? `${esc(i.state)}${i.why ? " - " + esc(i.why) : ""}`
+                                  : "no port state recorded";
+            return `<span class=k>${esc(n)}: no output · ${where}</span>`;
+          }).join(" &nbsp; ")
+        : "";
     }
   } catch (e) { $("#tail").textContent = "tail unavailable"; }
 }

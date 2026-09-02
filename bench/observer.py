@@ -206,6 +206,15 @@ class Observer:
                     held.dropped_at = now
                 if now - held.last_attempt < RECONNECT_SPACING_S:
                     continue
+                # Being told "not now" is not a failed reconnect. While the device is
+                # leased to an operation, or deliberately away in its bootloader, the
+                # owner refuses every attempt - and counting those against the ceiling
+                # spent the entire retry budget on refusals during a single flash, so
+                # capture had given up before the node even came back. A new episode
+                # starts with a whole budget.
+                if held.owner.state in (ports.ST_LEASED, ports.ST_REBOOTING):
+                    held.attempts = 0
+                    continue
                 if held.attempts >= RECONNECT_MAX_ATTEMPTS:
                     continue  # left dropped; status() reports it and the run can decide
                 held.attempts += 1

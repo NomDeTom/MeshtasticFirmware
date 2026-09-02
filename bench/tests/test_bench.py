@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import tempfile
 import time
+import threading
+import types
 import unittest
 from pathlib import Path
 
@@ -451,6 +453,35 @@ class TestDevicesAndObserver(unittest.TestCase):
         # 0x94c3 followed by an implausible length: text, not a frame.
         r._buf.extend(bytes((0x94, 0xC3, 0xFF, 0xFF)) + b"still readable\n")
         self.assertIn("still readable", " ".join(r.drain()))
+
+
+class TestReconnectBudget(unittest.TestCase):
+    def test_a_refusal_does_not_spend_the_retry_ceiling(self):
+        """The ceiling is for a node that will not come back, not for "not now".
+
+        Measured: one flash held a node away for five minutes, capture asked every five
+        seconds, and all thirty attempts were spent on refusals - so capture had given
+        up before the node returned, and the DUT produced no log lines for the rest of
+        the run.
+        """
+        from bench import observer as observer_mod, ports
+
+        held = types.SimpleNamespace(
+            node=types.SimpleNamespace(name="dut"),
+            owner=types.SimpleNamespace(state=ports.ST_REBOOTING),
+            connected=False, dropped_at=None, last_attempt=0.0,
+            attempts=observer_mod.RECONNECT_MAX_ATTEMPTS,
+            raw_mode=False, port=None,
+        )
+        obs = observer_mod.Observer.__new__(observer_mod.Observer)
+        obs.held = {"dut": held}
+        obs._suspended = set()
+        obs._lock = threading.RLock()
+        obs.recorder = types.SimpleNamespace(event=lambda *a, **k: None)
+        obs._open = lambda h: (_ for _ in ()).throw(AssertionError("must not open"))
+
+        obs.health_tick()
+        self.assertEqual(held.attempts, 0, "a refused turn restores the budget")
 
 
 class TestSilenceIsNotEvidence(unittest.TestCase):

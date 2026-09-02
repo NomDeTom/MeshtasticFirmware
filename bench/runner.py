@@ -143,9 +143,28 @@ class Runner:
         self.heartbeat()
 
     def snapshot(self) -> dict:
-        counts = {"PASS": 0, "FAIL": 0, "NOT OBSERVED": 0, "INVALID": 0}
-        for row in self.results.values():
-            counts[row.get("verdict", "INVALID")] = counts.get(row.get("verdict", "INVALID"), 0) + 1
+        # A run id names a workspace, not an attempt: re-running one resumes it, keeping
+        # the results already banked so a twelve-hour matrix survives a crash without
+        # redoing half-hour builds. The cost is that a row from an earlier attempt sits
+        # in results.json looking current, so each is marked with whether THIS attempt
+        # produced it - a stale verdict presented as live is the reader being misled.
+        counts = {"PASS": 0, "FAIL": 0, "NOT OBSERVED": 0, "INVALID": 0, "PLANNED": 0}
+        carried = 0
+        selected = {s.id for s in self._selected()}
+        pending: list[str] = []
+        for scenario_id, row in self.results.items():
+            verdict = row.get("verdict", "INVALID")
+            stale = (row.get("ended_at") or 0) < self.started_at
+            # An INVALID row this attempt is going to redo is not a result: it is work
+            # still to do. Reporting last attempt's failure as the current verdict makes
+            # a run that is busy retrying look like a run that has already failed.
+            if stale and verdict == scenario_mod.INVALID and scenario_id in selected:
+                counts["PLANNED"] += 1
+                pending.append(scenario_id)
+                continue
+            counts[verdict] = counts.get(verdict, 0) + 1
+            if stale:
+                carried += 1
         sha, dirty = manifest_mod.git_state(self.config.firmware_root)
         return {
             "run_dir": str(self.run_dir),
@@ -168,7 +187,12 @@ class Runner:
             "waiting_for": self.waiting_for,
             "waiting_since": self.waiting_since,
             "counts": counts,
-            "done": len(self.results),
+            # Rows standing from a previous attempt at this run id, not measured now.
+            "carried_over": carried,
+            "attempt_started_at": self.started_at,
+            # Rows queued for a retry are not done, however finished they look on disk.
+            "pending_retry": pending,
+            "done": len(self.results) - len(pending),
             "total": len(self._selected()),
             "platform": self.platform.to_dict() if self.platform else None,
             "nodes": devices.describe(self.config.nodes),

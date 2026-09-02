@@ -496,6 +496,11 @@ RUNNING = "running"
 DONE = "done"
 SKIPPED = "skipped"
 FAILED_STEP = "failed"
+# Derived, never stored: a step still running past the budget it was given. It is not
+# yet failed - the budget may still be honoured by the operation's own timeout - but it
+# is no longer on schedule, and a reader watching an unattended bench needs to see the
+# difference between "working" and "working for longer than this was ever meant to take".
+OVERDUE = "overdue"
 
 
 @dataclass
@@ -531,6 +536,21 @@ class Step:
         el = self.elapsed_s
         return bool(el and self.budget_s and el > self.budget_s)
 
+    @property
+    def reported_status(self) -> str:
+        """What to show. Running past budget reads as overdue rather than as running."""
+        if self.status == RUNNING and self.overran:
+            return OVERDUE
+        return self.status
+
+    @property
+    def over_by_s(self) -> float | None:
+        """How far past budget, for a step that is late. None when it is not."""
+        el = self.elapsed_s
+        if el is None or not self.budget_s or el <= self.budget_s:
+            return None
+        return round(el - self.budget_s, 1)
+
     def add(self, step_id: str, name: str, budget_s: float, detail: str = "", **kw) -> "Step":
         child = Step(step_id, name, budget_s, detail, **kw)
         self.children.append(child)
@@ -549,7 +569,9 @@ class Step:
             "detail": self.detail,
             "kind": self.kind,
             "node": self.node,
-            "status": self.status,
+            "status": self.reported_status,
+            "recorded_status": self.status,
+            "over_by_s": self.over_by_s,
             "outcome": self.outcome,
             "elapsed_s": None if self.elapsed_s is None else round(self.elapsed_s, 1),
             "overran": self.overran,
@@ -610,10 +632,10 @@ class Schedule:
 
     @property
     def counts(self) -> dict:
-        out = {PLANNED: 0, RUNNING: 0, DONE: 0, SKIPPED: 0, FAILED_STEP: 0}
+        out = {PLANNED: 0, RUNNING: 0, DONE: 0, SKIPPED: 0, FAILED_STEP: 0, OVERDUE: 0}
         for top in self.steps:
             for step in top.walk():
-                out[step.status] = out.get(step.status, 0) + 1
+                out[step.reported_status] = out.get(step.reported_status, 0) + 1
         return out
 
     def to_dict(self) -> dict:
