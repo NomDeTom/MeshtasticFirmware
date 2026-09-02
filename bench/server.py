@@ -169,6 +169,72 @@ def resolve_run(root: Path, name: str | None) -> Path | None:
     return Path(rows[0]["path"]) if rows else None
 
 
+
+def devices_view(state: dict, run_status: str, beat_age: float | None) -> list[dict]:
+    """One row per device: what is true NOW, and what the run last recorded.
+
+    Those are different claims and the page must not blur them. USB presence is checked
+    at request time - enumeration opens nothing, so it is safe for a read-only observer
+    to ask - while port state, reconnect counts and the observed model can only come from
+    the run that held the device, and go stale the moment that run stops.
+
+    Showing a finished run's last port state as though it were current is how a healthy
+    bench came to look broken: "gave_up" and "absent" were both true twenty minutes ago
+    and neither was true any more.
+    """
+    from . import devices as devices_mod
+
+    try:
+        live = {
+            (d.serial_number or "").upper(): d
+            for d in devices_mod.enumerate_devices(all_devices=True)
+        }
+    except Exception:  # noqa: BLE001 - a listing failure must not blank the page
+        live = {}
+
+    ports_state = state.get("ports") or {}
+    stale = run_status != RUNNING
+    out = []
+    for node in state.get("nodes") or []:
+        name = node.get("name")
+        recorded = dict(ports_state.get(name) or {})
+        serial = (node.get("serial_number") or "").upper()
+        seen = live.get(serial)
+
+        row = {
+            "node": name,
+            # Identity comes from the node table, so it is present even before any run.
+            "role": recorded.get("role") or node.get("role"),
+            "serial_number": node.get("serial_number"),
+            "declared_board": recorded.get("declared_board") or node.get("board"),
+            "observed_model": recorded.get("observed_model"),
+            "node_id": recorded.get("node_id"),
+            "firmware": recorded.get("firmware"),
+            "never_command": node.get("never_command"),
+            "never_flash": node.get("never_flash"),
+            "capture": recorded.get("capture") or (
+                "raw serial" if node.get("never_command") else "protobuf api"
+            ),
+            # Live, and labelled as such.
+            "present": seen is not None,
+            "port": seen.port if seen else None,
+            # Remembered, and labelled as such.
+            "recorded_state": recorded.get("state"),
+            "recorded_port": recorded.get("port"),
+            "reconnects": recorded.get("reconnects"),
+            "last_error": recorded.get("last_error"),
+            "stale": stale,
+            "as_of_s": beat_age if stale else None,
+        }
+        declared, observed = row["declared_board"], row["observed_model"]
+        row["board_matches"] = (
+            None if not (declared and observed)
+            else declared.strip().upper() == observed.strip().upper()
+        )
+        out.append(row)
+    return out
+
+
 def read_state(run_dir: Path) -> dict:
     """Rebuild the whole view from artifacts on disk. No in-memory state at all."""
     run_dir = Path(run_dir)
@@ -212,6 +278,7 @@ def read_state(run_dir: Path) -> dict:
         },
         "schedule": state.get("schedule"),
         "ports": state.get("ports"),
+        "devices": devices_view(state, status, beat_age),
         "waiting": {
             "for": state.get("waiting_for"),
             "since": state.get("waiting_since"),
@@ -575,7 +642,8 @@ padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;ga
   </div>
 
   <div data-panel="devices" hidden>
-  <h2>port ownership</h2>
+  <h2>devices</h2>
+  <p class="sub" id="devnote"></p>
   <div class="card" id="ports"></div>
   <h2>images</h2>
   <div class="card"><table id="imgs"><thead><tr><th>bake</th><th>env</th><th>flash</th>
@@ -747,34 +815,46 @@ async function refresh() {
 
   // --- devices tab ----------------------------------------------------------
   const pstate = s.ports || {};
-  $("#ports").innerHTML = Object.keys(pstate).map(name => {
-    const d = pstate[name];
-    // leased and rebooting are normal mid-operation; only these mean trouble.
-    const bad = ["gave_up","lost","absent"].includes(d.state);
-    const stateHtml = `<span class="mark ${bad ? "m-failed" : "m-done"}">${esc(d.state)}</span>`;
-    // Declared against observed. The node table is hand-written and is exactly the thing
-    // that gets a board wrong, so a mismatch is called out rather than reconciled.
+  const anyStale = (s.devices || []).some(d => d.stale);
+  $("#devnote").innerHTML = anyStale
+    ? "USB presence is live. Port state, reconnects and firmware are what the last run "
+      + "recorded and are <b>not current</b> - no run is holding these devices now."
+    : "Live, from the run currently holding these devices.";
+
+  $("#ports").innerHTML = (s.devices || []).map(d => {
+    // Live presence and remembered port state are different claims, so they are shown
+    // as different things. A finished run's last port state is history, not status.
+    const presence = d.present
+      ? `<span class="mark m-done">present</span>`
+      : `<span class="mark m-failed">absent</span>`;
+    const recorded = d.recorded_state
+      ? (d.stale
+          ? `<span class=k>was ${esc(d.recorded_state)}${d.as_of_s ? " " + secs(d.as_of_s) + " ago" : ""}</span>`
+          : `<span class="${["gave_up","lost","absent"].includes(d.recorded_state) ? "FAIL" : "PASS"}">${esc(d.recorded_state)}</span>`)
+      : `<span class=k>no run has held this device</span>`;
+
     const board = d.observed_model
       ? (d.board_matches === false
-          ? `<span class=FAIL>${esc(d.observed_model)} (table says ${esc(d.declared_board)})</span>`
+          ? `<span class=FAIL>${esc(d.observed_model)} &mdash; table says ${esc(d.declared_board)}</span>`
           : esc(d.observed_model))
-      : `<span class=k>${esc(d.declared_board || "unknown")} (declared, not yet observed)</span>`;
+      : `<span class=k>${esc(d.declared_board || "unknown")} (declared; not yet read from the device)</span>`;
+
     const facts = [
       ["hardware", board],
       ["node id", cell(d.node_id)],
       ["firmware", cell(d.firmware)],
       ["usb serial", cell(d.serial_number)],
-      ["port", cell(d.port)],
+      ["port now", cell(d.port)],
       ["role", cell(d.role)],
       ["capture", cell(d.capture)],
-      ["policy", (d.never_command ? "never commanded" : "commanded") +
-                 ", " + (d.never_flash ? "never flashed" : "flashable")],
+      ["policy", (d.never_command ? "never commanded" : "commanded") + ", " +
+                 (d.never_flash ? "never flashed" : "flashable")],
+      ["port state", recorded],
       ["reconnects", cell(d.reconnects)],
-      ["dropped for", d.dropped_for_s == null ? "-" : secs(d.dropped_for_s)],
       ["last error", d.last_error ? `<span class=warnrow>${esc(d.last_error)}</span>` : "-"],
     ];
-    return `<details class=step${d.state === "leased" ? " open" : ""}>
-      <summary>${stateHtml}<span class=nm><b>${esc(name)}</b></span>
+    return `<details class=step${d.recorded_state === "leased" ? " open" : ""}>
+      <summary>${presence}<span class=nm><b>${esc(d.node)}</b></span>
         <span class=bud>${esc(d.port || "-")}</span>
         <span class=k>${esc(d.observed_model || d.declared_board || "")}</span></summary>
       <div class=kids>${facts.map(([k, v]) =>

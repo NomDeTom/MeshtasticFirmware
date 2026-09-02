@@ -735,6 +735,59 @@ class TestDashboardScript(unittest.TestCase):
             Path(path).unlink(missing_ok=True)
 
 
+
+class TestDevicesView(unittest.TestCase):
+    """Live facts and remembered facts must never be presented as the same thing."""
+
+    def view(self, run_status, ports=None, nodes=None):
+        from bench import server
+
+        state = {
+            "nodes": nodes if nodes is not None else [
+                {"name": "dut", "serial_number": "NOPE-NOT-PLUGGED-IN",
+                 "role": "dut", "board": "NRF52_PROMICRO_DIY"},
+            ],
+            "ports": ports or {},
+        }
+        return server.devices_view(state, run_status, beat_age=1300.0)
+
+    def test_a_finished_runs_port_state_is_marked_stale(self):
+        from bench import server
+
+        row = self.view(server.FINISHED, {"dut": {"state": "gave_up"}})[0]
+        # gave_up was true when the run stopped; presenting it as current is how a
+        # healthy bench came to look broken.
+        self.assertTrue(row["stale"])
+        self.assertEqual(row["recorded_state"], "gave_up")
+        self.assertEqual(row["as_of_s"], 1300.0)
+
+    def test_a_live_run_is_not_marked_stale(self):
+        from bench import server
+
+        row = self.view(server.RUNNING, {"dut": {"state": "held"}})[0]
+        self.assertFalse(row["stale"])
+        self.assertIsNone(row["as_of_s"])
+
+    def test_identity_survives_a_state_file_that_predates_it(self):
+        from bench import server
+
+        # Older runs wrote a port block without board or role; the node table still has
+        # them, so the device is described rather than shown as blanks.
+        row = self.view(server.FINISHED, {"dut": {"state": "idle"}})[0]
+        self.assertEqual(row["declared_board"], "NRF52_PROMICRO_DIY")
+        self.assertEqual(row["role"], "dut")
+
+    def test_presence_is_checked_live_not_taken_from_the_run(self):
+        from bench import server
+
+        # This serial is not plugged in, so presence is False however the run remembered
+        # it - enumeration opens nothing, so a read-only observer may always ask.
+        row = self.view(server.FINISHED, {"dut": {"state": "held", "port": "COM16"}})[0]
+        self.assertFalse(row["present"])
+        self.assertIsNone(row["port"])
+        self.assertEqual(row["recorded_port"], "COM16")
+
+
 class TestLbtScenarioTable(unittest.TestCase):
     def test_table_is_valid_and_deduplicates(self):
         from bench.scenarios.lbt import SCENARIOS
