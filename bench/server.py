@@ -796,8 +796,7 @@ async function refresh() {
     if (p.stage === "1-build" && (b.lines||[]).length) {
       $("#tail-head").textContent = `build log · ${b.bake_hash} · ${b.total_lines} lines · ${b.bytes} bytes`;
       $("#tailchips").innerHTML = "";
-      $("#tail").textContent = b.lines.join("
-");
+      $("#tail").textContent = b.lines.join("\\n");
     } else {
       $("#tail-head").textContent = "tail";
       const logs = t.logs || [];
@@ -819,8 +818,7 @@ async function refresh() {
       });
       const shown = logs.filter(r => on(r.node));
       $("#tail").textContent = shown.slice(-25)
-        .map(r => `${(r.node||"-").padEnd(9)} ${(r.line||r.msg||"").slice(0,150)}`).join("
-")
+        .map(r => `${(r.node||"-").padEnd(9)} ${(r.line||r.msg||"").slice(0,150)}`).join("\\n")
         || (TAILNODES && TAILNODES.size === 0 ? "no devices selected" : "no lines yet");
     }
   } catch (e) { $("#tail").textContent = "tail unavailable"; }

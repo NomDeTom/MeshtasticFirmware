@@ -691,6 +691,50 @@ class TestStatusServer(unittest.TestCase):
         self.assertIn("12 packets", state["rows"][0]["outcomes"][0]["evidence"])
 
 
+
+class TestDashboardScript(unittest.TestCase):
+    """The page is only useful if its script actually runs."""
+
+    def _script(self) -> str:
+        import re
+
+        from bench import server
+
+        match = re.search(r"<script>(.*?)</script>", server.PAGE, re.S)
+        self.assertIsNotNone(match, "the page must carry a script block")
+        return match.group(1)
+
+    def test_no_string_literal_is_broken_across_a_line(self):
+        """PAGE is a non-raw Python string, so an escape meant for the browser needs
+        doubling. A single backslash-n is consumed by Python, lands as a real newline
+        inside a JS string literal, and takes the entire dashboard down with a syntax
+        error - the page renders nothing at all, which is how this shipped twice.
+        """
+        offenders = [
+            line for line in self._script().splitlines()
+            if line.rstrip().endswith('("') or line.rstrip().endswith("('")
+        ]
+        self.assertEqual(offenders, [], "string literal split across a newline")
+
+    def test_the_script_parses(self):
+        """Parse it for real where node is available; skip cleanly where it is not."""
+        import shutil
+        import subprocess
+        import tempfile
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available to parse the dashboard script")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
+            fh.write(self._script())
+            path = fh.name
+        try:
+            done = subprocess.run([node, "--check", path], capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr[:400])
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+
 class TestLbtScenarioTable(unittest.TestCase):
     def test_table_is_valid_and_deduplicates(self):
         from bench.scenarios.lbt import SCENARIOS
