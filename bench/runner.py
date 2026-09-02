@@ -192,17 +192,24 @@ class Runner:
 
         sha, dirty = manifest_mod.git_state(self.config.firmware_root)
         distinct = {
-            rb.bake.content_hash(sha, dirty)
+            rb.bake.content_hash(sha, dirty): rb.bake
             for scen in self._selected() for rb in scen.roles.values()
         }
         build = plan.add("build", "build images", 0.0,
                          f"{len(distinct)} distinct image(s)", kind="build")
-        for bake_hash in sorted(distinct):
+        for bake_hash, bake in sorted(distinct.items()):
             cached = self.manifest.has(bake_hash)
-            child = build.add(f"build:{bake_hash}", f"image {bake_hash}",
-                              0.0 if cached else builder.BUILD_TIMEOUT_S,
-                              "already built" if cached else "compile")
-            if cached:
+            # A prebuilt image is registered, not compiled. Budgeting a compiler run for
+            # a file already on disk would overstate the plan by half an hour and make
+            # the total useless as a ceiling.
+            if bake.is_prebuilt:
+                budget, why = 5.0, "prebuilt, registered from the firmware store"
+            elif cached:
+                budget, why = 0.0, "already built"
+            else:
+                budget, why = builder.BUILD_TIMEOUT_S, "compile"
+            child = build.add(f"build:{bake_hash}", f"image {bake_hash}", budget, why)
+            if cached and not bake.is_prebuilt:
                 child.status = ports.SKIPPED
                 child.outcome = "already built"
         build.budget_s = sum(c.budget_s for c in build.children)
