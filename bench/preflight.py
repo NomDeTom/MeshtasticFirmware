@@ -391,7 +391,7 @@ def _check_nodes(report: PreflightReport, nodes: Iterable[devices.BenchNode]) ->
         try:
             actual = hardware.read_hw_model(owner)
         finally:
-            owner.release("preflight", abandon=False)
+            owner.release("preflight", abandon=False, by="preflight")
         if actual is None:
             unknown.append(node.name)
         elif hardware.normalize(actual) != hardware.normalize(node.board):
