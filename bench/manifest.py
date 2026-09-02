@@ -99,11 +99,17 @@ class Bake:
     userprefs: dict[str, str] = field(default_factory=dict)
     build_flags: dict[str, Any] = field(default_factory=dict)
     label: str | None = None
+    # An image built elsewhere - an upstream release, say. Its identity is the file
+    # itself rather than the inputs that produced it, because the bench did not produce
+    # it and cannot claim to know how it was made.
+    prebuilt: str | None = None
 
     # -- identity --------------------------------------------------------------
 
     def fingerprint(self, git_sha: str | None = None, dirty: bool | None = None) -> dict:
         """Everything that makes this bake distinct, in a stable, comparable form."""
+        if self.is_prebuilt:
+            return {"env": self.env, "prebuilt": self.prebuilt, "label": self.label}
         return {
             "env": self.env,
             "userprefs": {k: str(v) for k, v in sorted(self.userprefs.items())},
@@ -116,6 +122,10 @@ class Bake:
             "dirty": dirty,
         }
 
+    @property
+    def is_prebuilt(self) -> bool:
+        return self.prebuilt is not None
+
     def content_hash(self, git_sha: str | None = None, dirty: bool | None = None) -> str:
         """Short, stable hash over the fingerprint.
 
@@ -123,13 +133,32 @@ class Bake:
         are not the same image, and a dirty tree is not reproducible. Twelve hex chars is
         ample for a bench matrix and short enough to read in a boot log.
         """
+        if self.is_prebuilt:
+            # Hash the artifact, not the inputs. Two runs pointed at the same release
+            # file are the same image, and a file that changed underneath is a different
+            # one - which is the only claim that can honestly be made about a binary the
+            # bench did not build.
+            path = Path(self.prebuilt or "")
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+            except OSError:
+                digest = hashlib.sha256(str(path).encode()).hexdigest()[:12]
+            return digest
         blob = json.dumps(self.fingerprint(git_sha, dirty), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
     # -- capability ------------------------------------------------------------
 
     def capabilities(self) -> set[str]:
-        """What an image built from this bake can emit or do."""
+        """What an image built from this bake can emit or do.
+
+        A prebuilt image gets the base set only. The bench did not compile it, so it
+        cannot claim to know which optional features are in there - and claiming a
+        capability an image lacks is exactly how a check comes to report NOT OBSERVED
+        forever against firmware that works.
+        """
+        if self.is_prebuilt:
+            return set(_BASE_LOG_LEVELS) | {LOG_SINK_API}
         flags = {k: v for k, v in self.build_flags.items()}
         caps: set[str] = set(_BASE_LOG_LEVELS)
 

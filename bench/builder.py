@@ -233,6 +233,9 @@ class Builder:
         sha, dirty = manifest.git_state(self.root)
         bake_hash = bake.content_hash(sha, dirty)
 
+        if bake.is_prebuilt:
+            return self._register_prebuilt(bake, bake_hash)
+
         if not force and self.manifest.has(bake_hash):
             entry = self.manifest.images[bake_hash]
             self._emit("build_skipped", bake_hash=bake_hash, reason="already built")
@@ -309,6 +312,38 @@ class Builder:
             duration_s=result.duration_s,
             flash_pct=entry.flash_pct,
             artifacts=len(artifacts),
+        )
+        return entry
+
+    def _register_prebuilt(self, bake: manifest.Bake, bake_hash: str) -> manifest.ImageEntry:
+        """Record an image the bench did not build - an upstream release, say.
+
+        Everything the manifest asserts about it is either read from the file or left
+        blank. There is no git SHA, no flash figure and no build tag, because none of
+        those can be known about a binary produced elsewhere, and inventing them would
+        make the row claim more than it can support.
+        """
+        path = Path(bake.prebuilt or "")
+        if not path.exists():
+            raise BuildError(f"prebuilt image does not exist: {path}")
+        entry = manifest.ImageEntry(
+            bake_hash=bake_hash,
+            bake=bake.fingerprint(None, None),
+            env=bake.env,
+            artifacts=[str(path)],
+            git_sha=None,
+            dirty=False,
+            capabilities=sorted(bake.capabilities()),
+            bench_only_flags=[],
+            release_representative=True,
+            built_at=path.stat().st_mtime,
+            hw_model=hardware.hw_model_for_env(self.root, bake.env),
+        )
+        self.manifest.add(entry)
+        self.manifest.save()
+        self._emit(
+            "prebuilt_registered", bake_hash=bake_hash, path=str(path),
+            bytes=path.stat().st_size, hw_model=entry.hw_model,
         )
         return entry
 
