@@ -455,6 +455,40 @@ class TestDevicesAndObserver(unittest.TestCase):
         self.assertIn("still readable", " ".join(r.drain()))
 
 
+class TestPreflightInventory(unittest.TestCase):
+    def test_the_bus_is_reported_whether_the_run_is_blocked_or_not(self):
+        """A blocked run is exactly when someone needs to see the bus, and exactly when
+        they cannot go and look - the hardware has moved on by the time they read it."""
+        from bench import preflight
+
+        report = preflight.PreflightReport()
+        report.resources = {
+            "nodes": [
+                {"name": "dut", "serial_number": "AAA"},
+                {"name": "peer", "serial_number": "BBB"},
+            ],
+            "bus": {
+                "serial": [{"port": "COM18", "vid": "239a", "pid": "00b3",
+                            "serial_number": "BBB"}],
+                "volumes": [{"path": "G:/", "uf2": True}],
+                "in_bootloader": [{"instance": "6&3AEE631A&0",
+                                   "interfaces": ["USB Serial Device", "USB Mass Storage"]}],
+                "devices": [{"name": "x", "instance": "y"}],
+            },
+        }
+        out = report.bus_summary()
+        self.assertIn("COM18", out)
+        self.assertIn("= peer", out, "a port must name the declared node it is")
+        self.assertIn("ABSENT dut", out, "a declared node with nothing on the bus is named")
+        self.assertIn("G:/", out)
+        self.assertIn("DFU", out, "a device exposing mass storage is in its bootloader")
+
+        # And it rides along on the failure, which is the only thing a blocked run prints.
+        report.checks.append(preflight.Check("declared_nodes", preflight.BLOCK, "missing"))
+        self.assertIn("ABSENT dut", str(preflight.PreflightFailed(report)))
+        self.assertIn("ABSENT dut", report.summary())
+
+
 class TestReleaseOwnership(unittest.TestCase):
     def test_only_the_opener_may_close_a_connection(self):
         """Closing someone else's connection leaves a handle they know nothing about.
