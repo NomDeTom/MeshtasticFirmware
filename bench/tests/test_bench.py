@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import tempfile
 import time
+import os
 import threading
 import types
 import unittest
@@ -892,21 +893,47 @@ class TestDashboardScript(unittest.TestCase):
 
         from bench import server
 
-        match = re.search(r"<script>(.*?)</script>", server.PAGE, re.S)
+        match = re.search(r"<script>(.*?)</script>", server.page(), re.S)
         self.assertIsNotNone(match, "the page must carry a script block")
         return match.group(1)
 
     def test_no_string_literal_is_broken_across_a_line(self):
-        """PAGE is a non-raw Python string, so an escape meant for the browser needs
-        doubling. A single backslash-n is consumed by Python, lands as a real newline
-        inside a JS string literal, and takes the entire dashboard down with a syntax
-        error - the page renders nothing at all, which is how this shipped twice.
+        """A newline inside a JS string literal is a syntax error that blanks the page.
+
+        This used to be a Python-escaping problem: the page lived in a non-raw string, so
+        every backslash had to survive Python before reaching the browser, and one that
+        did not took the whole dashboard down - twice. The page is now an ordinary .html
+        file with no Python layer to cross, but the check stays: the failure it catches
+        is invisible except in a browser console, and cheap to keep watching for.
         """
         offenders = [
             line for line in self._script().splitlines()
             if line.rstrip().endswith('("') or line.rstrip().endswith("('")
         ]
         self.assertEqual(offenders, [], "string literal split across a newline")
+
+    def test_the_page_is_a_file_and_is_reread_when_it_changes(self):
+        """It has to be a real file, or prettier cannot lint it and an edit needs a restart.
+
+        The server is deliberately long-lived - it outlives many runs - so a page baked in
+        at import time meant every dashboard change waited on a restart of the one process
+        that is meant never to stop.
+        """
+        from bench import server
+
+        self.assertTrue(server._PAGE_PATH.is_file(), "the dashboard must be its own file")
+        self.assertEqual(server._PAGE_PATH.suffix, ".html")
+        first = server.page()
+        self.assertIn("<script>", first)
+
+        original = server._PAGE_PATH.read_text(encoding="utf-8")
+        try:
+            server._PAGE_PATH.write_text(original + "<!-- edited -->", encoding="utf-8")
+            os.utime(server._PAGE_PATH, (time.time() + 2, time.time() + 2))
+            self.assertIn("<!-- edited -->", server.page(), "an edit must be picked up")
+        finally:
+            server._PAGE_PATH.write_text(original, encoding="utf-8")
+            server._page_cache = None
 
     def test_the_script_parses(self):
         """Parse it for real where node is available; skip cleanly where it is not."""
