@@ -788,6 +788,132 @@ class TestDevicesView(unittest.TestCase):
         self.assertEqual(row["recorded_port"], "COM16")
 
 
+
+class TestPortLeaks(unittest.TestCase):
+    """A port opened and never released is invisible until something else is denied it.
+
+    That has cost this bench whole runs: preflight checked a board through a throwaway
+    owner, walked away still holding the handle, and the run's own flash was refused
+    "Access is denied" seconds later against healthy hardware.
+    """
+
+    def owner(self):
+        from bench import ports
+
+        return ports.PortOwner(BenchNode("dut", "SER", "dut"))
+
+    def test_a_lease_gives_the_interface_back(self):
+        from bench import ports
+
+        o = self.owner()
+        o.iface = object()
+        ports._LIVE.add(o)
+        with o.lease("work", budget_s=5.0):
+            pass
+        self.assertIsNotNone(o.iface, "a non-rebooting lease returns the interface")
+        self.assertIn("dut", [p["node"] for p in ports.open_ports()])
+        o.release("done")
+        self.assertNotIn("dut", [p["node"] for p in ports.open_ports()])
+
+    def test_a_lease_that_raises_still_releases(self):
+        from bench import ports
+
+        o = self.owner()
+        o.iface = object()
+        ports._LIVE.add(o)
+        with self.assertRaises(RuntimeError):
+            with o.lease("work", budget_s=5.0):
+                raise RuntimeError("operation blew up")
+        # The interface must not be stranded by a failure - that is exactly when a port
+        # gets left open, because nobody is around to tidy up.
+        o.release("done")
+        self.assertEqual(
+            [p for p in ports.open_ports() if p["node"] == "dut"], [])
+
+    def test_a_rebooting_lease_leaves_nothing_open(self):
+        from bench import ports
+
+        o = self.owner()
+        o.iface = object()
+        ports._LIVE.add(o)
+        with o.lease("flash", budget_s=5.0, reboots=True):
+            pass
+        self.assertIsNone(o.iface)
+        self.assertEqual([p for p in ports.open_ports() if p["node"] == "dut"], [])
+
+    def test_the_context_manager_releases_on_exit(self):
+        from bench import ports
+
+        with self.owner() as o:
+            o.iface = object()
+            ports._LIVE.add(o)
+        self.assertIsNone(o.iface, "a short-lived owner must not strand a port")
+
+    def test_every_short_lived_owner_outside_ports_is_released(self):
+        """Static check: an owner built inside a function must be closed on every path.
+
+        Catches a new call site that forgets entirely, which the runtime checks above
+        cannot - those only cover paths a test actually walks.
+
+        Constructors are exempt on purpose. An owner built in __init__ belongs to the
+        object holding it and is released by that object's own teardown, which is the
+        observer's arrangement; requiring a release in the constructor would be asking
+        for the port to be closed the moment it was opened.
+        """
+        import ast
+
+        offenders = []
+        for path in Path("bench").glob("*.py"):
+            if path.name == "ports.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for func in [n for n in ast.walk(tree)
+                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+                if func.name == "__init__":
+                    continue
+                builds = [
+                    n for n in ast.walk(func)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", getattr(n.func, "id", None)) == "PortOwner"
+                ]
+                if not builds:
+                    continue
+                body = ast.dump(func)
+                released = (
+                    "attr='release'" in body
+                    or "attr='expect_reboot'" in body
+                    or any(isinstance(n, (ast.With, ast.AsyncWith)) for n in ast.walk(func))
+                )
+                if not released:
+                    offenders.append(f"{path.name}:{func.name}")
+        self.assertEqual(
+            offenders, [], "PortOwner built without a release, a with-block or a reboot")
+
+    def test_stopping_the_observer_leaves_no_port_open(self):
+        """The long-lived case the static check deliberately exempts.
+
+        The observer builds an owner per node in its constructor and holds them for the
+        session, so nothing about that construction can be checked statically. What can
+        be checked is the promise it makes instead: stopping it releases everything.
+        """
+        from bench import observer as observer_mod
+        from bench import ports, streams
+
+        rec = streams.Recorder(Path(tempfile.mkdtemp()))
+        nodes = [BenchNode("leaky", "SER-LEAKY", "dut")]
+        obs = observer_mod.Observer(rec, nodes)
+        held = obs.held["leaky"]
+        held.owner.iface = object()  # pretend capture opened it
+        ports._LIVE.add(held.owner)
+        self.assertIn("leaky", [p["node"] for p in ports.open_ports()])
+
+        obs.stop()
+        rec.close()
+        self.assertEqual(
+            [p for p in ports.open_ports() if p["node"] == "leaky"], [],
+            "observer.stop() must release every port it held")
+
+
 class TestLbtScenarioTable(unittest.TestCase):
     def test_table_is_valid_and_deduplicates(self):
         from bench.scenarios.lbt import SCENARIOS

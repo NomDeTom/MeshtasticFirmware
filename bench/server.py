@@ -592,7 +592,7 @@ cursor:pointer;font:inherit;font-size:.85rem;padding:.4rem .8rem}
 .step>summary{cursor:pointer;display:flex;gap:.55rem;align-items:baseline;
 list-style:none;padding:.15rem 0}
 .step>summary::-webkit-details-marker{display:none}
-.step>summary::before{content:"B8";color:var(--mut);width:.8em;flex:none;
+.step>summary::before{content:"▸";color:var(--mut);width:.8em;flex:none;
 transition:transform .12s}
 .step[open]>summary::before{transform:rotate(90deg)}
 .step.leaf>summary::before{content:"";}
@@ -672,6 +672,18 @@ let TAB = new URLSearchParams(location.search).get("tab") || "overview";
 // Which nodes the tail shows. null means "all", an empty Set means "none" - the two are
 // different questions and both are worth being able to ask.
 let TAILNODES = null;
+// Which <details> the reader has opened, by id. The page redraws on a timer and would
+// otherwise collapse a section a second or two after it was opened.
+const OPEN = new Set();
+
+function keepOpenState(root) {
+  root.querySelectorAll("details[data-id]").forEach(d => {
+    if (OPEN.has(d.dataset.id)) d.open = true;
+    d.addEventListener("toggle", () => {
+      d.open ? OPEN.add(d.dataset.id) : OPEN.delete(d.dataset.id);
+    });
+  });
+}
 
 function showTab(name) {
   TAB = name;
@@ -802,12 +814,14 @@ async function refresh() {
       const body = kids.map(k =>
         `<div class=kid>${mark(k)}<span class=nm>${esc(k.name)}</span>${timing(k)}
          <span class=k>${esc(k.outcome || k.detail || "")}</span></div>`).join("");
-      return `<details class="step${kids.length ? "" : " leaf"}"${openNow ? " open" : ""}>
+      if (openNow) OPEN.add(st.id);
+      return `<details class="step${kids.length ? "" : " leaf"}" data-id="${esc(st.id)}"${OPEN.has(st.id) ? " open" : ""}>
         <summary>${mark(st)}<span class=nm>${esc(st.name)}</span>${timing(st)}
           <span class=k>${esc(st.outcome || st.detail || "")}</span></summary>
         ${kids.length ? `<div class=kids>${body}</div>` : ""}
       </details>`;
     }).join("");
+    keepOpenState($("#plan"));
   } else {
     $("#planline").textContent = "no schedule recorded for this run";
     $("#plan").innerHTML = "";
@@ -853,7 +867,7 @@ async function refresh() {
       ["reconnects", cell(d.reconnects)],
       ["last error", d.last_error ? `<span class=warnrow>${esc(d.last_error)}</span>` : "-"],
     ];
-    return `<details class=step${d.recorded_state === "leased" ? " open" : ""}>
+    return `<details class=step data-id="dev:${esc(d.node)}"${OPEN.has("dev:" + d.node) ? " open" : ""}>
       <summary>${presence}<span class=nm><b>${esc(d.node)}</b></span>
         <span class=bud>${esc(d.port || "-")}</span>
         <span class=k>${esc(d.observed_model || d.declared_board || "")}</span></summary>
@@ -861,6 +875,7 @@ async function refresh() {
         `<div class=kid><span class="mark m-planned">${k}</span><span class=nm>${v}</span></div>`
       ).join("")}</div></details>`;
   }).join("") || "<span class=k>no devices</span>";
+  keepOpenState($("#ports"));
 
   const cap = (s.capture||{}).streams || {};
   rows("#cap", Object.entries(cap).map(([k,v]) => ({name:k, ...v})), [

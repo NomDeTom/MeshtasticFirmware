@@ -291,7 +291,14 @@ def _check_nodes(report: PreflightReport, nodes: Iterable[devices.BenchNode]) ->
     for node in nodes:
         if node.never_flash or not node.board or not node.present():
             continue
-        actual = hardware.read_hw_model(ports.PortOwner(node))
+        # Released explicitly. A lease leaves the interface with its owner, and this
+        # owner is a throwaway - so without the release, preflight walks away holding the
+        # port and the run's own flash is denied it seconds later.
+        owner = ports.PortOwner(node)
+        try:
+            actual = hardware.read_hw_model(owner)
+        finally:
+            owner.release("preflight", abandon=False)
         if actual is None:
             unknown.append(node.name)
         elif hardware.normalize(actual) != hardware.normalize(node.board):

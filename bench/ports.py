@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
@@ -55,6 +56,20 @@ ST_LEASED = "leased"  # exclusively leased to one operation
 ST_REBOOTING = "rebooting"  # deliberately going away; do not touch
 ST_LOST = "lost"  # was held, dropped unexpectedly
 ST_GAVE_UP = "gave_up"  # reconnect ceiling exhausted; needs a human
+
+
+# Every owner currently holding an open interface. A port left open is invisible until
+# something else needs it and is denied - which has cost this bench a run more than once -
+# so the set is kept live and can be asserted on directly.
+_LIVE: "weakref.WeakSet[PortOwner]" = weakref.WeakSet()
+
+
+def open_ports() -> list[dict]:
+    """Owners holding an open interface right now, for leak checks and diagnostics."""
+    return [
+        {"node": o.node.name, "port": o.port, "state": o.state}
+        for o in list(_LIVE) if o.iface is not None
+    ]
 
 
 class PortBusy(RuntimeError):
@@ -240,12 +255,20 @@ class PortOwner:
                 return budget.result(TIMED_OUT if error is None else FAILED, error or "open timed out")
 
             self.iface = iface
+            _LIVE.add(self)
             self.observe(iface)
             if self.dropped_at is not None:
                 self._event("capture_gap_closed", gap_s=round(time.time() - self.dropped_at, 1))
                 self.dropped_at = None
             self._to(ST_HELD, "capture open")
             return budget.result(OK, self.port or "")
+
+    def __enter__(self) -> "PortOwner":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        """Release on the way out, so a short-lived owner cannot strand a port."""
+        self.release("owner closed", abandon=False)
 
     def note_raw_capture(self, port: str | None, running: bool) -> None:
         """Record that a raw-serial reader owns this port instead of an API connection.
@@ -268,6 +291,7 @@ class PortOwner:
         """
         with self._lock:
             iface, self.iface = self.iface, None
+            _LIVE.discard(self)
             if iface is not None:
                 _let_go(iface, abandon=abandon)
             self.dropped_at = time.time()
@@ -300,6 +324,7 @@ class PortOwner:
                 self._event("lease_start", reason=reason, budget_s=budget_s)
                 iface = self.iface
                 self.iface = None  # ownership moves to the caller for the lease
+                _LIVE.discard(self)
 
             if iface is None:
                 iface, error = self._open(self.resolve(), budget.remaining)
@@ -319,6 +344,8 @@ class PortOwner:
                     self._to(ST_REBOOTING, f"{reason} (device rebooting)")
                 else:
                     self.iface = iface
+                    if iface is not None:
+                        _LIVE.add(self)
                     self._to(acquired_state if acquired_state == ST_HELD else ST_IDLE, "lease ended")
                 self._event(
                     "lease_end", reason=reason, elapsed_s=round(budget.elapsed, 1),
