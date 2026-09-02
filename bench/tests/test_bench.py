@@ -587,6 +587,33 @@ class TestLbtScenarioTable(unittest.TestCase):
         for row in SCENARIOS:
             self.assertTrue(row.assertions, f"{row.id} could never fail")
 
+    def test_every_log_pattern_matches_a_string_that_exists_in_the_firmware(self):
+        """A pattern matching nothing is a silent NOT OBSERVED generator.
+
+        The row runs, the capture is fine, the count is zero, and the verdict reads as a
+        firmware miss. Cheap to catch here: assert the strings are actually in the tree
+        the bench is pointed at.
+        """
+        import re
+
+        from bench.scenarios.lbt import SCENARIOS
+
+        src_root = Path("src")
+        if not src_root.is_dir():  # running outside a firmware checkout
+            self.skipTest("no src/ tree to check patterns against")
+        source = "".join(
+            f.read_text(encoding="utf-8", errors="replace") for f in src_root.rglob("*.cpp")
+        )
+
+        missing = []
+        for scenario_row in SCENARIOS:
+            for assertion in scenario_row.assertions:
+                for attr in ("patterns", "event_patterns", "trial_patterns"):
+                    for pattern in getattr(assertion, attr, []) or []:
+                        if not re.search(pattern, source):
+                            missing.append(f"{scenario_row.id}/{assertion.name}: {pattern!r}")
+        self.assertEqual(missing, [], "patterns that match nothing in the firmware")
+
     def test_the_trace_gated_row_declares_its_requirement(self):
         from bench.scenarios.lbt import SCENARIOS
 
