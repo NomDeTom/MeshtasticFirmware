@@ -120,13 +120,22 @@ class Runner:
         the whole run, which is worse than showing nothing - it reads as work that never
         started.
         """
-        if kind not in ("flash_phase", "provision_phase") or not self._schedule:
+        if kind not in ("flash_phase", "provision_phase", "preflight_phase"):
             return
-        node, phase = payload.get("node"), payload.get("phase")
-        if not node or not phase or not self.current_row:
+        if not self._schedule:
             return
-        what = "flash" if kind == "flash_phase" else "provision"
-        step_id = f"{self.current_row}:{what}:{node}:{phase}"
+        phase = payload.get("phase")
+        if not phase:
+            return
+        if kind == "preflight_phase":
+            # Preflight is a stage, not a row: it has no scenario and no node.
+            step_id = f"preflight:{phase}"
+        else:
+            node = payload.get("node")
+            if not node or not self.current_row:
+                return
+            what = "flash" if kind == "flash_phase" else "provision"
+            step_id = f"{self.current_row}:{what}:{node}:{phase}"
         status = payload.get("status")
         if status == "running":
             self._schedule.begin(step_id)
@@ -237,8 +246,12 @@ class Runner:
         the node already holds the required state.
         """
         plan = ports.Schedule()
-        plan.add("preflight", "preflight", 60.0,
-                 "checks that refuse a run which cannot prove anything", kind="preflight")
+        step = plan.add("preflight", "preflight", preflight.PREFLIGHT_BUDGET_S,
+                        "checks that refuse a run which cannot prove anything",
+                        kind="preflight")
+        # Named by preflight itself, so the plan and the checks cannot drift apart.
+        for name, budget in preflight.PHASES:
+            step.add(f"preflight:{name}", name, budget)
 
         sha, dirty = manifest_mod.git_state(self.config.firmware_root)
         distinct = {
@@ -392,7 +405,10 @@ class Runner:
 
         self._begin("preflight")
         report = preflight.run_preflight(
-            nodes=self.config.nodes, firmware_root=self.config.firmware_root
+            nodes=self.config.nodes, firmware_root=self.config.firmware_root,
+            on_phase=lambda name, status: self.event(
+                "preflight_phase", phase=name, status=status
+            ),
         )
         self._finish("preflight", ports.FAILED_STEP if report.blocked else ports.DONE)
         report.write(self.run_dir / "preflight.json")

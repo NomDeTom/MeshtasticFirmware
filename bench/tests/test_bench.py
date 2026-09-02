@@ -522,11 +522,16 @@ class TestSchedulePhases(unittest.TestCase):
         names lived in two places they drifted, and the sub-steps read "planned" for the
         whole run - work that plainly ran, reported as never started.
         """
-        from bench import flasher, provision, runner
+        from bench import flasher, preflight, provision, runner
 
         source = Path("bench/runner.py").read_text(encoding="utf-8")
         self.assertIn("flasher.PHASES", source)
         self.assertIn("provision.PHASES", source)
+
+        self.assertIn("preflight.PHASES", source)
+        pre_src = Path("bench/preflight.py").read_text(encoding="utf-8")
+        for name, _ in preflight.PHASES:
+            self.assertIn(f'"{name}"', pre_src, f"{name} is planned but never reported")
 
         flash_src = Path("bench/flasher.py").read_text(encoding="utf-8")
         for name, _ in flasher.PHASES:
