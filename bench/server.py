@@ -49,6 +49,10 @@ from . import streams
 # ~10s, and a build blocks nothing, so a minute is generous without being useless.
 DEAD_AFTER_S = 60.0
 
+# When this daemon started. The title asks about the bench process, which outlives any
+# individual run and is the thing an unattended watcher wants to know is still up.
+SERVER_STARTED_AT = time.time()
+
 RUNNING = "RUNNING"
 FINISHED = "FINISHED"
 FAILED = "FAILED"
@@ -297,6 +301,7 @@ def read_state(run_dir: Path) -> dict:
         "images": _images(manifest),
         "preflight": preflight,
         "heartbeat_age_s": beat_age,
+        "server_started_at": SERVER_STARTED_AT,
         "generated_at": time.time(),
     }
 
@@ -472,6 +477,7 @@ class _Handler(BaseHTTPRequestHandler):
                     self._text("no runs yet under " + str(self.root))
                 else:
                     self._json({"status": NO_RUN, "root": str(self.root),
+                                "server_started_at": SERVER_STARTED_AT,
                                 "runs": discover_runs(self.root)})
                 return
 
@@ -550,8 +556,14 @@ PAGE = """<!doctype html>
 <style>
 :root{--bg:#f6f7f9;--fg:#141a22;--mut:#5a6673;--rule:#dce1e7;--card:#fff;
 --ok:#1e7a5f;--bad:#a8541e;--warn:#8a6d1f;--accent:#1f5f8b}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1419;--fg:#e4e8ed;--mut:#9aa5b1;
---rule:#242d37;--card:#161c23;--ok:#4fbf97;--bad:#e08a4a;--warn:#d4b352;--accent:#5aa9db}}
+/* Three states, not two: an explicit choice stamps data-theme on the root, and the
+   default "system" setting stamps nothing - so the media query has to be guarded, or a
+   reader who picks light on a dark OS gets dark anyway. */
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1419;
+--fg:#e4e8ed;--mut:#9aa5b1;--rule:#242d37;--card:#161c23;--ok:#4fbf97;--bad:#e08a4a;
+--warn:#d4b352;--accent:#5aa9db}}
+:root[data-theme="dark"]{--bg:#0f1419;--fg:#e4e8ed;--mut:#9aa5b1;--rule:#242d37;
+--card:#161c23;--ok:#4fbf97;--bad:#e08a4a;--warn:#d4b352;--accent:#5aa9db}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .wrap{max-width:1100px;margin:0 auto;padding:1.5rem}
@@ -610,6 +622,14 @@ text-transform:uppercase}
 color:var(--mut);cursor:pointer;font:inherit;font-size:.76rem;padding:.15rem .6rem}
 .chip[aria-pressed="true"]{border-color:var(--accent);color:var(--fg)}
 .chip:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.top{display:flex;align-items:flex-start;gap:1rem}
+.top>div{flex:1;min-width:0}
+#theme{background:var(--card);border:1px solid var(--rule);border-radius:4px;
+color:var(--mut);cursor:pointer;font:inherit;font-size:.78rem;padding:.25rem .6rem;
+flex:none;white-space:nowrap}
+#theme:hover{color:var(--fg);border-color:var(--rule-strong,var(--mut))}
+#theme:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.started{color:var(--mut);font-size:.78rem;font-weight:400;margin-left:.6rem}
 .run{background:var(--card);border:1px solid var(--rule);border-radius:4px;
 padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;gap:.5rem;align-items:baseline}
 .run:hover{border-color:var(--rule-strong)}
@@ -618,7 +638,10 @@ padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;ga
 .run:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
 <div class="wrap">
-  <h1>bench status</h1>
+  <div class=top>
+    <div><h1>bench status<span class=started id=started></span></h1></div>
+    <button id=theme type=button title="cycle: system, light, dark">theme</button>
+  </div>
   <div id="runs" class="runs"></div>
   <p class="sub" id="ident">loading&hellip;</p>
   <nav class="tabs" id="tabs">
@@ -664,6 +687,26 @@ padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;ga
 </div>
 <script>
 const $ = s => document.querySelector(s);
+
+// Theme cycles system -> light -> dark. "system" stamps nothing, which is what lets
+// prefers-color-scheme still apply; the other two stamp the root so an explicit choice
+// beats the OS in both directions. Kept per browser, and applied before the first paint
+// so the page does not flash the wrong ground.
+const THEMES = ["system", "light", "dark"];
+function applyTheme(name) {
+  try { localStorage.setItem("bench-theme", name); } catch (e) { /* private window */ }
+  if (name === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", name);
+  const btn = $("#theme");
+  if (btn) btn.textContent = name === "system" ? "theme: auto" : "theme: " + name;
+}
+let THEME = "system";
+try { THEME = localStorage.getItem("bench-theme") || "system"; } catch (e) { /* ignore */ }
+applyTheme(THEME);
+$("#theme").onclick = () => {
+  THEME = THEMES[(THEMES.indexOf(THEME) + 1) % THEMES.length];
+  applyTheme(THEME);
+};
 // Which run is being shown. null = whichever is most recently active, which is what an
 // unattended watcher wants by default: the thing happening now.
 let RUN = new URLSearchParams(location.search).get("run");
@@ -738,6 +781,13 @@ async function refresh() {
   if (s.runs && !s.runs.length) { $("#ident").textContent = "waiting for a run to appear under " + esc(s.root||""); return; }
 
   const id = s.identity || {}, p = s.position || {}, c = s.counts || {};
+  if (s.server_started_at) {
+    const t = new Date(s.server_started_at * 1000);
+    const up = Math.max(0, Math.round((Date.now() / 1000) - s.server_started_at));
+    const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60);
+    $("#started").textContent =
+      ` · bench process started ${t.toLocaleString()} (up ${h}h${String(m).padStart(2, "0")}m)`;
+  }
   $("#ident").innerHTML =
     `<span class="pill ${esc(s.status)}">${esc(s.status)}</span> ` +
     `${cell(id.git && id.git.sha)}${id.git && id.git.dirty ? " <span class=warnrow>(dirty)</span>" : ""} &middot; ` +
