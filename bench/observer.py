@@ -178,7 +178,7 @@ class Observer:
             if held.raw_mode:
                 held.owner.note_raw_capture(held.port, running=False)
             else:
-                held.owner.release(reason, abandon=abandon)
+                held.owner.release(reason, abandon=abandon, by="capture")
         held.iface = None
         held.connected = False
         self.recorder.event("connection_closed", node=held.node.name, reason=reason)

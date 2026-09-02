@@ -158,6 +158,8 @@ class PortOwner:
         self.port: str | None = None
         self.reconnects = 0
         self._reboot_until = 0.0
+        # Who opened the connection currently held. Only they may close it.
+        self._opened_by: str | None = None
         self.dropped_at: float | None = None
         self.last_error: str | None = None
         # What the DEVICE said it is, once anything has asked. Distinct from the board
@@ -242,7 +244,7 @@ class PortOwner:
 
     # -- capture ---------------------------------------------------------------
 
-    def hold(self, budget_s: float = 60.0) -> Result:
+    def hold(self, budget_s: float = 60.0, by: str = "capture") -> Result:
         """Open the port for continuous capture. The observer's normal state."""
         with self._lock:
             if self.state == ST_LEASED:
@@ -274,6 +276,7 @@ class PortOwner:
             if self.dropped_at is not None:
                 self._event("capture_gap_closed", gap_s=round(time.time() - self.dropped_at, 1))
                 self.dropped_at = None
+            self._opened_by = by
             self._to(ST_HELD, "capture open")
             return budget.result(OK, self.port or "")
 
@@ -303,20 +306,34 @@ class PortOwner:
     def _rebooting_now(self) -> bool:
         return self.state == ST_REBOOTING and time.time() < self._reboot_until
 
-    def release(self, reason: str, abandon: bool = False) -> None:
-        """Stop holding the port.
+    def release(self, reason: str, abandon: bool = False, by: str | None = None) -> None:
+        """Stop holding the port. Only whoever opened it may.
 
         `abandon` skips the close entirely, and is mandatory whenever the device is
         going away - a reboot, a DFU entry. close() blocks on a node the library is
         still draining, so it runs on a thread that gets abandoned anyway, and that
         thread keeps the exclusive handle against whatever needs the port next.
+
+        `by` names the caller. A caller that did not open this connection is refused:
+        closing someone else's leaves a handle in a thread they know nothing about, and
+        the port then locks out the operation that legitimately owns the device. One
+        check that merely wanted to know whether a node was answering closed capture's
+        connection this way, and the flash's own wait for the node to come back then
+        failed against a port it could not reopen. Passing no name keeps the old
+        unchecked behaviour for callers that own the owner outright.
         """
         with self._lock:
+            if by is not None and self._opened_by is not None and by != self._opened_by:
+                self._event(
+                    "release_refused", reason=reason, by=by, opened_by=self._opened_by
+                )
+                return
             iface, self.iface = self.iface, None
             _LIVE.discard(self)
             if iface is not None:
                 _let_go(iface, abandon=abandon)
             self.dropped_at = time.time()
+            self._opened_by = None
             if abandon:
                 self._mark_rebooting(reason)
             else:
@@ -380,6 +397,16 @@ class PortOwner:
                     budget_s=budget_s, overran=budget.elapsed > budget_s, reboots=reboots,
                 )
             self._busy.release()
+
+    def drop_cached_connection(self, reason: str) -> None:
+        """Close capture's connection so the next read comes from the device.
+
+        The client library answers config reads from its own cache, so verifying what a
+        node actually stored means starting a new connection. That is a real need and it
+        genuinely closes a connection this caller did not open - so it gets its own name
+        rather than going through release() and quietly defeating the ownership check.
+        """
+        self.release(reason, abandon=False)
 
     def expect_reboot(self, reason: str, window_s: float = REBOOT_HOLDOFF_S) -> None:
         """Declare that the device is about to vanish, and drop the handle for it."""

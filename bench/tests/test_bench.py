@@ -455,6 +455,31 @@ class TestDevicesAndObserver(unittest.TestCase):
         self.assertIn("still readable", " ".join(r.drain()))
 
 
+class TestReleaseOwnership(unittest.TestCase):
+    def test_only_the_opener_may_close_a_connection(self):
+        """Closing someone else's connection leaves a handle they know nothing about.
+
+        The close runs on a thread that keeps the port, so the operation that legitimately
+        owns the device then cannot reopen it. Measured: a check that only wanted to know
+        whether a node was answering closed capture's connection, and the flash's wait for
+        that node to come back failed on a PermissionError against its own port.
+        """
+        from bench import ports
+        from bench.devices import BenchNode
+
+        owner = ports.PortOwner(BenchNode("dut", "SER", "dut"))
+        owner.iface = object()
+        owner._opened_by = "capture"
+        owner._to(ports.ST_HELD, "capture open")
+
+        owner.release("nosy check", by="flash")
+        self.assertIsNotNone(owner.iface, "a stranger must not close capture's connection")
+        self.assertEqual(owner.state, ports.ST_HELD)
+
+        owner.release("capture stopping", by="capture")
+        self.assertIsNone(owner.iface, "the opener may always close its own")
+
+
 class TestSchedulePhases(unittest.TestCase):
     def test_the_plan_and_the_work_use_the_same_phase_names(self):
         """A plan that names work differently from the thing doing it can never mark it.
@@ -595,9 +620,15 @@ class TestProvisionerReadBack(unittest.TestCase):
             def expect_reboot(self, reason):
                 calls.append(("rebooting", reason))
 
-            def release(self, reason, abandon=False):
+            def release(self, reason, abandon=False, by=None):
                 # A read-back is not a reboot: the handle must be closed, not abandoned.
                 calls.append(("released", reason, abandon))
+
+            def drop_cached_connection(self, reason):
+                # Named rather than a bare release: the client answers config reads from
+                # its own cache, so a verify has to start a fresh connection - the one
+                # case where closing a connection you did not open is the point.
+                calls.append(("released", reason, False))
 
             def wait_answering(self, budget_s=180.0):
                 from bench import ports

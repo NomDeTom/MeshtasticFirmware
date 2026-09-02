@@ -455,7 +455,7 @@ def _answers_as_application(owner: ports.PortOwner) -> bool:
         return True
     result = owner.hold(budget_s=20.0)
     if result.ok:
-        owner.release("dfu attribution check", abandon=False)
+        owner.release("dfu attribution check", abandon=False, by="flash")
         return True
     return False
 
