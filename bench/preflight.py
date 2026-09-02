@@ -11,6 +11,7 @@ preflight failure is loud and specific, and names the fix.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -22,6 +23,63 @@ from . import devices, hardware, platform_probe, ports
 BLOCK = "block"
 WARN = "warn"
 OK = "ok"
+
+# The four groups of work, named once. The run schedule plans against this list and
+# run_preflight reports against it, so a reader can see where the fifty seconds went
+# rather than watching one opaque bar. Budgets are worst cases: the witness check alone
+# can spend twenty-five seconds listening, and reading a hardware model off each node
+# costs a connection apiece.
+HOST, NODES, WITNESS, INVENTORY = (
+    "host + toolchain",
+    "nodes",
+    "witness",
+    "bus inventory",
+)
+PHASES = (
+    (HOST, 20.0),
+    (NODES, 120.0),
+    (WITNESS, 40.0),
+    (INVENTORY, 30.0),
+)
+PREFLIGHT_BUDGET_S = sum(b for _, b in PHASES)
+
+
+class _Phase:
+    """Reports which group preflight is in. A no-op when nobody is listening.
+
+    A context manager so a group cannot be left open by an early return or a raise -
+    preflight has both, and a phase left running would report the check that refused the
+    run as the one still working.
+    """
+
+    def __init__(self, sink=None) -> None:
+        self._sink = sink
+        self._open: str | None = None
+
+    def _say(self, name: str, status: str) -> None:
+        if self._sink:
+            self._sink(name, status)
+
+    def enter(self, name: str) -> None:
+        self.close()
+        self._open = name
+        self._say(name, "running")
+
+    def close(self, status: str = "done") -> None:
+        if self._open:
+            self._say(self._open, status)
+            self._open = None
+
+    @contextmanager
+    def __call__(self, name: str):
+        self.enter(name)
+        try:
+            yield
+        except BaseException:
+            self.close("failed")
+            raise
+        else:
+            self.close("done")
 
 
 @dataclass
@@ -155,9 +213,12 @@ def run_preflight(
     firmware_root: Path | None = None,
     require_uhubctl: bool = False,
     require_nrfutil: bool = False,
+    on_phase=None,
 ) -> PreflightReport:
     """Run every stage -1 check. Never raises for a failed check; inspect .blocked."""
     report = PreflightReport()
+    phase = _Phase(on_phase)
+    phase.enter(HOST)
 
     # -- platform, and the WSL refusal ------------------------------------------
     try:
@@ -180,6 +241,7 @@ def run_preflight(
                 fix="run the bench from Windows directly, or a native Linux host",
             )
         )
+        phase.close("failed")
         return report  # nothing below is meaningful on a refused platform
 
     # -- firmware tree ----------------------------------------------------------
@@ -252,11 +314,21 @@ def run_preflight(
         )
 
     # -- nodes ------------------------------------------------------------------
+    phase.enter(NODES)
     report.nodes = devices.describe(nodes)
     _check_nodes(report, nodes)
 
+    # -- the witness ------------------------------------------------------------
+    # Its own group because it is the slow one: up to twenty-five seconds listening to a
+    # node that may simply be quiet. Lumped in with the node checks, that time looked
+    # like slow hardware probing.
+    phase.enter(WITNESS)
+    _check_witness(report, nodes)
+
     # -- the inventory ----------------------------------------------------------
+    phase.enter(INVENTORY)
     _gather_resources(report, info, nodes, root)
+    phase.close()
 
     return report
 
@@ -482,6 +554,17 @@ def _check_nodes(report: PreflightReport, nodes: Iterable[devices.BenchNode]) ->
         report.checks.append(
             Check("node_boards", OK, "every flashable node matches its declared board")
         )
+
+
+def _check_witness(report: PreflightReport, nodes: Iterable[devices.BenchNode]) -> None:
+    """The observer's own checks, split out because they are the slow ones.
+
+    Up to twenty-five seconds can go into listening to a node that may simply be quiet,
+    and inside the node checks that time read as slow hardware probing.
+    """
+    nodes = list(nodes)
+    if not nodes:
+        return
 
     # A passive observer that emits nothing witnesses nothing. Its whole value is being
     # the one instrument that sees the air with no client attached - but that depends on
