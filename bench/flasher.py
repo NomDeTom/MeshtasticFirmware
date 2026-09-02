@@ -418,6 +418,12 @@ def _answers_as_application(owner: ports.PortOwner) -> bool:
     only honest test is whether the node answers as a Meshtastic node. Opening the port
     to ask is a read, not a touch: no reset, nothing that could strand it.
     """
+    # A node capture is already talking to is answering, and that is the whole question.
+    # Asking again would mean closing a connection this check did not open - which it did
+    # once, and the closing handle then held the port against the flash's own wait for
+    # the node to come back. Never release what you did not acquire.
+    if owner.state == ports.ST_HELD:
+        return True
     result = owner.hold(budget_s=20.0)
     if result.ok:
         owner.release("dfu attribution check", abandon=False)

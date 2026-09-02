@@ -455,6 +455,27 @@ class TestDevicesAndObserver(unittest.TestCase):
         self.assertIn("still readable", " ".join(r.drain()))
 
 
+class TestDfuAttribution(unittest.TestCase):
+    def test_the_attribution_check_never_releases_what_it_did_not_open(self):
+        """A mounted UF2 volume says some board is in DFU, never which one.
+
+        The check asks whether THIS node still answers as an application. When capture
+        already holds it the answer is yes and nothing more need be done - asking again
+        closed capture's own connection, and the closing handle held the port against
+        the flash's later wait for the node to return.
+        """
+        from bench import flasher, ports
+        from bench.devices import BenchNode
+
+        owner = ports.PortOwner(BenchNode("dut", "SER", "dut"))
+        owner.iface = object()
+        owner._to(ports.ST_HELD, "capture open")
+        owner.release = lambda *a, **k: self.fail("must not release capture's connection")
+
+        self.assertTrue(flasher._answers_as_application(owner))
+        self.assertEqual(owner.state, ports.ST_HELD)
+
+
 class TestReconnectBudget(unittest.TestCase):
     def test_a_refusal_does_not_spend_the_retry_ceiling(self):
         """The ceiling is for a node that will not come back, not for "not now".
