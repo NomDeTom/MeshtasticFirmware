@@ -178,7 +178,19 @@ class Observer:
             raise TimeoutError(f"connect to {port} did not return in {CONNECT_TIMEOUT_S}s")
         return result["iface"]
 
-    def _close(self, held: Held, reason: str) -> None:
+    def _close(self, held: Held, reason: str, abandon: bool = False) -> None:
+        """Release a node's capture. `abandon` skips the close entirely.
+
+        Closing a node that is rebooting is worse than useless: iface.close() blocks on a
+        device the library is still draining, so it runs on a thread that gets abandoned
+        anyway - and that thread keeps the exclusive serial port, which then blocks the
+        reconnect that is supposed to follow. Measured as "did not become ready within
+        90s" against hardware that was fine. When the device is going away, drop the
+        reference and let the OS reclaim the handle on re-enumeration.
+        """
+        return self._close_impl(held, reason, abandon)
+
+    def _close_impl(self, held: Held, reason: str, abandon: bool = False) -> None:
         if held.serial_reader is not None:
             try:
                 held.serial_reader.stop()
@@ -188,9 +200,15 @@ class Observer:
         iface, held.iface = held.iface, None
         held.connected = False
         if iface is not None:
-            t = threading.Thread(target=_safe_close, args=(iface,), daemon=True)
-            t.start()
-            t.join(CLOSE_TIMEOUT_S)
+            if abandon:
+                try:
+                    iface._wantExit = True  # keep its reader quiet on the way out
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                t = threading.Thread(target=_safe_close, args=(iface,), daemon=True)
+                t.start()
+                t.join(CLOSE_TIMEOUT_S)
         self.recorder.event("connection_closed", node=held.node.name, reason=reason)
 
     # -- health / reconnect ----------------------------------------------------
@@ -278,7 +296,7 @@ class Observer:
         with self._lock:
             return name in self._suspended
 
-    def mark_dropped(self, name: str, reason: str) -> None:
+    def mark_dropped(self, name: str, reason: str, abandon: bool = False) -> None:
         """Tell the observer a node is about to go away (a flash, a reboot).
 
         Called before a deliberate disconnection so the gap is attributed rather than
@@ -288,7 +306,7 @@ class Observer:
         if held is None:
             return
         with self._lock:
-            self._close(held, reason=reason)
+            self._close(held, reason=reason, abandon=abandon)
             held.dropped_at = time.time()
             held.attempts = 0
         self.recorder.event("capture_gap_opened", node=name, reason=reason)
