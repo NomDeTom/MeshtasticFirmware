@@ -164,7 +164,14 @@ class Flasher:
                 node=node.name,
             )
         finally:
-            _close_quietly(iface)
+            # Deliberately NOT closed. The node has just been told to reboot into its
+            # bootloader, so the device behind this handle is going away - and
+            # iface.close() blocks on a node the library is still draining, leaving an
+            # abandoned thread holding the exclusive port. That handle then blocks the
+            # NEXT row's flash for minutes against healthy hardware. Dropping the
+            # reference lets the OS reclaim it when the device re-enumerates, which it is
+            # about to do.
+            _abandon(iface)
 
         return self._finish_dfu(node, image, before, started)
 
@@ -674,5 +681,13 @@ def _close_quietly(iface) -> None:
 def _safe_close_iface(iface) -> None:
     try:
         iface.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _abandon(iface) -> None:
+    """Drop an interface without closing it, for a device that is disappearing anyway."""
+    try:
+        iface._wantExit = True  # stop the reader thread logging a disconnect as an error
     except Exception:  # noqa: BLE001
         pass
