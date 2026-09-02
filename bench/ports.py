@@ -240,6 +240,13 @@ class PortOwner:
         with self._lock:
             if self.state == ST_LEASED:
                 return Result(BUSY, "leased to another operation", 0.0, budget_s)
+            if self.state == ST_REBOOTING:
+                # The device was deliberately sent away - into DFU, or through a config
+                # reboot - and reconnecting to it now takes the port from the operation
+                # that is waiting for it to come back. Measured: capture reclaimed a node
+                # nineteen seconds after it was told to enter DFU, and the bootloader
+                # never appeared. Only wait_answering may bring a node back from here.
+                return Result(BUSY, "device is rebooting; awaiting its return", 0.0, budget_s)
             if self.iface is not None:
                 return Result(OK, "already held", 0.0, budget_s)
 
@@ -368,6 +375,11 @@ class PortOwner:
         """
         budget = Budget(budget_s)
         attempt = 0
+        with self._lock:
+            # This is the operation responsible for bringing the node back, so it is the
+            # one that clears the rebooting hold-off.
+            if self.state == ST_REBOOTING:
+                self._to(ST_IDLE, "awaiting return")
         while not budget.spent:
             attempt += 1
             result = self.hold(min(budget.remaining, 30.0))

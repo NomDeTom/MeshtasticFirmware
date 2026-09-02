@@ -555,6 +555,29 @@ class TestPortOwnership(unittest.TestCase):
                 offenders.append(path.name)
         self.assertEqual(offenders, [], "only ports.py may open a device")
 
+    def test_a_rebooting_node_is_off_limits_to_everyone(self):
+        """Ownership spans the operation, not the open handle.
+
+        A flash gives up its lease the moment it commands DFU: the node is leaving, and
+        closing the handle would block on a device that is already gone. The sixty
+        seconds after that are the most fragile in the whole run, and under lease rules
+        alone they are unowned - capture's health loop asked to reconnect, was correctly
+        told yes, and took the port out from under a node on its way into the
+        bootloader. Measured: reconnect at +18.7s, no bootloader ever appeared.
+        """
+        from bench import ports
+        from bench.devices import BenchNode
+
+        owner = ports.PortOwner(BenchNode("dut", "SER", "dut"))
+        owner.iface = object()
+        with owner.lease("flash", budget_s=5.0, reboots=True):
+            pass
+
+        self.assertEqual(owner.state, ports.ST_REBOOTING)
+        refused = owner.hold(1.0)
+        self.assertEqual(refused.outcome, ports.BUSY)
+        self.assertIn("rebooting", refused.detail)
+
     def test_a_lease_is_exclusive(self):
         from bench import ports
 
