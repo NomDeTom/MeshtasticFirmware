@@ -152,14 +152,48 @@ class Flasher:
 
             before = devices.snapshot_ports()
             self._emit("enter_dfu", node=node.name, port=port)
-            try:
-                iface.localNode.enterDFUMode()
-            except Exception as exc:  # noqa: BLE001 - the node reboots out from under it
-                self._emit("enter_dfu_raised", node=node.name, error=str(exc)[:120])
+            # Bounded. The node reboots into its bootloader partway through this call, so
+            # the library can be left waiting on a device that is no longer there - and an
+            # unbounded call here hangs the whole run with no error and no timeout. The
+            # command is fire-and-forget anyway: whether it worked is decided by a
+            # bootloader appearing, never by this returning.
+            self._call_bounded(
+                lambda: iface.localNode.enterDFUMode(),
+                timeout=20.0,
+                label="enterDFUMode",
+                node=node.name,
+            )
         finally:
             _close_quietly(iface)
 
         return self._finish_dfu(node, image, before, started)
+
+    def _call_bounded(self, fn, timeout: float, label: str, node: str) -> bool:
+        """Run a call that may never return, and carry on when it does not.
+
+        Anything issued to a node that is about to reboot can block forever inside the
+        library. The thread is abandoned rather than joined, which is safe here only
+        because the device it is stuck on is going away.
+        """
+        import threading
+
+        done: dict = {}
+
+        def _go() -> None:
+            try:
+                fn()
+                done["ok"] = True
+            except Exception as exc:  # noqa: BLE001 - the node vanishes mid-call
+                done["error"] = str(exc)[:140]
+
+        t = threading.Thread(target=_go, daemon=True, name=f"bench-{label}")
+        t.start()
+        t.join(timeout)
+        if "error" in done:
+            self._emit(f"{label}_raised", node=node, error=done["error"])
+        elif "ok" not in done:
+            self._emit(f"{label}_timeout", node=node, after_s=timeout)
+        return bool(done.get("ok"))
 
     def _open_with_retry(self, node, port: str, total: float = 90.0):
         """Open the node, allowing for one that is still coming back up.
@@ -428,7 +462,16 @@ class Flasher:
         self._emit("uf2_volume", node=node.name, volume=str(volume))
 
         try:
-            shutil.copy2(image, volume / image.name)
+            # Read once, write once. shutil.copy2 streams in small chunks, and when the
+            # source is an external USB drive and the destination is a USB bootloader
+            # volume on the same bus, the two contend: measured at 177 seconds for 1.5 MB.
+            # Buffering the whole image first makes it a single read and a single write -
+            # and the image is small enough that holding it in memory costs nothing.
+            payload = image.read_bytes()
+            target = volume / image.name
+            with target.open("wb") as fh:
+                fh.write(payload)
+                fh.flush()
         except OSError as exc:
             # The bootloader reboots the instant it has the image, so the copy can report
             # a write error on a volume that has already gone. Treat the node coming back
