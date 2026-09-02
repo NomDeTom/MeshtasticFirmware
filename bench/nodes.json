@@ -20,7 +20,11 @@
       "role": "observer",
       "board": "HELTEC_MESH_POCKET",
       "notes": [
-        "stock firmware, never flashed and never commanded",
+        "stock firmware, never flashed and never commanded DURING a run",
+        "provisioned once out of band, 2026-09-02, and not touched since:",
+        "  modem_preset LONG_SLOW - on LONG_FAST it is on a different spreading factor and hears nothing the bench does",
+        "  tx_enabled false, tx_power 10 - a passive witness must not key its transmitter; it also stays out of the duty-cycle budget",
+        "  debug_log_api_enabled FALSE - this is the one that matters. With it on, logs go to whichever client attaches and raw serial sees nothing at all",
         "a different board on purpose: it is the naive-client instrument, so it must not share the DUT's build"
       ]
     }

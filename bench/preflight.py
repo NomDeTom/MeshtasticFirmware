@@ -202,11 +202,17 @@ def run_preflight(
 
 
 
-def _listen_briefly(port: str, seconds: float = 5.0) -> int:
-    """Bytes a node emits on its own, without being asked anything.
+def _listen_briefly(port: str, seconds: float = 25.0) -> int:
+    """Bytes a node emits on its own, returning as soon as any arrive.
 
     Read-only by construction: opening the port at the console baud and reading is not a
     protobuf touch, so it cannot silence the very output it is checking for.
+
+    The window has to be generous because console output is bursty, not continuous - a
+    node logging a block every twenty seconds is silent for most short samples. Measured
+    here: three of four five-second windows caught nothing from a node that was working
+    perfectly, while twenty seconds caught it every time. Returning on the first byte
+    keeps the healthy case fast; only a genuinely silent node waits out the full window.
     """
     import time
 
@@ -216,7 +222,7 @@ def _listen_briefly(port: str, seconds: float = 5.0) -> int:
         with serial.Serial(port, 115200, timeout=1) as handle:
             deadline = time.monotonic() + seconds
             total = 0
-            while time.monotonic() < deadline:
+            while total == 0 and time.monotonic() < deadline:
                 total += len(handle.read(512))
             return total
     except Exception:  # noqa: BLE001 - an unreadable port is simply "heard nothing"
@@ -325,7 +331,7 @@ def _check_nodes(report: PreflightReport, nodes: Iterable[devices.BenchNode]) ->
         heard = _listen_briefly(node.resolve())
         if heard > 0:
             report.checks.append(
-                Check("observer_output", OK, f"{node.name} emitted {heard} bytes in 5s")
+                Check("observer_output", OK, f"{node.name} is emitting console output ({heard} bytes)")
             )
         else:
             report.checks.append(
