@@ -325,7 +325,10 @@ class Provisioner:
         Reconnecting settles both.
         """
         self._emit("provision_refresh", node=node.name)
-        self.observer.owner_for(node.name).expect_reboot("config_readback")
+        # A clean release, NOT expect_reboot: the node is staying put, so its handle must
+        # actually be closed. Abandoning one on a device that never leaves keeps the port
+        # owned by this process and every later open is denied.
+        self.observer.owner_for(node.name).release("config_readback", abandon=False)
         self._wait_ready(node, reconnect=True)
 
     def read_settled_state(self, node: devices.BenchNode) -> SettledState:
