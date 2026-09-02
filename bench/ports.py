@@ -350,18 +350,39 @@ class PortOwner:
 
 
 def _let_go(iface: Any, abandon: bool) -> None:
-    """Release an interface, closing only when the device is staying put."""
+    """Release an interface. `abandon` skips the protocol close, never the OS handle.
+
+    This distinction cost a whole matrix. close() is slow because it performs a protocol
+    disconnect and can block forever on a node the library is still draining - so on a
+    device that is going away we skip it. But skipping the WHOLE close leaks the serial
+    handle, and the port then stays owned by this process: every later open fails with
+    "Access is denied", the owner gives up, and six rows report a healthy node as dead.
+
+    So abandon means "do not wait for a graceful goodbye", not "do not hang up". The
+    underlying stream is closed directly, which is immediate and frees the port.
+    """
     if iface is None:
         return
     if abandon:
         try:
-            iface._wantExit = True  # keep its reader from logging the vanish as an error
+            iface._wantExit = True  # stop its reader logging the vanish as an error
         except Exception:  # noqa: BLE001
             pass
+        # Release the OS handle without the protocol drain that makes close() block.
+        for attr in ("stream", "_serial", "serial"):
+            handle = getattr(iface, attr, None)
+            if handle is not None and hasattr(handle, "close"):
+                try:
+                    handle.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                break
         return
     thread = threading.Thread(target=_safe_close, args=(iface,), daemon=True)
     thread.start()
-    thread.join(5.0)  # abandoned past this; the OS reclaims it on re-enumeration
+    thread.join(5.0)  # abandoned past this; the handle is released below regardless
+    if thread.is_alive():
+        _let_go(iface, abandon=True)  # the graceful close hung: take the handle back
 
 
 def _safe_close(iface: Any) -> None:

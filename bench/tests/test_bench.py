@@ -496,6 +496,10 @@ class TestProvisionerReadBack(unittest.TestCase):
             def expect_reboot(self, reason):
                 calls.append(("rebooting", reason))
 
+            def release(self, reason, abandon=False):
+                # A read-back is not a reboot: the handle must be closed, not abandoned.
+                calls.append(("released", reason, abandon))
+
             def wait_answering(self, budget_s=180.0):
                 from bench import ports
 
@@ -520,7 +524,10 @@ class TestProvisionerReadBack(unittest.TestCase):
         # The reconnect must happen BEFORE the read, or the read returns the client's
         # cached config and a write that never stuck looks identical to one that did.
         kinds = [c[0] for c in calls]
-        self.assertLess(kinds.index("rebooting"), kinds.index("read"))
+        self.assertLess(kinds.index("released"), kinds.index("read"))
+        # And it must be a real close - abandoning a node that stays put leaks the port.
+        released = [c for c in calls if c[0] == "released"][0]
+        self.assertFalse(released[2], "a read-back must close, not abandon")
 
 
 class TestPortOwnership(unittest.TestCase):
