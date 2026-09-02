@@ -115,6 +115,27 @@ class Flasher:
 
         started = time.time()
         owner = self._owner(node)
+        # A node already sitting in its bootloader cannot be commanded into it, and must
+        # not be touched to try: that is the state where a touch strands hardware. Finish
+        # the flash it is already halfway through instead.
+        standing = platform_probe.find_uf2_volume()
+        if standing is not None and not _answers_as_application(owner):
+            self._emit(
+                "flash_start", node=node.name, image=str(image),
+                serial=node.serial_number, budget_s=TRANSFER_S + RETURN_S,
+                already_in_dfu=str(standing),
+            )
+            owner.expect_reboot("already in DFU", window_s=TRANSFER_S + RETURN_S)
+            uf2 = image if image.suffix.lower() == ".uf2" else _sibling_uf2(image)
+            if uf2 is None:
+                raise FlashError(f"{node.name} is in DFU and no .uf2 was built")
+            result = self._copy_uf2_to_volume(node, owner, uf2, standing)
+            result.duration_s = round(time.time() - started, 1)
+            self._emit("flash_done", **result.to_dict())
+            if not result.ok:
+                raise FlashError(f"{node.name}: {result.detail}")
+            return result
+
         self._emit(
             "flash_start", node=node.name, image=str(image),
             serial=node.serial_number, budget_s=FLASH_BUDGET_S,
@@ -153,10 +174,18 @@ class Flasher:
                 hardware.assert_compatible(node.name, device_model, image_hw_model)
 
                 before = devices.snapshot_ports()
+                before["uf2_volume"] = platform_probe.find_uf2_volume()
                 self._emit("enter_dfu", node=node.name, port=owner.port)
                 # Bounded: the node reboots partway through this call, so the library can
                 # be left waiting on a device that is no longer there.
-                _call_bounded(lambda: iface.localNode.enterDFUMode(), 20.0)
+                outcome, detail = _call_bounded(lambda: iface.localNode.enterDFUMode(), 20.0)
+                # Not fatal on its own: the node reboots partway through this call, so a
+                # raise is as consistent with success as with failure. But it is the only
+                # account of why no bootloader turned up, and discarding it turned a
+                # refused DFU request into a silent sixty-second wait.
+                self._emit(
+                    "enter_dfu_result", node=node.name, outcome=outcome, detail=detail
+                )
                 return before
         except ports.PortBusy as exc:
             raise NodeNotAnswering(
@@ -169,12 +198,18 @@ class Flasher:
     ) -> FlashResult:
         """Wait for whichever DFU interface appears, then put the image through it."""
         budget = ports.Budget(DFU_APPEAR_S)
+        # A volume that was already mounted when the flash began belongs to some other
+        # device - a node stranded in its bootloader from an earlier row, most likely.
+        # Writing this image there would flash the wrong board, so only a volume that
+        # APPEARS in response to the command just issued counts as this node's.
+        standing = before.get("uf2_volume")
         dfu_port = None
         volume = None
         while dfu_port is None and volume is None and not budget.spent:
             time.sleep(1.0)
             dfu_port = devices.looks_like_dfu(before)
-            volume = platform_probe.find_uf2_volume()
+            found = platform_probe.find_uf2_volume()
+            volume = found if found is not None and found != standing else None
 
         if dfu_port is not None and image.suffix.lower() == ".zip":
             return self._serial_dfu_upload(node, owner, image, dfu_port)
@@ -311,26 +346,46 @@ class Flasher:
         return result.ok
 
 
-def _call_bounded(fn: Callable[[], Any], timeout: float) -> bool:
-    """Run a call that may never return, and carry on when it does not.
+def _answers_as_application(owner: ports.PortOwner) -> bool:
+    """Is this node running its firmware, rather than sitting in its bootloader?
+
+    A mounted UF2 volume says SOME board is in DFU, never which one, and this board keeps
+    the same USB PID in both modes - so presence on the bus settles nothing either. The
+    only honest test is whether the node answers as a Meshtastic node. Opening the port
+    to ask is a read, not a touch: no reset, nothing that could strand it.
+    """
+    result = owner.hold(budget_s=20.0)
+    if result.ok:
+        owner.release("dfu attribution check", abandon=False)
+        return True
+    return False
+
+
+def _call_bounded(fn: Callable[[], Any], timeout: float) -> tuple[str, str]:
+    """Run a call that may never return, and say what became of it.
 
     Anything issued to a node that is about to reboot can block forever inside the
     library. Abandoning the thread is safe here only because the device it is stuck on is
     going away.
+
+    Returns (outcome, detail) rather than a bool because all three endings mean different
+    things and the caller has to record which one happened. A swallowed raise here cost
+    a sixty-second wait for a bootloader that was never asked for.
     """
     done: dict = {}
 
     def _go() -> None:
         try:
             fn()
-            done["ok"] = True
-        except Exception:  # noqa: BLE001 - the node vanishes mid-call
-            done["raised"] = True
+            done["outcome"] = "returned"
+        except Exception as exc:  # noqa: BLE001 - the node vanishes mid-call
+            done["outcome"] = "raised"
+            done["detail"] = f"{type(exc).__name__}: {exc}"
 
     thread = threading.Thread(target=_go, daemon=True, name="bench-bounded-call")
     thread.start()
     thread.join(timeout)
-    return bool(done.get("ok"))
+    return done.get("outcome", "hung"), str(done.get("detail", ""))[:200]
 
 
 def _sibling_uf2(package: Path) -> Path | None:
