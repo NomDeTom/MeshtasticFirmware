@@ -27,6 +27,12 @@ Four properties follow, and they are constraints rather than features.
 Coverage is the whole pipeline, build included - an image compiling for 29 minutes is
 the majority of a run's wall clock, and a status page that starts at the first row shows
 nothing for the part that takes longest.
+
+It is one long-lived daemon over a runs ROOT, not a view of a single run. Start it once
+and leave it: runs appear and disappear underneath it, a build-only invocation shows up
+the moment it writes its first log line, and nothing needs restarting when the next run
+begins. That is what makes it usable for headless and unattended work - the thing you
+check on is already running before the thing you are checking on starts.
 """
 
 from __future__ import annotations
@@ -62,6 +68,105 @@ STAGE_MEDIANS_S = {
     "4-execute": 150,
     "5-cycle": 30,
 }
+
+
+
+# Files that mark a directory as a bench run. A build-only invocation writes only a
+# manifest and a build log, and must still be visible - it is the longest stage.
+RUN_MARKERS = ("state.json", "results.json", "manifest.json", "events.jsonl", "builds")
+
+
+def is_run_dir(path: Path) -> bool:
+    return path.is_dir() and any((path / m).exists() for m in RUN_MARKERS)
+
+
+def discover_runs(root: Path) -> list[dict]:
+    """Every run under `root`, newest activity first.
+
+    Rebuilt on each request, so a run created after the server started is picked up with
+    no restart. That is the property headless use depends on.
+    """
+    root = Path(root)
+    if is_run_dir(root):
+        return [_run_row(root)]  # pointed straight at one run
+    if not root.is_dir():
+        return []
+    rows = [_run_row(p) for p in sorted(root.iterdir()) if is_run_dir(p)]
+    rows.sort(key=lambda r: r["last_activity"] or 0, reverse=True)
+    return rows
+
+
+def _run_row(path: Path) -> dict:
+    """A cheap summary for the run list - no stream parsing, so listing stays fast."""
+    state = _load_json(path / "state.json") or {}
+    results = _load_json(path / "results.json") or {}
+    beats = list(streams.read_stream(path, streams.STATUS))
+    beat_age = None
+    if beats:
+        beat_age = round(time.time() - (beats[-1].get("ts") or 0), 1)
+
+    counts = state.get("counts") or {}
+    for row in results.values():
+        if not counts:
+            break
+    if not counts and results:
+        counts = {}
+        for row in results.values():
+            v = row.get("verdict", "INVALID")
+            counts[v] = counts.get(v, 0) + 1
+
+    return {
+        "name": path.name,
+        "path": str(path),
+        "status": _liveness(state, results, beat_age),
+        "stage": state.get("stage"),
+        "row": state.get("row"),
+        "done": state.get("done", len(results)),
+        "total": state.get("total"),
+        "counts": counts,
+        "note": state.get("operator_note"),
+        "started_at": state.get("started_at"),
+        "last_activity": _last_activity(path),
+        "heartbeat_age_s": beat_age,
+    }
+
+
+def _last_activity(path: Path) -> float | None:
+    """Newest mtime among the run's artifacts.
+
+    Only used for ordering the list. Deliberately NOT used as a freshness claim: on
+    Windows a file being written keeps a stale mtime, which is why the build log reports
+    growth instead.
+    """
+    newest = None
+    for name in ("state.json", "results.json", "events.jsonl", "manifest.json"):
+        f = path / name
+        try:
+            if f.exists():
+                newest = max(newest or 0, f.stat().st_mtime)
+        except OSError:
+            continue
+    try:
+        for log in (path / "builds").glob("*.log"):
+            newest = max(newest or 0, log.stat().st_mtime)
+    except OSError:
+        pass
+    return newest
+
+
+def resolve_run(root: Path, name: str | None) -> Path | None:
+    """Pick the run to show: the one asked for, else the most recently active."""
+    root = Path(root)
+    if is_run_dir(root):
+        return root
+    if name:
+        candidate = root / name
+        # Refuse anything that escapes the root - the name arrives from a URL.
+        if is_run_dir(candidate) and root.resolve() in candidate.resolve().parents:
+            return candidate
+        return None
+    rows = discover_runs(root)
+    return Path(rows[0]["path"]) if rows else None
 
 
 def read_state(run_dir: Path) -> dict:
@@ -266,21 +371,45 @@ def one_line(state: dict) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    run_dir: Path = Path(".")
+    root: Path = Path(".")
+
+    def _run(self) -> Path | None:
+        from urllib.parse import parse_qs, urlparse
+
+        wanted = parse_qs(urlparse(self.path).query).get("run", [None])[0]
+        return resolve_run(self.root, wanted)
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's interface
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         try:
-            if path == "/status.json":
-                self._json(read_state(self.run_dir))
-            elif path == "/status.txt":
-                self._text(one_line(read_state(self.run_dir)))
-            elif path == "/tail.json":
-                self._json({"logs": tail(self.run_dir, streams.LOGS),
-                            "events": tail(self.run_dir, streams.EVENTS, 20),
-                            "build": build_tail(self.run_dir)})
-            elif path in ("/", "/index.html"):
+            if path == "/runs.json":
+                self._json({"root": str(self.root), "runs": discover_runs(self.root)})
+                return
+            if path in ("/", "/index.html"):
                 self._html(PAGE)
+                return
+
+            run = self._run()
+            if run is None:
+                # No run yet is a normal state for a daemon started before any work.
+                if path == "/status.txt":
+                    self._text("no runs yet under " + str(self.root))
+                else:
+                    self._json({"status": NO_RUN, "root": str(self.root),
+                                "runs": discover_runs(self.root)})
+                return
+
+            if path == "/status.json":
+                payload = read_state(run)
+                payload["runs"] = discover_runs(self.root)
+                self._json(payload)
+            elif path == "/status.txt":
+                self._text(one_line(read_state(run)))
+            elif path == "/tail.json":
+                self._json({"run": run.name,
+                            "logs": tail(run, streams.LOGS),
+                            "events": tail(run, streams.EVENTS, 20),
+                            "build": build_tail(run)})
             else:
                 self.send_error(404, "not found")
         except Exception as exc:  # noqa: BLE001 - a broken render must not kill the server
@@ -315,14 +444,20 @@ class _Handler(BaseHTTPRequestHandler):
         return  # the server's own access log is noise on a bench console
 
 
-def serve(run_dir: Path, port: int = 871, host: str = "127.0.0.1") -> ThreadingHTTPServer:
-    """Start the status server. Returns it; call shutdown() to stop.
+def serve(root: Path, port: int = 871, host: str = "127.0.0.1") -> ThreadingHTTPServer:
+    """Start the status daemon over a runs ROOT. Returns it; call shutdown() to stop.
 
-    Binds to loopback by default. The page is a convenience; GET /status.json is the
-    contract, and it is a plain static document so polling costs nothing.
+    `root` is normally `bench/runs`, holding many runs, but a single run directory works
+    too. Runs are discovered per request, so this can be started before anything exists
+    and never needs restarting as work comes and goes.
+
+    Binds to loopback by default; pass host="0.0.0.0" to watch an unattended bench from
+    another machine. The page is a convenience - GET /status.json is the contract, and it
+    is a plain static document so polling costs nothing.
     """
-    handler = type("_BoundHandler", (_Handler,), {"run_dir": Path(run_dir)})
+    handler = type("_BoundHandler", (_Handler,), {"root": Path(root)})
     server = ThreadingHTTPServer((host, port), handler)
+    server.daemon_threads = True
     return server
 
 
@@ -365,9 +500,17 @@ pre{margin:0;white-space:pre-wrap;font-size:.8rem;color:var(--mut);max-height:16
 .k{color:var(--mut)}
 .big{font-size:1.35rem;font-weight:600}
 .wait{border-left:3px solid var(--accent);padding-left:.7rem}
+.runs{display:flex;flex-wrap:wrap;gap:.4rem;margin:0 0 .7rem}
+.run{background:var(--card);border:1px solid var(--rule);border-radius:4px;
+padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;gap:.5rem;align-items:baseline}
+.run:hover{border-color:var(--rule-strong)}
+.run[aria-current="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.run small{color:var(--mut)}
+.run:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
 <div class="wrap">
   <h1>bench status</h1>
+  <div id="runs" class="runs"></div>
   <p class="sub" id="ident">loading&hellip;</p>
   <div class="card wait" id="wait" hidden></div>
   <h2>position</h2>
@@ -389,6 +532,10 @@ pre{margin:0;white-space:pre-wrap;font-size:.8rem;color:var(--mut);max-height:16
 </div>
 <script>
 const $ = s => document.querySelector(s);
+// Which run is being shown. null = whichever is most recently active, which is what an
+// unattended watcher wants by default: the thing happening now.
+let RUN = new URLSearchParams(location.search).get("run");
+const q = p => RUN ? `${p}?run=${encodeURIComponent(RUN)}` : p;
 const esc = v => String(v ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cell = v => v === null || v === undefined ? "<span class=k>-</span>" : esc(v);
 const secs = v => v === null || v === undefined ? "-" : Math.round(v) + "s";
@@ -399,10 +546,30 @@ function rows(id, data, cols) {
     || "<tr><td colspan=9 class=k>nothing yet</td></tr>";
 }
 
+function drawRuns(runs) {
+  const box = $("#runs");
+  if (!runs || !runs.length) { box.innerHTML = "<span class=k>no runs yet</span>"; return; }
+  box.innerHTML = runs.map(r => {
+    const cur = (RUN ? r.name === RUN : r === runs[0]);
+    const pos = r.total ? `${r.done}/${r.total}` : (r.stage || "");
+    return `<button class=run role=link aria-current="${cur}" data-run="${esc(r.name)}">
+      <b>${esc(r.name)}</b>
+      <span class="pill ${esc((r.status||"").split(" ")[0])}">${esc(r.status)}</span>
+      <small>${esc(pos)}</small></button>`;
+  }).join("");
+  box.querySelectorAll(".run").forEach(b => b.onclick = () => {
+    RUN = b.dataset.run;
+    history.replaceState(null, "", `?run=${encodeURIComponent(RUN)}`);
+    refresh();
+  });
+}
+
 async function refresh() {
   let s;
-  try { s = await (await fetch("status.json", {cache:"no-store"})).json(); }
-  catch (e) { $("#ident").textContent = "status unavailable - is the run directory there?"; return; }
+  try { s = await (await fetch(q("status.json"), {cache:"no-store"})).json(); }
+  catch (e) { $("#ident").textContent = "status unavailable - is the server still up?"; return; }
+  drawRuns(s.runs);
+  if (s.runs && !s.runs.length) { $("#ident").textContent = "waiting for a run to appear under " + esc(s.root||""); return; }
 
   const id = s.identity || {}, p = s.position || {}, c = s.counts || {};
   $("#ident").innerHTML =
@@ -456,7 +623,7 @@ async function refresh() {
          : (d.age_s > 120 ? `<span class=FAIL>${secs(d.age_s)} ago</span>` : secs(d.age_s) + " ago")]);
 
   try {
-    const t = await (await fetch("tail.json", {cache:"no-store"})).json();
+    const t = await (await fetch(q("tail.json"), {cache:"no-store"})).json();
     $("#tail").textContent = (t.logs||[]).slice(-25)
       .map(r => `${(r.node||"-").padEnd(8)} ${(r.line||r.msg||"").slice(0,150)}`).join("\\n") || "no lines yet";
   } catch (e) { $("#tail").textContent = "tail unavailable"; }

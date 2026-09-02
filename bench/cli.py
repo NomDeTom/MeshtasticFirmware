@@ -133,11 +133,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     r = runner.Runner(config)
     http = None
     if args.serve:
-        http = server.serve(run_dir, port=args.port)
+        # If a daemon is already watching this runs root, use it rather than binding a
+        # second one - the durable server is the point, and two of them is a footgun.
         import threading
+        import urllib.request
 
-        threading.Thread(target=http.serve_forever, daemon=True).start()
-        print(f"status: http://127.0.0.1:{args.port}/  (read-only)", flush=True)
+        already = False
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{args.port}/runs.json", timeout=2)
+            already = True
+        except Exception:  # noqa: BLE001 - nothing listening is the normal case
+            pass
+        if already:
+            print(f"status: http://127.0.0.1:{args.port}/?run={run_dir.name}"
+                  "  (existing daemon)", flush=True)
+        else:
+            http = server.serve(run_dir.parent, port=args.port)
+            threading.Thread(target=http.serve_forever, daemon=True).start()
+            print(f"status: http://127.0.0.1:{args.port}/?run={run_dir.name}"
+                  "  (read-only)", flush=True)
     try:
         summary = r.run()
     finally:
@@ -149,9 +163,23 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    run_dir = _run_dir(args)
-    http = server.serve(run_dir, port=args.port, host=args.host)
-    print(f"serving {run_dir} at http://{args.host}:{args.port}/  (read-only)")
+    """One long-lived daemon over the runs root.
+
+    Start it once and leave it. Runs are discovered per request, so it can be started
+    before anything exists and never needs restarting as builds and runs come and go -
+    which is the whole point for headless and unattended work.
+    """
+    root = Path(args.root) if args.root else (
+        Path(args.run_dir) if args.run_dir else DEFAULT_RUN_ROOT
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    http = server.serve(root, port=args.port, host=args.host)
+    shown = "0.0.0.0" if args.host == "0.0.0.0" else args.host
+    print(f"bench status: http://{shown}:{args.port}/   (read-only, watching {root})")
+    for run in server.discover_runs(root):
+        print(f"  {run['name']:16} {run['status']:9} {run.get('stage') or ''}")
+    if not server.discover_runs(root):
+        print("  (no runs yet - they appear here as soon as one starts)")
     try:
         http.serve_forever()
     except KeyboardInterrupt:
@@ -244,13 +272,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--only", nargs="*", help="run only these scenario ids")
     s.add_argument("--skip-flash", action="store_true")
     s.add_argument("--skip-provision", action="store_true")
-    s.add_argument("--serve", action="store_true", help="also serve status")
-    s.add_argument("--port", type=int, default=871)
+    s.add_argument("--serve", action="store_true",
+                   help="serve status, reusing a running daemon if there is one")
+    s.add_argument("--port", type=int, default=8730)
     s.set_defaults(func=cmd_run)
 
-    s = sub.add_parser("serve", help="read-only status server")
-    s.add_argument("--port", type=int, default=871)
-    s.add_argument("--host", default="127.0.0.1")
+    s = sub.add_parser("serve", help="read-only status daemon over all runs")
+    s.add_argument("--root", default=None,
+                   help=f"runs root to watch (default {DEFAULT_RUN_ROOT})")
+    s.add_argument("--port", type=int, default=8730)
+    s.add_argument("--host", default="127.0.0.1",
+                   help="0.0.0.0 to watch an unattended bench from another machine")
     s.set_defaults(func=cmd_serve)
 
     s = sub.add_parser("status", help="one-line summary")
