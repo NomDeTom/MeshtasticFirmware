@@ -120,6 +120,14 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     nodes = load_nodes(Path(args.nodes)) if Path(args.nodes).exists() else []
     report = preflight.run_preflight(nodes=nodes, firmware_root=Path(args.firmware_root))
     print(report.summary())
+    # Written where the dashboard reads it, not only printed here. A blocked preflight is
+    # the one time nothing else will write this file - the run refuses to start - and it
+    # is also the time someone most wants to see which node went missing and off what
+    # bus. Standing on the terminal that happened to run it is no use to a headless bench.
+    run_dir = _run_dir(args)
+    if run_dir.is_dir() or args.write:
+        report.write(run_dir / "preflight.json")
+        print(f"  -> written to {run_dir / 'preflight.json'}")
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))
     return 1 if report.blocked else 0
@@ -335,6 +343,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_nodes)
 
     s = sub.add_parser("preflight", help="stage -1 checks")
+    s.add_argument("--write", action="store_true",
+                   help="create the run directory if it does not exist and record there")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_preflight)
 
