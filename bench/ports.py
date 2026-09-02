@@ -214,6 +214,17 @@ class PortOwner:
             self._to(ST_HELD, "capture open")
             return budget.result(OK, self.port or "")
 
+    def note_raw_capture(self, port: str | None, running: bool) -> None:
+        """Record that a raw-serial reader owns this port instead of an API connection.
+
+        The never-commanded observer is captured on raw serial, so it never takes a hold.
+        Without this its owner reports `absent` on the dashboard while the node is in fact
+        being watched perfectly well - a display that contradicts the evidence it is
+        rendering is worse than no display.
+        """
+        self.port = port
+        self._to(ST_HELD if running else ST_ABSENT, "raw serial capture")
+
     def release(self, reason: str, abandon: bool = False) -> None:
         """Stop holding the port.
 

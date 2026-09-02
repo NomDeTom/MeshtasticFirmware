@@ -147,6 +147,7 @@ class Observer:
                 return False, f"{type(exc).__name__}: {exc}"
             held.connected = True
             held.attempts = 0
+            held.owner.note_raw_capture(port, running=True)
             self.recorder.event(
                 "connection_established", node=held.node.name, port=port, mode="raw"
             )
@@ -173,8 +174,11 @@ class Observer:
             except Exception:  # noqa: BLE001
                 pass
             held.serial_reader = None
-        if held.owner is not None and not held.raw_mode:
-            held.owner.release(reason, abandon=abandon)
+        if held.owner is not None:
+            if held.raw_mode:
+                held.owner.note_raw_capture(held.port, running=False)
+            else:
+                held.owner.release(reason, abandon=abandon)
         held.iface = None
         held.connected = False
         self.recorder.event("connection_closed", node=held.node.name, reason=reason)
