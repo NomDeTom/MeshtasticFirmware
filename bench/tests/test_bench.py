@@ -455,6 +455,28 @@ class TestDevicesAndObserver(unittest.TestCase):
         self.assertIn("still readable", " ".join(r.drain()))
 
 
+class TestSchedulePhases(unittest.TestCase):
+    def test_the_plan_and_the_work_use_the_same_phase_names(self):
+        """A plan that names work differently from the thing doing it can never mark it.
+
+        Every child step under a flash or a provision is addressed by name. When those
+        names lived in two places they drifted, and the sub-steps read "planned" for the
+        whole run - work that plainly ran, reported as never started.
+        """
+        from bench import flasher, provision, runner
+
+        source = Path("bench/runner.py").read_text(encoding="utf-8")
+        self.assertIn("flasher.PHASES", source)
+        self.assertIn("provision.PHASES", source)
+
+        flash_src = Path("bench/flasher.py").read_text(encoding="utf-8")
+        for name, _ in flasher.PHASES:
+            self.assertIn(f'"{name}"', flash_src, f"{name} is planned but never reported")
+        prov_src = Path("bench/provision.py").read_text(encoding="utf-8")
+        for name, _ in provision.PHASES:
+            self.assertIn(f'"{name}"', prov_src, f"{name} is planned but never reported")
+
+
 class TestDfuAttribution(unittest.TestCase):
     def test_the_attribution_check_never_releases_what_it_did_not_open(self):
         """A mounted UF2 volume says some board is in DFU, never which one.

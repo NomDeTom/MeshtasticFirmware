@@ -30,6 +30,7 @@ pskLen 1 and an empty channel name - cannot be mistaken for a real one.
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -41,6 +42,29 @@ READY_TIMEOUT_S = 180.0
 
 # Worst case for one node's full prep: reset, several writes and two reboots,
 # each of which can wait out a readiness budget. Quoted by the run schedule.
+# The phases, named once. The run schedule plans against this list and the provisioner
+# reports against it, so neither can drift into calling the same work something else.
+RESET, REGION, LORA, ROLE, FLAGS, REBOOT, CHANNELS, VERIFY = (
+    "factory reset",
+    "region + preset",
+    "other lora fields",
+    "device role",
+    "diagnostic flags",
+    "reboot to commit",
+    "channels",
+    "read back + verify",
+)
+PHASES = (
+    (RESET, 120.0),
+    (REGION, 45.0),
+    (LORA, 45.0),
+    (ROLE, 45.0),
+    (FLAGS, 45.0),
+    (REBOOT, 60.0),
+    (CHANNELS, 30.0),
+    (VERIFY, 30.0),
+)
+
 PROVISION_BUDGET_S = 420.0
 SETTLE_AFTER_WRITE_S = 2.0
 VERIFY_POLL_S = 2.0
@@ -109,6 +133,46 @@ class SettledState:
         return not self.errors
 
 
+class _Phase:
+    """Reports which planned phase a node's provisioning is in, and how it ended.
+
+    A context manager so a phase cannot be left open by an exception: the schedule
+    showing work as still running when it failed is the same lie as showing it as never
+    started. Phases the spec does not ask for are simply never entered, and the plan
+    reports them skipped rather than pretending they ran.
+    """
+
+    def __init__(self, provisioner: "Provisioner", node: str) -> None:
+        self._p = provisioner
+        self._node = node
+        self._open: str | None = None
+
+    def _say(self, name: str, status: str) -> None:
+        self._p._emit("provision_phase", node=self._node, phase=name, status=status)
+
+    def enter(self, name: str) -> None:
+        """Open a phase that has no natural end - the last one, which the caller ends."""
+        self.close()
+        self._open = name
+        self._say(name, "running")
+
+    def close(self, status: str = "done") -> None:
+        if self._open:
+            self._say(self._open, status)
+            self._open = None
+
+    @contextmanager
+    def __call__(self, name: str):
+        self.enter(name)
+        try:
+            yield
+        except BaseException:
+            self.close("failed")
+            raise
+        else:
+            self.close("done")
+
+
 class Provisioner:
     def __init__(
         self,
@@ -132,13 +196,15 @@ class Provisioner:
         devices.assert_commandable(node)
         self._wanted_extra[node.name] = dict(spec.extra_config)
         self._emit("provision_start", node=node.name, spec=spec.to_dict())
+        phase = _Phase(self, node.name)
 
         # 1. Wait for the node. A flash has just rebooted it into new firmware.
         self._wait_ready(node)
 
         # 2. Factory reset, so the bake's userPrefs are actually applied.
-        self._step(node, "factory_reset", lambda n: n.localNode.factoryReset(), reboots=True)
-        self._wait_ready(node, reconnect=True)
+        with phase(RESET):
+            self._step(node, "factory_reset", lambda n: n.localNode.factoryReset(), reboots=True)
+            self._wait_ready(node, reconnect=True)
 
         # 3. Region and preset, in a write of their own.
         #
@@ -154,7 +220,8 @@ class Provisioner:
         if spec.modem_preset:
             region_writes["modem_preset"] = spec.modem_preset
         if region_writes:
-            self._write_config(node, "lora", region_writes)
+            with phase(REGION):
+                self._write_config(node, "lora", region_writes)
 
         # Other lora fields go in a second write, once the region is established.
         other_lora = {
@@ -163,14 +230,17 @@ class Provisioner:
             if key.startswith("lora.")
         }
         if other_lora:
-            self._write_config(node, "lora", other_lora)
+            with phase(LORA):
+                self._write_config(node, "lora", other_lora)
 
         if spec.role:
-            self._write_config(node, "device", {"role": spec.role})
+            with phase(ROLE):
+                self._write_config(node, "device", {"role": spec.role})
 
         # 4. Diagnostic flags. A reset wiped this, and capture depends on it.
         if spec.debug_log_api:
-            self._write_config(node, "security", {"debug_log_api_enabled": True})
+            with phase(FLAGS):
+                self._write_config(node, "security", {"debug_log_api_enabled": True})
 
         # Any other sections the scenario asked for.
         for key, value in spec.extra_config.items():
@@ -189,14 +259,17 @@ class Provisioner:
             )
 
         # 5. Reboot, committing config to NVS.
-        self._reboot(node)
+        with phase(REBOOT):
+            self._reboot(node)
 
         # 6. Channels LAST - before a reboot they are acknowledged and then lost.
         if spec.channel_url:
-            self._step(node, "set_channel_url", lambda n: n.localNode.setURL(spec.channel_url))
-            self._wait_ready(node, reconnect=True)
+            with phase(CHANNELS):
+                self._step(node, "set_channel_url", lambda n: n.localNode.setURL(spec.channel_url))
+                self._wait_ready(node, reconnect=True)
 
         # 7. Verify on device, with one re-apply before failing.
+        phase.enter(VERIFY)
         self.refresh(node)
         state = self.read_settled_state(node)
         problems = self._compare(state, spec)
