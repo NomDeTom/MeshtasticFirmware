@@ -1,0 +1,401 @@
+"""Stage 2: getting an image onto a node without losing the node.
+
+Entry to DFU is the fragile part, not the transfer. The recovery ladder is ordered by
+how much it can hurt, safest first, and the bench climbs it only as far as it must:
+
+  1. Protocol DFU. enterDFUMode() over the API puts this hardware into its UF2
+     mass-storage bootloader, then the image is copied to the volume. No baud-rate
+     trick, no reconnecting to a port name that may have changed, and it works on a node
+     that is ALREADY in DFU - the exact state where a touch cannot help.
+  2. 1200-baud touch plus serial DFU. Needed where the protocol path is unavailable.
+     Racy: it lands in app mode if the port is still settling, and reports "Target is
+     not in DFU mode" after the touch is already spent.
+  3. USB power cycle. A wedged node that answers nothing.
+
+The one hard rule: never touch a node that is not answering. A node already in its
+bootloader cannot respond, and repeatedly touching it is the most likely way to lose it
+for good - which is how 43C2192F2DFEE099 was lost.
+
+PlatformIO's exit code is not evidence. adafruit-nrfutil can fail to program and still
+let pio report success, so every upload is checked for the failure strings and, above
+all, for the node coming back.
+"""
+
+from __future__ import annotations
+
+import shutil
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+from . import devices, hardware, platform_probe, proc
+
+# nrfutil prints one of these when a serial-DFU upload fails to program. pio does not
+# treat them as errors, so a silent failure otherwise reads as a successful flash.
+DFU_FAILURE_MARKERS = (
+    "Target is not in DFU mode",
+    "No ping response after",
+    "Failed to upgrade target",
+    "Timeout waiting for acknowledgement",
+    "Serial port could not be opened",
+)
+
+UF2_SETTLE_S = 90.0
+RETURN_TIMEOUT_S = 120.0
+
+
+class FlashError(RuntimeError):
+    pass
+
+
+class NodeNotAnswering(FlashError):
+    """Refused to act because the node could not be confirmed alive first."""
+
+
+@dataclass
+class FlashResult:
+    node: str
+    method: str
+    ok: bool
+    detail: str
+    duration_s: float
+
+    def to_dict(self) -> dict:
+        return dict(self.__dict__)
+
+
+class Flasher:
+    """Flashes one node at a time, climbing the recovery ladder only as needed."""
+
+    def __init__(
+        self,
+        platform: platform_probe.PlatformInfo,
+        on_event: Callable[[str, dict], None] | None = None,
+        observer: Any = None,
+    ) -> None:
+        self.platform = platform
+        self.on_event = on_event
+        # The observer holds the interfaces. Flashing must tell it to let go, so the
+        # disconnection is attributed as a deliberate gap rather than a capture hole.
+        self.observer = observer
+
+    def _emit(self, kind: str, **data) -> None:
+        if self.on_event:
+            self.on_event(kind, data)
+
+    # -- the entry point -------------------------------------------------------
+
+    def flash(
+        self,
+        node: devices.BenchNode,
+        image: Path,
+        image_hw_model: str | None = None,
+    ) -> FlashResult:
+        """Put `image` on `node`. Raises FlashError rather than returning a bad state."""
+        devices.assert_flashable(node)
+        image = Path(image)
+        if not image.exists():
+            raise FlashError(f"image does not exist: {image}")
+
+        started = time.time()
+        self._emit("flash_start", node=node.name, image=str(image), serial=node.serial_number)
+
+        # Confirm it is alive and in app mode BEFORE anything that could bounce it.
+        port = self._require_alive(node)
+
+        # And confirm the image is even for this board. Every other check here guards
+        # against a wrong answer; this one guards against losing the node, so it blocks.
+        device_model = self._hw_model(node, port)
+        self._emit(
+            "hw_model_check",
+            node=node.name,
+            device=device_model,
+            image=image_hw_model,
+        )
+        hardware.assert_compatible(node.name, device_model, image_hw_model)
+
+        if image.suffix.lower() == ".uf2":
+            result = self._flash_uf2(node, image, port)
+        else:
+            result = self._flash_serial_dfu(node, image, port)
+
+        result.duration_s = round(time.time() - started, 1)
+        self._emit("flash_done", **result.to_dict())
+        if not result.ok:
+            raise FlashError(f"{node.name}: {result.detail}")
+        return result
+
+    def _hw_model(self, node: devices.BenchNode, port: str) -> str | None:
+        """The node's hardware model, preferring an interface already held.
+
+        The serial port is exclusive: while the observer holds a node, opening a second
+        connection to ask what it is simply fails, the model comes back unknown, and the
+        flash is refused for the wrong reason. Ask the held interface instead, and only
+        open one when nothing else has it.
+        """
+        if self.observer is not None:
+            held = self.observer.held.get(node.name)
+            if held is not None and held.iface is not None:
+                model = hardware.model_from_interface(held.iface)
+                if model:
+                    return model
+        return hardware.read_hw_model(port)
+
+    # -- liveness --------------------------------------------------------------
+
+    def _require_alive(self, node: devices.BenchNode) -> str:
+        """The node's port, having proved it is enumerated and answering.
+
+        Enumeration alone is not proof: a node sitting in its bootloader enumerates
+        perfectly well and cannot be commanded. Where the observer holds an interface we
+        take its liveness; otherwise we probe.
+        """
+        port = devices.try_resolve_port(node.serial_number)
+        if port is None:
+            raise NodeNotAnswering(
+                f"{node.name} ({node.serial_number}) is not enumerated; refusing to act"
+            )
+        if self.observer is not None:
+            held = self.observer.held.get(node.name)
+            if held is not None and held.connected:
+                return port
+        if not self._probe(port):
+            raise NodeNotAnswering(
+                f"{node.name} is enumerated on {port} but not answering. It may already "
+                "be in its bootloader - touching it again is how nodes are lost. "
+                "Power-cycle it and retry."
+            )
+        return port
+
+    def _probe(self, port: str, timeout: float = 25.0) -> bool:
+        """One bounded connect, to prove the node speaks the protocol."""
+        import threading
+
+        import meshtastic.serial_interface as si
+
+        outcome: dict[str, Any] = {}
+
+        def _try() -> None:
+            iface = None
+            try:
+                iface = si.SerialInterface(devPath=port)
+                outcome["ok"] = True
+            except Exception as exc:  # noqa: BLE001
+                outcome["error"] = exc
+            finally:
+                if iface is not None:
+                    try:
+                        iface.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        t = threading.Thread(target=_try, daemon=True)
+        t.start()
+        t.join(timeout)
+        return bool(outcome.get("ok"))
+
+    # -- path 1: protocol DFU + UF2 volume -------------------------------------
+
+    def _flash_uf2(self, node: devices.BenchNode, image: Path, port: str) -> FlashResult:
+        """Preferred path. Commands DFU over the protocol, then copies the .uf2."""
+        if self.observer is not None:
+            self.observer.mark_dropped(node.name, reason="flash")
+
+        entered = self._enter_dfu(port)
+        if not entered:
+            return FlashResult(node.name, "uf2", False, "enterDFUMode did not take", 0.0)
+
+        volume = self._wait_for_volume()
+        if volume is None:
+            return FlashResult(
+                node.name,
+                "uf2",
+                False,
+                f"no UF2 volume appeared within {UF2_SETTLE_S:.0f}s of entering DFU",
+                0.0,
+            )
+        self._emit("uf2_volume", node=node.name, volume=str(volume))
+
+        try:
+            shutil.copy2(image, volume / image.name)
+        except OSError as exc:
+            # The bootloader reboots the instant it has the image, so the copy can report
+            # a write error on a volume that has already gone. Treat the node coming back
+            # as the real evidence, not the copy's return.
+            self._emit("uf2_copy_warning", node=node.name, error=str(exc))
+
+        back = self._wait_for_return(node)
+        if not back:
+            return FlashResult(
+                node.name, "uf2", False, "flashed but the node did not re-appear", 0.0
+            )
+        return FlashResult(node.name, "uf2", True, f"flashed via UF2 volume {volume}", 0.0)
+
+    def _enter_dfu(self, port: str) -> bool:
+        import threading
+
+        import meshtastic.serial_interface as si
+
+        done: dict[str, Any] = {}
+
+        def _go() -> None:
+            iface = None
+            try:
+                iface = si.SerialInterface(devPath=port)
+                iface.localNode.enterDFUMode()
+                done["ok"] = True
+            except Exception as exc:  # noqa: BLE001
+                # The node reboots into the bootloader mid-call, so the library often
+                # raises on the way out of a call that actually worked. The volume
+                # appearing is the evidence, not this return.
+                done["error"] = exc
+            finally:
+                if iface is not None:
+                    try:
+                        iface.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        t = threading.Thread(target=_go, daemon=True)
+        t.start()
+        t.join(30.0)
+        return True  # confirmed by _wait_for_volume, never by this call's return
+
+    def _wait_for_volume(self, timeout: float = UF2_SETTLE_S) -> Path | None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            volume = platform_probe.find_uf2_volume()
+            if volume is not None:
+                return volume
+            time.sleep(2.0)
+        return None
+
+    def _wait_for_return(self, node: devices.BenchNode, timeout: float = RETURN_TIMEOUT_S) -> bool:
+        """The node re-enumerating and answering is the only proof a flash worked.
+
+        Answering is asked of whoever already holds the port. The observer reconnects on
+        its own as soon as the node returns, and the serial port is exclusive - so
+        opening a competing connection here fails with a permission error and reports
+        "the node did not re-appear" about a node that demonstrably did. Only probe
+        directly when nothing else is holding it.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            port = devices.try_resolve_port(node.serial_number)
+            if port is not None:
+                if self.observer is not None:
+                    self.observer.health_tick()  # let it reclaim the port first
+                    held = self.observer.held.get(node.name)
+                    if held is not None and held.connected:
+                        self._emit("flash_node_returned", node=node.name, port=held.port)
+                        return True
+                elif self._probe(port, timeout=20.0):
+                    self._emit("flash_node_returned", node=node.name, port=port)
+                    return True
+            time.sleep(3.0)
+        return False
+
+    # -- path 2: 1200-baud touch + serial DFU ----------------------------------
+
+    def _flash_serial_dfu(self, node: devices.BenchNode, image: Path, port: str) -> FlashResult:
+        if self.platform.nrfutil is None:
+            return FlashResult(
+                node.name, "serial_dfu", False, "adafruit-nrfutil is not available", 0.0
+            )
+        if self.observer is not None:
+            self.observer.mark_dropped(node.name, reason="flash")
+
+        dfu_port = self.touch_1200bps(node, port)
+        if dfu_port is None:
+            return FlashResult(
+                node.name, "serial_dfu", False, "node did not re-enumerate into DFU", 0.0
+            )
+
+        argv = [
+            *self.platform.nrfutil.argv,
+            "--verbose",
+            "dfu",
+            "serial",
+            "--package",
+            str(image),
+            "-p",
+            dfu_port,
+            "-b",
+            "115200",
+            "--singlebank",
+        ]
+        result = proc.run(argv, env=dict(self.platform.nrfutil.env), timeout=300.0)
+        failure = next((m for m in DFU_FAILURE_MARKERS if m in result.output), None)
+        if failure or not result.ok:
+            return FlashResult(
+                node.name,
+                "serial_dfu",
+                False,
+                f"nrfutil failed ({failure or result.returncode}): {result.tail(10)}",
+                0.0,
+            )
+        if not self._wait_for_return(node):
+            return FlashResult(
+                node.name, "serial_dfu", False, "flashed but the node did not re-appear", 0.0
+            )
+        return FlashResult(node.name, "serial_dfu", True, f"flashed via serial DFU on {dfu_port}", 0.0)
+
+    def touch_1200bps(self, node: devices.BenchNode, port: str, settle_ms: int = 250) -> str | None:
+        """Bounce a node into its bootloader, and confirm it genuinely went.
+
+        Returns the port that appeared AFTER the reset, which is not reliably the one we
+        touched. Confirmation requires an observed transition - a new port, or a changed
+        PID - because a bootloader-shaped PID on an unchanged port means the node never
+        left app mode, and flashing it then fails after the touch is already spent.
+        """
+        import serial
+
+        before = devices.snapshot_ports()
+        self._emit("touch_1200bps", node=node.name, port=port)
+        try:
+            with serial.Serial(port, 1200) as handle:
+                handle.dtr = False
+                time.sleep(settle_ms / 1000.0)
+        except serial.SerialException:
+            pass  # the port vanishing mid-open is the reset happening
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            found = devices.looks_like_dfu(before)
+            if found:
+                self._emit("dfu_confirmed", node=node.name, port=found)
+                return found
+        self._emit("dfu_not_confirmed", node=node.name)
+        return None
+
+    # -- path 3: power cycle ---------------------------------------------------
+
+    def power_cycle(self, location: str, port_number: int, delay_s: float = 3.0) -> bool:
+        """Hard USB power cycle via uhubctl. The rung below a touch.
+
+        Recovers a node that answers nothing without anyone walking to the bench, and
+        without the repeated touching that loses nodes.
+        """
+        if not self.platform.uhubctl:
+            self._emit("power_cycle_unavailable", location=location)
+            return False
+        result = proc.run(
+            [
+                self.platform.uhubctl,
+                "-l",
+                location,
+                "-p",
+                str(port_number),
+                "-a",
+                "cycle",
+                "-d",
+                str(delay_s),
+            ],
+            timeout=60.0,
+        )
+        self._emit(
+            "power_cycle", location=location, port=port_number, ok=result.ok, tail=result.tail(5)
+        )
+        return result.ok
