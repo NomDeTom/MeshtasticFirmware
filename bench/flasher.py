@@ -266,12 +266,31 @@ class Flasher:
         # one thing the schedule exists to rule out. Abandoning a partial write is safe:
         # a UF2 bootloader only jumps to the application once it has a complete image, so
         # the node stays in DFU and the next attempt finds it there.
-        outcome, detail = _call_bounded(_write, TRANSFER_S)
-        if outcome == "hung":
+        # The write returning is NOT the signal that the image landed. A UF2 bootloader
+        # reboots the instant it holds a complete image, so the volume disappears out
+        # from under the copy - and on Windows a blocking write to a device that has gone
+        # does not always come back. Measured here: 387s for one node, and another still
+        # inside the same call at 500s with its volume already dropped.
+        #
+        # So race the two. Either the write returns, or the volume vanishes - and the
+        # volume vanishing is the bootloader saying it has what it needs. Whichever comes
+        # first, the node answering again is what actually proves the flash.
+        writer = threading.Thread(target=_write, daemon=True, name="bench-uf2-write")
+        writer.start()
+        budget = ports.Budget(TRANSFER_S)
+        while writer.is_alive() and not budget.spent:
+            writer.join(1.0)
+            if writer.is_alive() and not _volume_present(volume):
+                self._emit(
+                    "uf2_volume_vanished", node=node.name, volume=str(volume),
+                    after_s=round(budget.elapsed, 1),
+                )
+                break
+        if writer.is_alive() and budget.spent:
             return FlashResult(
                 node.name, "uf2", False,
-                f"the write to {volume} did not finish within {TRANSFER_S:.0f}s; "
-                "the node is left in its bootloader",
+                f"the write to {volume} did not finish within {TRANSFER_S:.0f}s and the "
+                "volume never dropped; the node is left in its bootloader",
                 0.0, ports.TIMED_OUT,
             )
 
@@ -366,6 +385,29 @@ class Flasher:
             ok=result.ok, tail=result.tail(5),
         )
         return result.ok
+
+
+def _volume_present(volume: Path) -> bool:
+    """Is this mount still there - asked without touching the device.
+
+    A dropped drive letter answers slowly or not at all, so the ordinary existence check
+    is itself capable of blocking, and a hang detector that can hang is no use. On
+    Windows the drive-letter bitmask lives in the kernel and needs no I/O at all.
+    """
+    if platform_probe.host_os() == platform_probe.WINDOWS:
+        try:
+            import ctypes
+            import string
+
+            mask = ctypes.windll.kernel32.GetLogicalDrives()  # type: ignore[attr-defined]
+            letter = str(volume)[0].upper()
+            return bool(mask & (1 << string.ascii_uppercase.index(letter)))
+        except Exception:  # noqa: BLE001 - fall back rather than misreport a live volume
+            return True
+    try:
+        return volume.is_dir()
+    except OSError:
+        return False
 
 
 def _answers_as_application(owner: ports.PortOwner) -> bool:
