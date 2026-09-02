@@ -82,10 +82,25 @@ class Runner:
         self.waiting_since: float | None = None
         # node name -> bake_hash currently flashed, so a shared image is installed
         # once per run rather than once per row.
-        self._running_image: dict[str, str] = {}
+        # What each node was last seen running, and whether this process is the one that
+        # put it there. Persisted, because a run id is a workspace that gets resumed: an
+        # in-memory record meant a retry reflashed firmware it had installed minutes
+        # earlier, at a minute a node, before it could get to the part that failed.
+        carried_state = self._load_expected_state()
+        self._running_image: dict[str, str] = {
+            n: e["image"] for n, e in carried_state.items() if e.get("image")
+        }
+        # Which of those came from a previous attempt rather than this one, so a skip can
+        # say which it is rather than implying this process saw the flash happen.
+        self._carried_images: set[str] = set(self._running_image)
+        self._carried_specs: set[str] = {
+            n for n, e in carried_state.items() if e.get("spec")
+        }
         # node name -> the spec it was last provisioned to, so an unchanged spec is
         # verified rather than reapplied.
-        self._provisioned: dict[str, str] = {}
+        self._provisioned: dict[str, str] = {
+            n: e["spec"] for n, e in carried_state.items() if e.get("spec")
+        }
         self._provisioner: Any = None
         self._schedule: Any = None
         self.started_at = time.time()
@@ -102,6 +117,40 @@ class Runner:
             except json.JSONDecodeError:
                 return {}
         return {}
+
+    def _load_expected_state(self) -> dict[str, dict]:
+        """What the last attempt at this run id left each node in - image and config.
+
+        A run id names a workspace that gets resumed, so this is the difference between
+        a retry that reinstalls firmware and reapplies settings it put there minutes ago,
+        and one that confirms them and gets on with the part that actually failed. Prep
+        is roughly a minute a node to flash and three to provision; confirming is
+        seconds.
+
+        Carrying it forward is safe because neither record is trusted on its own. The
+        image record is bounded by the node still being enumerated under the same serial
+        number - a node swapped between attempts is a different node, whatever its port
+        is called - and stage 3 reads the build tag back off the device wherever the
+        image carries one. The config record only decides whether to TRY the cheap path:
+        verify() reads the device unconditionally and anything short of a clean match
+        falls through to a full reprovision.
+        """
+        if not self.state_path.exists():
+            return {}
+        try:
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        recorded = state.get("expected_state") or {}
+        out: dict[str, dict] = {}
+        for name, entry in recorded.items():
+            node = next((n for n in self.config.nodes if n.name == name), None)
+            if node is None or not node.present():
+                continue
+            if entry.get("serial_number") and entry["serial_number"] != node.serial_number:
+                continue
+            out[name] = entry
+        return out
 
     def _save_results(self) -> None:
         self.results_path.write_text(json.dumps(self.results, indent=2), encoding="utf-8")
@@ -221,6 +270,17 @@ class Runner:
             "row": self.current_row,
             "waiting_for": self.waiting_for,
             "waiting_since": self.waiting_since,
+            # What each node is expected to be in, so a resumed run confirms rather than
+            # reapplies. Keyed with the serial it was recorded against.
+            "expected_state": {
+                n.name: {
+                    "serial_number": n.serial_number,
+                    "image": self._running_image.get(n.name),
+                    "spec": self._provisioned.get(n.name),
+                }
+                for n in self.config.nodes
+                if self._running_image.get(n.name) or self._provisioned.get(n.name)
+            },
             "counts": counts,
             # Rows standing from a previous attempt at this run id, not measured now.
             "carried_over": carried,
@@ -505,11 +565,23 @@ class Runner:
                 result.error = f"capture stalled during the row: {exc}"
                 return result
 
+            # Did the instrument survive the measurement? Assertions read what was
+            # captured; this asks whether the things doing the capturing were still there
+            # to do it. A row whose assertions pass on a node that died half way through
+            # has not measured what it says it has.
+            self._check_exit_conditions(scen, result)
+
             self._resolve_build_tags(result, images)
             led = ledger_mod.Ledger.for_scenario(self.run_dir, scen.id)
             self._begin(f"{scen.id}:execute:assert")
             result.outcomes = [a.evaluate(led, ctx) for a in scen.assertions]
             result.verdict = scenario_mod.roll_up(result.outcomes)
+            if not result.exit_met:
+                # INVALID rather than FAIL: the row did not measure the firmware badly,
+                # it failed to measure it at all.
+                unmet = "; ".join(c.detail or c.name for c in result.exit if not c.met)
+                result.verdict = scenario_mod.INVALID
+                result.error = f"exit conditions not met: {unmet}"
             self._finish(f"{scen.id}:execute:assert", outcome=result.verdict)
             self._finish(f"{scen.id}:execute", outcome=result.verdict)
             (self.run_dir / "rows").mkdir(exist_ok=True)
@@ -526,6 +598,34 @@ class Runner:
             result.ended_at = time.time()
             self.stage = STAGE_CYCLE
         return result
+
+    def _check_exit_conditions(
+        self, scen: scenario_mod.Scenario, result: scenario_mod.RowResult
+    ) -> None:
+        """Was every node the row depended on still being captured when the window closed?
+
+        One condition per node, and it asks about capture rather than the USB bus,
+        because an open capture connection IS the evidence the node is there - and it is
+        the thing the row's evidence actually came through. A node that is enumerated but
+        no longer captured produced nothing for the second half of the window, which is
+        indistinguishable from a quiet radio and must not be read as one.
+        """
+        for role in scen.roles:
+            node = self._node_for(role)
+            if node is None:
+                continue
+            owner = self.observer.owner_for(node.name) if self.observer else None
+            state = getattr(owner, "state", None)
+            captured = state == ports.ST_HELD
+            if captured:
+                detail = "captured throughout"
+            elif node.present():
+                detail = f"still on the bus but capture was {state}"
+            else:
+                detail = f"left the bus during the row (capture was {state})"
+            result.exit.append(scenario_mod.Condition(
+                f"{node.name} captured to the end", captured, detail,
+            ))
 
     def _prepare_row(self, scen: scenario_mod.Scenario, result: scenario_mod.RowResult) -> dict:
         """Flash and provision every role, and record what actually ended up on them."""
@@ -556,11 +656,19 @@ class Runner:
             # reads it back off the device to confirm.
             step_id = f"{scen.id}:flash:{node.name}"
             if self._running_image.get(node.name) == entry.bake_hash:
-                self._skip(step_id, "node already runs this image")
+                carried = node.name in self._carried_images
+                why = (
+                    "an earlier attempt at this run flashed this image"
+                    if carried else "node already runs this image"
+                )
+                self._skip(step_id, why)
                 self.event(
                     "flash_skipped", node=node.name, bake_hash=entry.bake_hash,
-                    reason="node already runs this image",
+                    reason=why, from_earlier_attempt=carried,
                 )
+                result.entry.append(scenario_mod.Condition(
+                    f"{node.name} runs {entry.bake_hash}", True, why, how="satisfied",
+                ))
                 continue
             self._begin(step_id)
             self.stage = STAGE_FLASH
@@ -587,6 +695,10 @@ class Runner:
                 raise
             self._running_image[node.name] = entry.bake_hash
             self._finish(step_id)
+            result.entry.append(scenario_mod.Condition(
+                f"{node.name} runs {entry.bake_hash}", True, "flashed for this row",
+                how="established",
+            ))
             self.wait_note(None)
 
         for role, role_bake in scen.roles.items():

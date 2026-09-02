@@ -40,9 +40,15 @@ class FakeOwner:
     def __init__(self, name):
         self.name = name
         self.events = []
+        # A row's exit conditions ask whether the instrument survived the measurement,
+        # so a fake that never claims to be capturing fails them for the right reason.
+        # Held is what a healthy node looks like when a window closes.
+        from bench import ports
+
+        self.state = ports.ST_HELD
 
     def status(self):
-        return {"node": self.name, "state": "held", "port": "COM9"}
+        return {"node": self.name, "state": self.state, "port": "COM9"}
 
     def expect_reboot(self, reason):
         self.events.append(("rebooting", reason))
