@@ -183,6 +183,53 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 1 if (counts.get("FAIL") or counts.get("INVALID")) else 0
 
 
+def cmd_firmware(args: argparse.Namespace) -> int:
+    """Manage the bench's store of known-good images.
+
+    Commissioning a bench means populating this: a reference the runs can flash without a
+    compiler, a network, or a path written into a scenario.
+    """
+    from . import firmware as fw
+
+    store = fw.FirmwareStore(Path(args.root) if args.root else None)
+
+    if args.action == "list":
+        print(f"firmware store: {store.root}")
+        print(store.summary())
+        return 0
+
+    if args.action == "verify":
+        bad = [i for i in store.images.values() if not store.verify(i)]
+        print(f"{len(store.images)} image(s), {len(bad)} failing verification")
+        for image in bad:
+            print(f"  FAILS  {image.describe()}")
+        return 1 if bad else 0
+
+    if args.action == "fetch":
+        if not args.env:
+            raise SystemExit("fetch needs a board env, e.g. nrf52_promicro_diy_tcxo")
+        image = store.fetch_release(
+            args.env, tag=args.tag,
+            allow_prerelease=args.alpha, prerelease_only=args.alpha,
+        )
+        print(f"stored {image.version} for {image.board}")
+        print(f"  {image.path(store.root)}")
+        print(f"  {image.bytes} bytes, sha256 {image.sha256[:16]}")
+        return 0
+
+    if args.action == "add":
+        if not (args.file and args.env):
+            raise SystemExit("add needs --file and a board env")
+        image = store.add_file(
+            Path(args.file), board=fw._board_slug(args.env),
+            version=args.tag or "local", note=args.note or "added locally",
+        )
+        print(f"stored {image.version} for {image.board}: {image.path(store.root)}")
+        return 0
+
+    raise SystemExit(f"unknown firmware action {args.action!r}")
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """One long-lived daemon over the runs root.
 
@@ -297,6 +344,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="serve status, reusing a running daemon if there is one")
     s.add_argument("--port", type=int, default=8730)
     s.set_defaults(func=cmd_run)
+
+    s = sub.add_parser("firmware", help="the bench's store of known-good images")
+    s.add_argument("action", choices=["list", "fetch", "verify", "add"])
+    s.add_argument("env", nargs="?", help="board env, e.g. nrf52_promicro_diy_tcxo")
+    s.add_argument("--tag", default=None, help="a specific release tag")
+    s.add_argument("--alpha", action="store_true",
+                   help="fetch the newest PRERELEASE that has published binaries")
+    s.add_argument("--file", default=None, help="image to add from disk")
+    s.add_argument("--note", default=None)
+    s.add_argument("--root", default=None, help="store location")
+    s.set_defaults(func=cmd_firmware)
 
     s = sub.add_parser("serve", help="read-only status daemon over all runs")
     s.add_argument("--root", default=None,
