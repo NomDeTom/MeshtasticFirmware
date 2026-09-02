@@ -80,6 +80,52 @@ class PreflightReport:
         path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
         return path
 
+    def bus_summary(self) -> str:
+        """The bus as it actually is - printed whether the run is blocked or not.
+
+        A blocked run naming a missing node with no account of the bus it went missing
+        from is the reader's cue to go and run these enumerations by hand, which is
+        exactly the work preflight exists to have already done.
+        """
+        bus = (self.resources or {}).get("bus") or {}
+        declared = (self.resources or {}).get("nodes") or []
+        # Serial number is the only stable identity across a reboot - COM numbers move -
+        # so the node table is joined to the bus by it.
+        named = {
+            str(d.get("serial_number") or "").upper(): d.get("name")
+            for d in declared if d.get("serial_number")
+        }
+        seen = set()
+        lines = ["  bus:"]
+        for entry in bus.get("serial", []):
+            sn = str(entry.get("serial_number") or "").upper()
+            who = named.get(sn)
+            if who:
+                seen.add(sn)
+            lines.append(
+                f"    port   {entry['port']:8} {entry.get('vid') or '----'}:"
+                f"{entry.get('pid') or '----'}  {entry.get('serial_number') or '-'}"
+                + (f"  = {who}" if who else "  (not in the node table)")
+            )
+        for sn, who in named.items():
+            if sn not in seen:
+                lines.append(f"    ABSENT {who:8} {'':11}  {sn}  nothing on the bus")
+        for entry in bus.get("volumes", []):
+            lines.append(f"    volume {entry['path']:8} UF2 bootloader")
+        for entry in bus.get("in_bootloader", []):
+            lines.append(
+                f"    DFU    {entry['instance']}  ({', '.join(entry['interfaces'])})"
+            )
+        present = len(bus.get("devices", []))
+        if present:
+            lines.append(f"    {present} USB devices present on the bus")
+        for key in ("serial_error", "devices_error"):
+            if bus.get(key):
+                lines.append(f"    {key}: {bus[key]}")
+        if len(lines) == 1:
+            lines.append("    nothing enumerated")
+        return "\n".join(lines)
+
     def summary(self) -> str:
         lines = []
         for c in self.checks:
@@ -88,14 +134,20 @@ class PreflightReport:
             if c.fix and c.status != OK:
                 lines.append(f"         fix: {c.fix}")
         verdict = "BLOCKED" if self.blocked else "ready"
-        return "\n".join(lines + [f"  -> preflight {verdict}"])
+        # The inventory prints on every run, passing or blocked. On a pass it is the
+        # record of what the run ran against; on a block it is the evidence, and by the
+        # time anyone reads the failure the hardware has already moved on.
+        return "\n".join(lines + [self.bus_summary(), f"  -> preflight {verdict}"])
 
 
 class PreflightFailed(RuntimeError):
     def __init__(self, report: PreflightReport) -> None:
         self.report = report
         blockers = "; ".join(f"{c.name}: {c.detail}" for c in report.blockers)
-        super().__init__(f"preflight blocked: {blockers}")
+        # The inventory travels with the failure. A blocked run is exactly when someone
+        # needs to know what was on the bus, and exactly when they cannot go and look -
+        # by the time they read this the hardware has moved on.
+        super().__init__(f"preflight blocked: {blockers}\n{report.bus_summary()}")
 
 
 def run_preflight(
@@ -241,7 +293,9 @@ def _gather_resources(
     # mode between the two. Recording both says which, instead of implying neither.
     at_probe = info.uf2_volume
     standing = platform_probe.find_uf2_volume()
+    bus = platform_probe.bus_inventory()
     report.resources = {
+        "bus": bus,
         "uf2_volume_at_probe": str(at_probe) if at_probe else None,
         "nodes": declared,
         "uf2_volume_at_start": str(standing) if standing else None,
@@ -255,10 +309,20 @@ def _gather_resources(
     }
 
     if missing:
+        # A node can be missing three ways and the fix differs each time, so say which:
+        # in its bootloader (finish the flash), off the bus (replug it), or simply not
+        # this node (the table has the wrong serial).
+        dfu = bool(bus.get("in_bootloader")) or bool(bus.get("volumes"))
         report.checks.append(Check(
             "declared_nodes", BLOCK,
-            f"declared but not enumerated: {', '.join(missing)}",
-            fix="plug the node in, or correct its serial number in the node table",
+            f"declared but not enumerated: {', '.join(missing)}"
+            + (" (a device is in its bootloader - see the bus inventory)" if dfu else ""),
+            fix=(
+                "the node is in DFU; the flasher will finish it once it is declared present"
+                if dfu else
+                "nothing is on the bus for this serial - replug the node, or correct the "
+                "serial number in the node table"
+            ),
         ))
     else:
         report.checks.append(Check(

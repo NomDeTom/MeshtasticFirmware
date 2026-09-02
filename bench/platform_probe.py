@@ -211,3 +211,97 @@ def probe(*, refuse_wsl: bool = True) -> PlatformInfo:
     if info.nrfutil is None:
         info.notes.append("adafruit-nrfutil absent - serial DFU unavailable, UF2 only")
     return info
+
+
+def bus_inventory(timeout: float = 20.0) -> dict:
+    """What is actually on the USB bus right now, and what state each device is in.
+
+    Preflight used to assert that discovery COULD run and then say nothing about what it
+    found, so a blocked run reported a missing node with no account of the bus it went
+    missing from - and diagnosing it meant running these enumerations by hand.
+
+    Three views, because each answers a question the others cannot:
+
+      Serial ports name the devices a run can talk to.
+
+      Mounted volumes name the devices it cannot: a node in its bootloader answers no
+      protobuf, and its drive letter is the only sign it is there at all.
+
+      The kernel's own device list distinguishes ABSENT from REMEMBERED. Windows keeps
+      an entry for every device ever plugged into a port, so "COM16 exists" in the
+      registry says nothing about whether anything is on the end of it.
+
+    It also settles a question this board makes hard to ask. A nice!nano keeps the same
+    USB PID in its bootloader as in its application, so a PID cannot tell the two apart -
+    but a bootloader exposes mass storage alongside its serial interface, and the
+    application does not. A device presenting both is in DFU.
+    """
+    out: dict = {"serial": [], "volumes": [], "devices": [], "in_bootloader": []}
+
+    try:
+        import serial.tools.list_ports as list_ports
+
+        for port in list_ports.comports():
+            out["serial"].append({
+                "port": port.device,
+                "vid": f"{port.vid:04x}" if port.vid else None,
+                "pid": f"{port.pid:04x}" if port.pid else None,
+                "serial_number": port.serial_number,
+                "description": port.description,
+            })
+    except Exception as exc:  # noqa: BLE001 - an unreadable bus is a finding, not a crash
+        out["serial_error"] = f"{type(exc).__name__}: {exc}"
+
+    for root in _uf2_candidate_roots():
+        try:
+            if (root / "INFO_UF2.TXT").exists():
+                out["volumes"].append({"path": str(root), "uf2": True})
+        except OSError:
+            continue
+
+    if host_os() == WINDOWS:
+        out.update(_windows_bus(timeout))
+    return out
+
+
+def _windows_bus(timeout: float) -> dict:
+    """Present-only USB devices, and which of them are in a bootloader.
+
+    Status OK means the device is on the bus now; every other status is an entry Windows
+    remembers for a port nothing is plugged into.
+    """
+    import json as _json
+    import subprocess
+
+    script = (
+        "Get-PnpDevice -Class Ports,USB -Status OK -ErrorAction SilentlyContinue | "
+        "Select-Object FriendlyName,InstanceId,Class | ConvertTo-Json -Compress"
+    )
+    try:
+        done = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        parsed = _json.loads(done.stdout or "[]")
+    except Exception as exc:  # noqa: BLE001
+        return {"devices_error": f"{type(exc).__name__}: {exc}"}
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+
+    devices, by_instance = [], {}
+    for entry in parsed:
+        instance = str(entry.get("InstanceId") or "")
+        name = str(entry.get("FriendlyName") or "")
+        devices.append({"name": name, "instance": instance})
+        # The trailing token is shared by every interface of one physical device, so it
+        # is what groups a composite device's serial and mass-storage halves together.
+        parts = instance.rsplit("\\", 1)
+        if len(parts) == 2:
+            by_instance.setdefault(parts[1].rsplit("&", 1)[0], []).append(name)
+
+    in_bootloader = []
+    for key, names in by_instance.items():
+        joined = " ".join(names).lower()
+        if "mass storage" in joined and ("serial" in joined or "com" in joined):
+            in_bootloader.append({"instance": key, "interfaces": names})
+    return {"devices": devices, "in_bootloader": in_bootloader}
