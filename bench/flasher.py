@@ -226,11 +226,16 @@ class Flasher:
 
         # Wait for the bootloader's own CDC to appear, confirmed by an observed
         # transition rather than by a bootloader-shaped PID that may always have been there.
+        # Wait for whichever the bootloader offers FIRST - a DFU serial port, or the
+        # mass-storage volume. Waiting out the serial timeout before even looking for the
+        # volume spent a minute per flash on hardware that was never going to present one.
         dfu_port = None
+        volume = None
         deadline = time.monotonic() + 60.0
-        while dfu_port is None and time.monotonic() < deadline:
+        while dfu_port is None and volume is None and time.monotonic() < deadline:
             time.sleep(1.0)
             dfu_port = devices.looks_like_dfu(before)
+            volume = platform_probe.find_uf2_volume()
         if dfu_port is None:
             # This bootloader offers mass storage only - measured on nice!nano /
             # nRF52840, whose UF2 bootloader presents no DFU CDC at all and re-enumerates
