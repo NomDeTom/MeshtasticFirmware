@@ -227,10 +227,20 @@ class Flasher:
             time.sleep(1.0)
             dfu_port = devices.looks_like_dfu(before)
         if dfu_port is None:
-            self._emit("dfu_port_not_found", node=node.name)
-            return FlashResult(
-                node.name, "protocol_serial", False,
-                "node did not present a DFU serial port after enterDFUMode", 0.0)
+            # This bootloader offers mass storage only - measured on nice!nano /
+            # nRF52840, whose UF2 bootloader presents no DFU CDC at all and re-enumerates
+            # with the SAME pid as the application, so there is no transition to observe.
+            #
+            # The node is already in DFU at this point, so the volume is sitting right
+            # there: finish the job rather than returning a failure that leaves it
+            # stranded in its bootloader for the next row to refuse to touch.
+            self._emit("dfu_serial_unavailable", node=node.name, falling_back="uf2_volume")
+            uf2 = _sibling_uf2(image)
+            if uf2 is None:
+                return FlashResult(
+                    node.name, "protocol_serial", False,
+                    "no DFU serial port appeared and no .uf2 sits beside the package", 0.0)
+            return self._copy_uf2_to_volume(node, uf2)
         self._emit("dfu_confirmed", node=node.name, port=dfu_port)
 
         argv = [
@@ -265,6 +275,10 @@ class Flasher:
         if not entered:
             return FlashResult(node.name, "uf2", False, "enterDFUMode did not take", 0.0)
 
+        return self._copy_uf2_to_volume(node, image)
+
+    def _copy_uf2_to_volume(self, node: devices.BenchNode, image: Path) -> FlashResult:
+        """Copy a .uf2 onto the bootloader volume, for a node already in DFU."""
         volume = self._wait_for_volume()
         if volume is None:
             return FlashResult(
@@ -458,3 +472,8 @@ class Flasher:
             "power_cycle", location=location, port=port_number, ok=result.ok, tail=result.tail(5)
         )
         return result.ok
+
+def _sibling_uf2(package: Path) -> Path | None:
+    """The .uf2 built alongside an nrfutil package, if there is one."""
+    candidate = package.with_suffix(".uf2")
+    return candidate if candidate.exists() else None
