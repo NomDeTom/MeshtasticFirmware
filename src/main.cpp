@@ -365,6 +365,12 @@ void waitUntilPowerLevelSafe()
 void printInfo()
 {
     LOG_INFO("S:B:%d,%s,%s,%s", HW_VENDOR, optstr(APP_VERSION), optstr(APP_ENV), optstr(APP_REPO));
+#ifdef BENCH_BUILD_TAG
+    // Opaque build identifier, echoed and never parsed. APP_VERSION identifies the commit, not the
+    // build, so variant builds of one commit are otherwise indistinguishable in a log, on the wire
+    // and in --info. Compiles to nothing unless -D BENCH_BUILD_TAG is passed.
+    LOG_INFO("BENCH: tag=%s version=%s env=%s", xstr(BENCH_BUILD_TAG), optstr(APP_VERSION), optstr(APP_ENV));
+#endif
 }
 #ifndef PIO_UNIT_TESTING
 void setup()

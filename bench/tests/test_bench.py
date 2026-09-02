@@ -1,0 +1,598 @@
+"""Unit tests for the bench, run with stdlib unittest so they need no new dependency.
+
+    python -m unittest discover -s bench/tests -t .
+
+Everything here runs without hardware. The properties under test are the ones whose
+failure produces a confident wrong answer rather than an error - honest last-byte
+resolution, paths kept distinct rather than averaged, the INVALID/NOT OBSERVED
+distinction, and preprocessor-faithful capability derivation.
+"""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from bench import builder, ledger, manifest, packets, scenario, server, streams
+from bench.devices import BenchNode, CommandRefused, assert_commandable, looks_like_dfu
+from bench.observer import _RawSerialReader
+
+
+class TestPackets(unittest.TestCase):
+    def test_records_fields_a_summary_would_drop(self):
+        row = packets.summarize(
+            {
+                "id": 1,
+                "hopLimit": 2,
+                "hopStart": 3,
+                "viaMqtt": False,
+                "publicKey": b"k" * 32,
+                "pkiEncrypted": True,
+                "txAfter": 500,
+                "priority": "BACKGROUND",
+                "decoded": {"portnum": "TEXT_MESSAGE_APP", "payload": b"hi"},
+            },
+            observer="dut",
+        )
+        for field in ("hop_start", "via_mqtt", "transport_mechanism", "tx_after",
+                      "priority", "pki_encrypted", "xeddsa_signed", "rx_time"):
+            self.assertIn(field, row)
+        self.assertEqual(row["hops_taken"], 1)
+
+    def test_never_stores_key_material(self):
+        row = packets.summarize({"id": 1, "publicKey": b"secret-key-bytes" * 2}, observer="o")
+        self.assertEqual(row["public_key_len"], 32)
+        self.assertNotIn("public_key", row)
+        self.assertNotIn("secret", json.dumps(row))
+
+    def test_last_byte_resolution_is_honest(self):
+        unique = packets.resolve_last_byte(0xDC, [0x77E4F0DC, 0x1234ABCD])
+        self.assertEqual(unique.status, packets.UNIQUE)
+        self.assertEqual(unique.node_num, 0x77E4F0DC)
+
+        # Two candidates share the byte: the firmware refuses to tie-break, so do we.
+        ambiguous = packets.resolve_last_byte(0xDC, [0x11AA11DC, 0x2222DCDC])
+        self.assertEqual(ambiguous.status, packets.AMBIGUOUS)
+        self.assertIsNone(ambiguous.node_num)
+        self.assertIn("ambiguous", ambiguous.render())
+
+        self.assertEqual(packets.resolve_last_byte(0xDC, []).status, packets.NONE)
+        # 0 is the NO_RELAY sentinel, not a node whose last byte happens to be zero.
+        self.assertEqual(packets.resolve_last_byte(0, [0x100]).status, packets.NOT_SET)
+
+    def test_ambiguous_render_never_fabricates_a_node(self):
+        rendered = packets.resolve_last_byte(0xDC, [0x11AA11DC, 0x2222DCDC]).render()
+        self.assertNotIn("!", rendered)
+
+    def test_decrypt_failure_is_derived_from_signal_without_portnum(self):
+        failed = packets.summarize({"id": 2, "encrypted": b"\xde\xad", "rxRssi": -64}, observer="o")
+        self.assertEqual(failed["status"], packets.ST_DECRYPT_FAIL)
+        ok = packets.summarize({"id": 3, "decoded": {"portnum": "X", "payload": b"a"}}, observer="o")
+        self.assertEqual(ok["status"], packets.ST_OK)
+
+
+class TestLedger(unittest.TestCase):
+    def rows(self):
+        base = {"observer": "obs", "dir": "SEEN", "portnum": "TEXT_MESSAGE_APP",
+                "from_node": "!aaa", "to_node": "^all", "status": "OK", "payload_size": 10}
+        return [
+            {**base, "id": 1, "ts": 1.0, "rx_rssi": -38, "rx_snr": 6.0, "hops_taken": 0,
+             "relay_node": {"raw": None, "status": "not_set"}},
+            # Same packet id, different path: a relayed copy at a very different level.
+            {**base, "id": 1, "ts": 1.5, "rx_rssi": -73, "rx_snr": 2.0, "hops_taken": 1,
+             "relay_node": {"raw": 0xDC, "status": "unique", "node_num": 0x77E4F0DC}},
+            {**base, "id": 2, "ts": 2.0, "rx_rssi": -60, "rx_snr": 5.0, "hops_taken": 0,
+             "relay_node": {"raw": None, "status": "not_set"}},
+        ]
+
+    def test_deduplicates_by_id_but_keeps_distinct_paths(self):
+        lane = ledger.PacketLane(self.rows())
+        self.assertEqual(lane.count(), 2)
+        first = [s for s in lane.sightings() if s.packet_id == 1][0]
+        self.assertEqual(first.rebroadcast_count, 2)
+        # The whole point: -38 and -73 are two real paths, not one -55 dBm path.
+        self.assertEqual(len(first.paths), 2)
+        self.assertIn(-38, first.rssis)
+        self.assertIn(-73, first.rssis)
+
+    def test_rf_stats_report_spread_not_just_centre(self):
+        stats = ledger.PacketLane(self.rows()).rf_stats("obs")
+        self.assertIn("median", stats["rssi"])
+        self.assertIn("stdev", stats["rssi"])
+        self.assertGreater(stats["rssi"]["max"] - stats["rssi"]["min"], 30)
+
+    def test_rf_only_excludes_traffic_that_never_crossed_the_air(self):
+        rows = self.rows() + [
+            {"id": 9, "ts": 3.0, "observer": "obs", "dir": "SEEN", "status": "OK",
+             "via_mqtt": True, "rx_rssi": None, "rx_snr": None, "relay_node": {}},
+        ]
+        lane = ledger.PacketLane(rows)
+        self.assertEqual(lane.count(), 3)
+        self.assertEqual(lane.count(rf_only=True), 2)
+
+    def test_decrypt_failures_grouped_by_source(self):
+        lane = ledger.PacketLane([
+            {"id": 5, "ts": 1.0, "observer": "o", "from_node": "!bad", "status": "DECRYPT_FAIL",
+             "relay_node": {}},
+            {"id": 6, "ts": 1.0, "observer": "o", "from_node": "!bad", "status": "DECRYPT_FAIL",
+             "relay_node": {}},
+        ])
+        self.assertEqual(lane.decrypt_failures_by_source(), {"!bad": 2})
+
+    def test_log_lane_accepts_alternative_wordings(self):
+        lane = ledger.LogLane([
+            {"node": "dut", "line": "Received text msg from=0x1"},
+            {"node": "dut", "line": "phone downloaded packet (id=0x2 fr=0x1)"},
+        ])
+        # One wording finds one line; the pair finds both. This is the failure that
+        # scored a demonstrably working link as zero received, twice.
+        self.assertEqual(lane.count([r"Received text msg"]), 1)
+        self.assertEqual(lane.count([r"Received text msg", r"phone downloaded packet"]), 2)
+
+
+class TestStreams(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.rec = streams.Recorder(self.dir)
+
+    def tearDown(self):
+        self.rec.close()
+
+    def test_marks_land_in_both_events_and_logs(self):
+        self.rec.mark("S1:start")
+        self.rec.close()
+        self.assertEqual(len(streams.marks(self.dir)), 1)
+        logs = list(streams.read_stream(self.dir, streams.LOGS))
+        self.assertTrue(any(r.get("level") == "MARK" for r in logs))
+
+    def test_scenario_slice_is_bounded_by_markers(self):
+        self.rec.log(node="dut", line="before")
+        self.rec.mark("S1:start")
+        self.rec.log(node="dut", line="inside")
+        self.rec.mark("S1:end")
+        self.rec.log(node="dut", line="after")
+        self.rec.close()
+        lines = [r.get("line") for r in
+                 streams.between_marks(self.dir, "S1:start", "S1:end", streams.LOGS)]
+        self.assertIn("inside", lines)
+        self.assertNotIn("before", lines)
+        self.assertNotIn("after", lines)
+
+    def test_assert_live_raises_on_a_stalled_stream(self):
+        self.rec.event("started")
+        self.rec.assert_live(max_age_s=60)
+        # Age the stream past the bound: a silent stop must not read as a real negative.
+        self.rec._streams[streams.EVENTS].last_ts = time.time() - 500
+        with self.assertRaises(streams.CaptureStalled):
+            self.rec.assert_live(max_age_s=60)
+
+    def test_truncated_final_line_is_survivable(self):
+        self.rec.log(node="dut", line="good")
+        self.rec.close()
+        with (self.dir / "logs.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write('{"ts": 1, "line": "trunca')
+        self.assertEqual(len(list(streams.read_stream(self.dir, streams.LOGS))), 1)
+
+
+class TestManifestAndBuilder(unittest.TestCase):
+    def test_identical_bakes_share_one_image(self):
+        a = manifest.Bake("env", {"P": "1"}, {"F": 1})
+        b = manifest.Bake("env", {"P": "1"}, {"F": 1})
+        c = manifest.Bake("env", {"P": "2"}, {"F": 1})
+        self.assertEqual(a.content_hash("sha", False), b.content_hash("sha", False))
+        self.assertNotEqual(a.content_hash("sha", False), c.content_hash("sha", False))
+
+    def test_same_flags_against_different_source_are_different_images(self):
+        bake = manifest.Bake("env")
+        self.assertNotEqual(bake.content_hash("aaa", False), bake.content_hash("bbb", False))
+        self.assertNotEqual(bake.content_hash("aaa", False), bake.content_hash("aaa", True))
+
+    def test_capabilities_follow_the_preprocessor_not_python_truthiness(self):
+        # -DFOO=0 defines the macro and disables the feature.
+        self.assertNotIn(manifest.LOG_TRACE,
+                         manifest.Bake("e", build_flags={"MESHTASTIC_TRACE_LOGGING": 0}).capabilities())
+        self.assertIn(manifest.LOG_TRACE,
+                      manifest.Bake("e", build_flags={"MESHTASTIC_TRACE_LOGGING": 1}).capabilities())
+
+    def test_segger_moves_the_log_sink_out_of_reach(self):
+        caps = manifest.Bake("e", build_flags={"USE_SEGGER": 1}).capabilities()
+        self.assertIn(manifest.LOG_SINK_RTT, caps)
+        self.assertNotIn(manifest.LOG_SINK_API, caps)
+
+    def test_bench_only_flags_break_release_representativeness(self):
+        self.assertTrue(manifest.Bake("e", build_flags={"DEBUG_HEAP": 1}).release_representative())
+        self.assertFalse(
+            manifest.Bake("e", build_flags={"MESHTASTIC_TRACE_LOGGING": 1}).release_representative()
+        )
+
+    def test_the_build_tag_does_not_disqualify_an_image_but_must_not_ship(self):
+        # Every bench image carries the tag by construction, so counting it as
+        # disqualifying would mark every row non-representative and mean nothing.
+        tagged = manifest.Bake("e").with_build_tag("f820151a8eed")
+        self.assertTrue(tagged.release_representative())
+        self.assertEqual(tagged.must_not_ship(), ["BENCH_BUILD_TAG"])
+
+        # A flag that does change behaviour still disqualifies, tag or no tag.
+        traced = manifest.Bake("e", build_flags={"MESHTASTIC_TRACE_LOGGING": 1}).with_build_tag("x")
+        self.assertFalse(traced.release_representative())
+
+    def test_drift_guard_refuses_a_stale_image(self):
+        mf = manifest.Manifest(Path(tempfile.mkdtemp()) / "m.json")
+        original = manifest.Bake("env", {"P": "1"})
+        mf.assign("S1", "dut", original.content_hash("sha", False))
+        mf.check_drift("S1", "dut", original, "sha", False)  # unchanged: fine
+        edited = manifest.Bake("env", {"P": "2"})
+        with self.assertRaises(manifest.DriftError):
+            mf.check_drift("S1", "dut", edited, "sha", False)
+
+    def test_userprefs_are_restored_byte_for_byte(self):
+        root = Path(tempfile.mkdtemp())
+        prefs = root / "userPrefs.jsonc"
+        prefs.write_text('{\n  // comment\n  "USERPREFS_A": "1"\n}\n', encoding="utf-8")
+        before = prefs.read_bytes()
+        with builder.temporary_userprefs(root, {"USERPREFS_B": "2"}):
+            self.assertIn("USERPREFS_B", prefs.read_text(encoding="utf-8"))
+        self.assertEqual(prefs.read_bytes(), before)
+
+    def test_malformed_injection_is_caught_before_compiling(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "userPrefs.jsonc").write_text('{"A": "1"}', encoding="utf-8")
+        with self.assertRaises(builder.BuildError):
+            with builder.temporary_userprefs(root, {'BAD"KEY': "x"}):
+                pass
+
+    def test_flag_translation_matches_the_preprocessor(self):
+        env = builder.build_flags_env({"BARE": True, "VAL": 7, "OFF": False, "NONE": None})
+        self.assertEqual(env["PLATFORMIO_BUILD_FLAGS"], "-DBARE -DVAL=7")
+
+    def test_build_lock_is_exclusive(self):
+        root = Path(tempfile.mkdtemp())
+        with builder.build_lock(root):
+            with self.assertRaises(builder.BuildError):
+                with builder.build_lock(root, timeout=0.5):
+                    pass
+
+
+class TestScenario(unittest.TestCase):
+    def empty_ledger(self, log_rows=()):
+        return ledger.Ledger(packets=ledger.PacketLane([]), logs=ledger.LogLane(log_rows))
+
+    def test_missing_capability_is_invalid_not_not_observed(self):
+        check = scenario.LogCount("needs_trace", ["x"], at_least=1, requires=["log.TRACE"])
+        outcome = check.evaluate(self.empty_ledger(), scenario.Context("S", capabilities={"dut": set()}))
+        self.assertEqual(outcome.verdict, scenario.INVALID)
+
+    def test_absent_evidence_with_capability_present_is_not_observed(self):
+        check = scenario.LogCount("wanted", ["never-appears"], at_least=1)
+        ctx = scenario.Context("S", capabilities={"dut": {"log.DEBUG"}})
+        self.assertEqual(check.evaluate(self.empty_ledger(), ctx).verdict, scenario.NOT_OBSERVED)
+
+    def test_too_few_trials_is_not_observed_not_fail(self):
+        rows = [{"node": "dut", "line": "CAD arm"}, {"node": "dut", "line": "CAD arm"}]
+        check = scenario.RateAssertion("r", ["CAD busy"], ["CAD arm"], node="dut", min_trials=10)
+        outcome = check.evaluate(self.empty_ledger(rows), scenario.Context("S", capabilities={"dut": set()}))
+        self.assertEqual(outcome.verdict, scenario.NOT_OBSERVED)
+
+    def test_rate_below_threshold_with_enough_trials_fails(self):
+        rows = [{"node": "dut", "line": "CAD arm"} for _ in range(10)]
+        check = scenario.RateAssertion("r", ["CAD busy"], ["CAD arm"], node="dut",
+                                       min_rate=0.5, min_trials=5)
+        outcome = check.evaluate(self.empty_ledger(rows), scenario.Context("S", capabilities={"dut": set()}))
+        self.assertEqual(outcome.verdict, scenario.FAIL)
+
+    def test_precondition_yields_not_observed_rather_than_failing_good_firmware(self):
+        check = scenario.LogCount("restored", ["restore"], at_least=1,
+                                  precondition=lambda ctx: ctx.params.get("target_rf_differs", False),
+                                  precondition_reason="target uses home RF, no switch to restore")
+        outcome = check.evaluate(self.empty_ledger(), scenario.Context("S", capabilities={"dut": set()}))
+        self.assertEqual(outcome.verdict, scenario.NOT_OBSERVED)
+        self.assertIn("home RF", outcome.evidence)
+
+    def test_from_role_resolves_to_a_node_id_and_never_passes_vacuously(self):
+        led = ledger.Ledger(
+            packets=ledger.PacketLane([{"id": 1, "ts": 1.0, "observer": "observer",
+                                        "from_node": "!abc", "status": "OK",
+                                        "rx_rssi": -50, "relay_node": {}}]),
+            logs=ledger.LogLane([]))
+        check = scenario.PacketCount("silent", observer="observer", from_role="dut", at_most=0)
+
+        # No settled state: the check cannot address its subject, so an at_most bound
+        # must not pass by matching nothing.
+        unprovisioned = scenario.Context("S", capabilities={"dut": set()})
+        self.assertEqual(check.evaluate(led, unprovisioned).verdict, scenario.INVALID)
+
+        silent = scenario.Context("S", capabilities={"dut": set()},
+                                  settled={"dut": {"node_id": "!dead"}})
+        self.assertEqual(check.evaluate(led, silent).verdict, scenario.PASS)
+
+        talking = scenario.Context("S", capabilities={"dut": set()},
+                                   settled={"dut": {"node_id": "!abc"}})
+        self.assertEqual(check.evaluate(led, talking).verdict, scenario.FAIL)
+
+    def test_packet_assertion_against_a_raw_captured_node_is_invalid(self):
+        # The passive observer has no packet lane, so an at_most bound over it would be a
+        # control that cannot fail - the most dangerous shape a check can take.
+        check = scenario.PacketCount("silent", observer="observer", at_most=0)
+        ctx = scenario.Context("S", capture_modes={"observer": "raw"})
+        outcome = check.evaluate(self.empty_ledger(), ctx)
+        self.assertEqual(outcome.verdict, scenario.INVALID)
+        self.assertIn("raw serial", outcome.evidence)
+
+    def test_observer_silence_needs_the_observer_to_have_been_listening(self):
+        heard = [{"node": "observer", "line": "Received text msg from=0x77e4f0dc"},
+                 {"node": "observer", "line": "unrelated"}]
+        check = scenario.ObserverSilence("sil", observer_node="observer", from_role="dut")
+        dut = {"dut": {"node_id": "!77e4f0dc", "node_num": 0x77E4F0DC}}
+        other = {"dut": {"node_id": "!deadbeef", "node_num": 0xDEADBEEF}}
+
+        self.assertEqual(
+            check.evaluate(self.empty_ledger(heard), scenario.Context("S", settled=dut)).verdict,
+            scenario.FAIL)
+        self.assertEqual(
+            check.evaluate(self.empty_ledger(heard), scenario.Context("S", settled=other)).verdict,
+            scenario.PASS)
+        # An observer that logged nothing was not listening; that is not evidence of
+        # silence on the air.
+        self.assertEqual(
+            check.evaluate(self.empty_ledger([]), scenario.Context("S", settled=other)).verdict,
+            scenario.NOT_OBSERVED)
+
+    def test_an_image_claiming_a_build_tag_must_have_echoed_one(self):
+        from bench.manifest import BUILD_TAG
+
+        base = {"node_id": "!abc", "region": "EU_868", "modem_preset": "LONG_FAST",
+                "channels": [{"index": 0}], "errors": []}
+        check = scenario.SettledStateAssertion()
+
+        # The -D silently failing to reach the compiler leaves every row asserting
+        # against firmware nobody can identify.
+        claimed = scenario.Context("S", settled={"dut": {**base, "build_tag": None}},
+                                   capabilities={"dut": {BUILD_TAG}})
+        self.assertEqual(check.evaluate(self.empty_ledger(), claimed).verdict, scenario.INVALID)
+
+        echoed = scenario.Context("S", settled={"dut": {**base, "build_tag": "f4060bbce604"}},
+                                  capabilities={"dut": {BUILD_TAG}})
+        self.assertEqual(check.evaluate(self.empty_ledger(), echoed).verdict, scenario.PASS)
+
+        # An image that never claimed the capability is not penalised for lacking it.
+        untagged = scenario.Context("S", settled={"dut": {**base, "build_tag": None}},
+                                    capabilities={"dut": set()})
+        self.assertEqual(check.evaluate(self.empty_ledger(), untagged).verdict, scenario.PASS)
+
+    def test_rollup_precedence(self):
+        O = scenario.Outcome
+        self.assertEqual(scenario.roll_up([O("a", scenario.PASS, "")]), scenario.PASS)
+        self.assertEqual(
+            scenario.roll_up([O("a", scenario.PASS, ""), O("b", scenario.NOT_OBSERVED, "")]),
+            scenario.NOT_OBSERVED)
+        self.assertEqual(
+            scenario.roll_up([O("a", scenario.FAIL, ""), O("b", scenario.NOT_OBSERVED, "")]),
+            scenario.FAIL)
+        # INVALID dominates: preconditions were never established, so the row says nothing.
+        self.assertEqual(
+            scenario.roll_up([O("a", scenario.FAIL, ""), O("b", scenario.INVALID, "")]),
+            scenario.INVALID)
+        self.assertEqual(scenario.roll_up([]), scenario.INVALID)
+
+    def test_channel_sensing_row_cannot_use_api_injection(self):
+        row = scenario.Scenario(
+            id="X", description="",
+            roles={"dut": scenario.RoleBake("dut", manifest.Bake("e"))},
+            stimulus=scenario.STIM_API, senses_channel=True,
+            assertions=[scenario.LogCount("a", ["x"], at_least=1)])
+        problems = row.validate()
+        self.assertTrue(any("puts no energy on the air" in p for p in problems))
+
+    def test_assertion_against_an_undefined_role_is_caught(self):
+        row = scenario.Scenario(
+            id="X", description="",
+            roles={"dut": scenario.RoleBake("dut", manifest.Bake("e"))},
+            assertions=[scenario.LogCount("a", ["x"], at_least=1, role="ghost")])
+        self.assertTrue(any("ghost" in p for p in row.validate()))
+
+
+class TestDevicesAndObserver(unittest.TestCase):
+    def test_observer_role_is_locked_down_on_construction(self):
+        node = BenchNode("obs", "SERIAL", "observer")
+        self.assertTrue(node.never_command)
+        self.assertTrue(node.never_flash)
+        with self.assertRaises(CommandRefused):
+            assert_commandable(node)
+
+    def test_dfu_needs_an_observed_transition(self):
+        before = {"COM3": (0x239A, 0x00B3)}
+        # A bootloader-shaped PID that was always there is not evidence of DFU.
+        self.assertIsNone(looks_like_dfu(before, {"COM3": (0x239A, 0x00B3)}))
+        self.assertEqual(looks_like_dfu(before, {"COM3": (0x239A, 0x0029)}), "COM3")
+        self.assertEqual(looks_like_dfu(before, {"COM3": (0x239A, 0x00B3),
+                                                 "COM9": (0x239A, 0x0029)}), "COM9")
+
+    def reader(self):
+        r = _RawSerialReader.__new__(_RawSerialReader)
+        r._buf = bytearray()
+        r._frames_skipped = 0
+        return r
+
+    def test_ansi_colour_does_not_hide_the_log_level(self):
+        from bench.observer import _parse_log_line
+
+        # The firmware colours its prefix, and the escapes sit between the level and the
+        # pipe - so an unstripped line parses as having no level at all. Captured from
+        # real hardware; this is the boot banner carrying the build tag.
+        esc = chr(27)
+        line = f"{esc}[0m{esc}[32mINFO  {esc}[0m| ??:??:?? 3 {esc}[32mBENCH: tag=3c9a7f5f534d"
+        parsed = _parse_log_line(line)
+        self.assertEqual(parsed["level"], "INFO")
+        self.assertEqual(parsed["uptime_s"], 3)
+        self.assertNotIn(esc, parsed["msg"])
+        self.assertEqual(parsed["line"], line, "the raw line must survive verbatim")
+
+    def test_protobuf_frames_do_not_shred_log_lines(self):
+        r = self.reader()
+        frame = bytes((0x94, 0xC3, 0x00, 0x05)) + bytes(range(5))
+        r._buf.extend(b"INFO  | 00:01 42 [Radio] CAD busy\n" + frame + b"DEBUG | 00:02 43 x\n")
+        self.assertEqual(r.drain(),
+                         ["INFO  | 00:01 42 [Radio] CAD busy", "DEBUG | 00:02 43 x"])
+        self.assertEqual(r._frames_skipped, 1)
+
+    def test_frame_split_across_reads_is_carried_over(self):
+        r = self.reader()
+        r._buf.extend(b"line one\n" + bytes((0x94, 0xC3, 0x00, 0x08)) + bytes(3))
+        self.assertEqual(r.drain(), ["line one"])
+        r._buf.extend(bytes(5) + b"line two\n")
+        self.assertEqual(r.drain(), ["line two"])
+        self.assertEqual(r._frames_skipped, 1)
+
+    def test_text_that_collides_with_a_frame_header_is_not_eaten(self):
+        r = self.reader()
+        # 0x94c3 followed by an implausible length: text, not a frame.
+        r._buf.extend(bytes((0x94, 0xC3, 0xFF, 0xFF)) + b"still readable\n")
+        self.assertIn("still readable", " ".join(r.drain()))
+
+
+class TestSettledStateComparison(unittest.TestCase):
+    """A precondition that quietly did not apply is the hollow pass, restated."""
+
+    def compare(self, spec_extra, observed_extra):
+        from bench import provision
+
+        p = provision.Provisioner.__new__(provision.Provisioner)
+        spec = provision.NodeSpec(region="EU_868", extra_config=spec_extra)
+        state = provision.SettledState(
+            node="dut", serial_number="S", port="COM1", node_id="!a", node_num=1,
+            firmware_version="2.8.0", build_tag="t", region="EU_868",
+            modem_preset=None, role=None, tx_enabled=True,
+            extra_config=observed_extra)
+        return p._compare(state, spec)
+
+    def test_a_spec_value_that_did_not_apply_is_caught(self):
+        # The real case: L6 asked for tx_enabled false, the device stayed true, and the
+        # row passed its settled-state check while its negative control measured nothing.
+        problems = self.compare({"lora.tx_enabled": False}, {"lora.tx_enabled": True})
+        self.assertTrue(any("tx_enabled" in p for p in problems), problems)
+
+    def test_a_spec_value_that_did_apply_is_accepted(self):
+        self.assertEqual(self.compare({"lora.tx_enabled": False}, {"lora.tx_enabled": False}), [])
+
+    def test_disabling_tx_is_not_itself_treated_as_a_fault(self):
+        # Scenarios deliberately disable TX; that is the point of the control, not an error.
+        self.assertEqual(self.compare({"lora.tx_enabled": False}, {"lora.tx_enabled": False}), [])
+
+    def test_an_unreadable_value_is_a_problem_not_a_pass(self):
+        problems = self.compare({"lora.tx_enabled": False}, {})
+        self.assertTrue(any("could not be read back" in p for p in problems), problems)
+
+
+class TestProvisionerReadBack(unittest.TestCase):
+    def test_verify_refreshes_before_reading_so_it_cannot_read_a_cache(self):
+        from bench import provision
+
+        calls = []
+
+        class StubObserver:
+            held = {}
+
+            def mark_dropped(self, name, reason):
+                calls.append(("dropped", name, reason))
+
+            def health_tick(self):
+                pass
+
+        p = provision.Provisioner(StubObserver())
+        p._wait_ready = lambda node, **kw: calls.append(("waited", node.name))
+        p.read_settled_state = lambda node: calls.append(("read", node.name)) or provision.SettledState(
+            node=node.name, serial_number="S", port="C", node_id="!a", node_num=1,
+            firmware_version="v", build_tag="t", region="EU_868", modem_preset=None,
+            role=None)
+
+        node = BenchNode("dut", "SER", "dut")
+        p.verify(node, provision.NodeSpec(region="EU_868"))
+
+        # The reconnect must happen BEFORE the read, or the read returns the client's
+        # cached config and a write that never stuck looks identical to one that did.
+        kinds = [c[0] for c in calls]
+        self.assertLess(kinds.index("dropped"), kinds.index("read"))
+
+
+class TestHardwareGuard(unittest.TestCase):
+    """The one check that guards the instrument rather than the answer."""
+
+    def test_env_maps_to_the_board_from_the_variant_ini(self):
+        from bench import hardware
+
+        self.assertEqual(
+            hardware.hw_model_for_env(Path("."), "nrf52_promicro_diy_tcxo"),
+            "NRF52_PROMICRO_DIY")
+
+    def test_a_mismatched_board_is_refused(self):
+        from bench import hardware
+
+        hardware.assert_compatible("dut", "NRF52_PROMICRO_DIY", "NRF52_PROMICRO_DIY")
+        # The near-miss on this bench: a Heltec named as a promicro peer.
+        with self.assertRaises(hardware.HardwareMismatch):
+            hardware.assert_compatible("peer", "HELTEC_MESH_POCKET", "NRF52_PROMICRO_DIY")
+
+    def test_unknown_on_either_side_is_refused_not_assumed(self):
+        from bench import hardware
+
+        # "I could not tell" is not a licence to write flash: the cost of being wrong is
+        # the node, the cost of stopping is one line in the node table.
+        with self.assertRaises(hardware.HardwareMismatch):
+            hardware.assert_compatible("peer", None, "NRF52_PROMICRO_DIY")
+        with self.assertRaises(hardware.HardwareMismatch):
+            hardware.assert_compatible("peer", "NRF52_PROMICRO_DIY", None)
+
+
+class TestStatusServer(unittest.TestCase):
+    def test_vanished_run_reports_died_not_a_stale_running(self):
+        run = Path(tempfile.mkdtemp())
+        rec = streams.Recorder(run)
+        rec.heartbeat(component="runner", stage="4-execute")
+        rec.close()
+        (run / "state.json").write_text(json.dumps({"stage": "4-execute", "started_at": time.time()}))
+        self.assertEqual(server.read_state(run)["status"], server.RUNNING)
+
+        raw = (run / "status.jsonl").read_text(encoding="utf-8").splitlines()
+        rows = [json.loads(line) for line in raw if line.strip()]
+        rows[-1]["ts"] = time.time() - 10_000
+        (run / "status.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+        self.assertEqual(server.read_state(run)["status"], server.DIED)
+
+    def test_state_is_rebuilt_from_disk_with_no_memory(self):
+        run = Path(tempfile.mkdtemp())
+        (run / "results.json").write_text(json.dumps({
+            "S1": {"verdict": "PASS", "outcomes": [{"name": "a", "verdict": "PASS",
+                                                    "evidence": "12 packets"}]}}))
+        state = server.read_state(run)
+        self.assertEqual(state["rows"][0]["verdict"], "PASS")
+        self.assertIn("12 packets", state["rows"][0]["outcomes"][0]["evidence"])
+
+
+class TestLbtScenarioTable(unittest.TestCase):
+    def test_table_is_valid_and_deduplicates(self):
+        from bench.scenarios.lbt import SCENARIOS
+
+        self.assertEqual([p for s in SCENARIOS for p in s.validate()], [])
+        pairs = [(s.id, r) for s in SCENARIOS for r in s.roles]
+        images = {rb.bake.content_hash("sha", False) for s in SCENARIOS for rb in s.roles.values()}
+        self.assertGreater(len(pairs), len(images))
+
+    def test_every_row_has_a_way_to_fail(self):
+        from bench.scenarios.lbt import SCENARIOS
+
+        for row in SCENARIOS:
+            self.assertTrue(row.assertions, f"{row.id} could never fail")
+
+    def test_the_trace_gated_row_declares_its_requirement(self):
+        from bench.scenarios.lbt import SCENARIOS
+
+        row = next(s for s in SCENARIOS if s.id.startswith("L5"))
+        self.assertIn("log.TRACE", row.required_capabilities()["dut"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

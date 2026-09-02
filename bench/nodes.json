@@ -1,0 +1,28 @@
+{
+  "nodes": [
+    {
+      "name": "dut",
+      "serial_number": "962A7036E02D0A91",
+      "role": "dut",
+      "board": "NRF52_PROMICRO_DIY",
+      "notes": ["flashed and commanded every row"]
+    },
+    {
+      "name": "peer",
+      "serial_number": "B050C9770E65DC2B",
+      "role": "peer",
+      "board": "NRF52_PROMICRO_DIY",
+      "notes": ["second endpoint, and the channel occupier for rf_peer stimulus"]
+    },
+    {
+      "name": "observer",
+      "serial_number": "52304EFC30A77A95",
+      "role": "observer",
+      "board": "HELTEC_MESH_POCKET",
+      "notes": [
+        "stock firmware, never flashed and never commanded",
+        "a different board on purpose: it is the naive-client instrument, so it must not share the DUT's build"
+      ]
+    }
+  ]
+}
