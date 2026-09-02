@@ -460,8 +460,11 @@ def tail_sources(run_dir: Path, rows: list[dict]) -> dict:
             counts[name] = counts.get(name, 0) + 1
 
     # Last port_state event per node is the authoritative account of where a device is.
+    # Bounded: this runs on every poll, and a long run's event stream is tens of
+    # thousands of rows - rescanning all of it three times a minute to learn where three
+    # devices are is not a trade worth making.
     states: dict[str, dict] = {}
-    for ev in streams.read_stream(Path(run_dir), streams.EVENTS):
+    for ev in tail(run_dir, streams.EVENTS, limit=600):
         name = ev.get("node")
         if not name:
             continue
@@ -1052,7 +1055,7 @@ async function refresh() {
             const i = src[n] || {};
             const where = i.state ? `${esc(i.state)}${i.why ? " - " + esc(i.why) : ""}`
                                   : "no port state recorded";
-            return `<span class=k>${esc(n)}: no output · ${where}</span>`;
+            return `<span class=k>${esc(n)}: nothing in this window · ${where}</span>`;
           }).join(" &nbsp; ")
         : "";
     }
