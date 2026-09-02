@@ -138,6 +138,12 @@ class PortOwner:
         self.reconnects = 0
         self.dropped_at: float | None = None
         self.last_error: str | None = None
+        # What the DEVICE said it is, once anything has asked. Distinct from the board
+        # declared in the node table: the table is hand-written and is exactly the thing
+        # that gets a board wrong, so both are shown and a mismatch is visible.
+        self.observed_model: str | None = None
+        self.observed_node_id: str | None = None
+        self.firmware: str | None = None
 
     # -- reporting -------------------------------------------------------------
 
@@ -150,6 +156,18 @@ class PortOwner:
             self._event("port_state", was=self.state, now=state, why=why)
             self.state = state
 
+    def observe(self, iface: Any) -> None:
+        """Record what the device says it is, from an interface already open."""
+        try:
+            info = iface.getMyNodeInfo() or {}
+            user = info.get("user") or {}
+            self.observed_model = user.get("hwModel") or self.observed_model
+            self.observed_node_id = user.get("id") or self.observed_node_id
+            meta = getattr(iface, "metadata", None)
+            self.firmware = getattr(meta, "firmware_version", None) or self.firmware
+        except Exception:  # noqa: BLE001 - identity is a nicety here, never a blocker
+            pass
+
     def status(self) -> dict:
         return {
             "node": self.node.name,
@@ -160,6 +178,20 @@ class PortOwner:
                 None if self.dropped_at is None else round(time.time() - self.dropped_at, 1)
             ),
             "last_error": self.last_error,
+            # Identity, declared and observed side by side.
+            "role": self.node.role,
+            "serial_number": self.node.serial_number,
+            "declared_board": self.node.board,
+            "observed_model": self.observed_model,
+            "node_id": self.observed_node_id,
+            "firmware": self.firmware,
+            "board_matches": (
+                None if not (self.node.board and self.observed_model)
+                else self.node.board.strip().upper() == self.observed_model.strip().upper()
+            ),
+            "never_command": self.node.never_command,
+            "never_flash": self.node.never_flash,
+            "capture": "raw serial" if self.node.never_command else "protobuf api",
         }
 
     # -- presence --------------------------------------------------------------
@@ -208,6 +240,7 @@ class PortOwner:
                 return budget.result(TIMED_OUT if error is None else FAILED, error or "open timed out")
 
             self.iface = iface
+            self.observe(iface)
             if self.dropped_at is not None:
                 self._event("capture_gap_closed", gap_s=round(time.time() - self.dropped_at, 1))
                 self.dropped_at = None
@@ -395,45 +428,148 @@ def _safe_close(iface: Any) -> None:
 # -- schedule -------------------------------------------------------------------
 
 
+# -- schedule -------------------------------------------------------------------
+
+PLANNED = "planned"
+RUNNING = "running"
+DONE = "done"
+SKIPPED = "skipped"
+FAILED_STEP = "failed"
+
+
 @dataclass
 class Step:
-    """One planned unit of work, with the budget that bounds it."""
+    """One planned unit of work, its budget, and what became of it.
 
+    Steps nest. A row's provisioning is one line in the plan and eight operations
+    underneath it, and the difference matters: most of those are skipped when the node is
+    already in the required state, so a flat plan overstates the run by an hour and gives
+    no way to see where the time actually went.
+    """
+
+    id: str
     name: str
     budget_s: float
     detail: str = ""
+    kind: str = ""
+    node: str | None = None
+    children: list["Step"] = field(default_factory=list)
+    status: str = PLANNED
+    outcome: str | None = None
+    started_at: float | None = None
+    ended_at: float | None = None
+
+    @property
+    def elapsed_s(self) -> float | None:
+        if self.started_at is None:
+            return None
+        return (self.ended_at or time.time()) - self.started_at
+
+    @property
+    def overran(self) -> bool:
+        el = self.elapsed_s
+        return bool(el and self.budget_s and el > self.budget_s)
+
+    def add(self, step_id: str, name: str, budget_s: float, detail: str = "", **kw) -> "Step":
+        child = Step(step_id, name, budget_s, detail, **kw)
+        self.children.append(child)
+        return child
+
+    def walk(self):
+        yield self
+        for child in self.children:
+            yield from child.walk()
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "budget_s": self.budget_s, "detail": self.detail}
+        return {
+            "id": self.id,
+            "name": self.name,
+            "budget_s": self.budget_s,
+            "detail": self.detail,
+            "kind": self.kind,
+            "node": self.node,
+            "status": self.status,
+            "outcome": self.outcome,
+            "elapsed_s": None if self.elapsed_s is None else round(self.elapsed_s, 1),
+            "overran": self.overran,
+            "children": [c.to_dict() for c in self.children],
+        }
 
 
 @dataclass
 class Schedule:
-    """What the run intends to do, and how long it has to do it.
+    """What the run intends to do, how long it has, and how far it has got.
 
     Written before the run starts, so an unattended bench has a knowable end rather than
-    an open-ended one. Every step carries its budget; the total is the worst case, and a
-    run that exceeds it has something wrong rather than something slow.
+    an open-ended one. The budgets are a worst case: a run past the total has something
+    wrong rather than something slow, and a step that finishes early says so by leaving
+    the difference between its budget and its elapsed time on the page.
     """
 
     steps: list[Step] = field(default_factory=list)
 
-    def add(self, name: str, budget_s: float, detail: str = "") -> None:
-        self.steps.append(Step(name, budget_s, detail))
+    def add(self, step_id: str, name: str, budget_s: float, detail: str = "", **kw) -> Step:
+        step = Step(step_id, name, budget_s, detail, **kw)
+        self.steps.append(step)
+        return step
+
+    def find(self, step_id: str) -> Step | None:
+        for top in self.steps:
+            for step in top.walk():
+                if step.id == step_id:
+                    return step
+        return None
+
+    def begin(self, step_id: str) -> Step | None:
+        step = self.find(step_id)
+        if step is not None:
+            step.status = RUNNING
+            step.started_at = time.time()
+        return step
+
+    def finish(self, step_id: str, status: str = DONE, outcome: str | None = None) -> Step | None:
+        step = self.find(step_id)
+        if step is not None:
+            step.status = status
+            step.outcome = outcome
+            step.ended_at = time.time()
+        return step
+
+    def skip(self, step_id: str, why: str = "") -> Step | None:
+        """Mark a step skipped - the node was already as required, say.
+
+        Distinct from done: a skipped step spent none of its budget, which is why the
+        plan's total is a ceiling rather than an estimate.
+        """
+        return self.finish(step_id, SKIPPED, why)
 
     @property
     def total_s(self) -> float:
         return sum(s.budget_s for s in self.steps)
+
+    @property
+    def counts(self) -> dict:
+        out = {PLANNED: 0, RUNNING: 0, DONE: 0, SKIPPED: 0, FAILED_STEP: 0}
+        for top in self.steps:
+            for step in top.walk():
+                out[step.status] = out.get(step.status, 0) + 1
+        return out
 
     def to_dict(self) -> dict:
         return {
             "steps": [s.to_dict() for s in self.steps],
             "total_s": round(self.total_s, 1),
             "count": len(self.steps),
+            "counts": self.counts,
         }
 
     def summary(self) -> str:
-        lines = [f"  {s.name:44} {s.budget_s:6.0f}s  {s.detail}" for s in self.steps]
+        lines = []
+        for step in self.steps:
+            mark = {PLANNED: " ", RUNNING: ">", DONE: "x", SKIPPED: "-", FAILED_STEP: "!"}
+            lines.append(f"  [{mark.get(step.status, ' ')}] {step.name:42} {step.budget_s:6.0f}s  {step.detail}")
+            for child in step.children:
+                lines.append(f"        {mark.get(child.status, ' ')} {child.name:38} {child.budget_s:6.0f}s")
         hours, rem = divmod(int(self.total_s), 3600)
-        lines.append(f"  {'TOTAL (worst case)':44} {self.total_s:6.0f}s  = {hours}h{rem // 60:02d}m")
+        lines.append(f"  {'TOTAL (worst case)':46} {self.total_s:6.0f}s  = {hours}h{rem // 60:02d}m")
         return "\n".join(lines)

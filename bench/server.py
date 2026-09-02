@@ -520,6 +520,29 @@ cursor:pointer;font:inherit;font-size:.85rem;padding:.4rem .8rem}
 .bar{height:6px;background:var(--rule);border-radius:3px;overflow:hidden;margin-top:.3rem}
 .bar i{display:block;height:100%;background:var(--accent)}
 .bar i.over{background:var(--bad)}
+.step{border-bottom:1px solid var(--rule);padding:.25rem 0}
+.step:last-child{border-bottom:0}
+.step>summary{cursor:pointer;display:flex;gap:.55rem;align-items:baseline;
+list-style:none;padding:.15rem 0}
+.step>summary::-webkit-details-marker{display:none}
+.step>summary::before{content:"B8";color:var(--mut);width:.8em;flex:none;
+transition:transform .12s}
+.step[open]>summary::before{transform:rotate(90deg)}
+.step.leaf>summary::before{content:"";}
+.step .nm{flex:1;min-width:0}
+.step .bud{color:var(--mut);font-variant-numeric:tabular-nums}
+.kids{margin:.15rem 0 .35rem 1.6rem;border-left:1px solid var(--rule);padding-left:.7rem}
+.kid{display:flex;gap:.55rem;align-items:baseline;padding:.12rem 0;font-size:.82rem}
+.mark{width:5.4rem;flex:none;font-size:.68rem;font-weight:600;letter-spacing:.05em;
+text-transform:uppercase}
+.m-planned{color:var(--mut)} .m-running{color:var(--accent)}
+.m-done{color:var(--ok)} .m-skipped{color:var(--mut);opacity:.7}
+.m-failed{color:var(--bad)}
+.chips{display:flex;flex-wrap:wrap;gap:.3rem;margin:0 0 .5rem}
+.chip{background:var(--card);border:1px solid var(--rule);border-radius:999px;
+color:var(--mut);cursor:pointer;font:inherit;font-size:.76rem;padding:.15rem .6rem}
+.chip[aria-pressed="true"]{border-color:var(--accent);color:var(--fg)}
+.chip:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .run{background:var(--card);border:1px solid var(--rule);border-radius:4px;
 padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;gap:.5rem;align-items:baseline}
 .run:hover{border-color:var(--rule-strong)}
@@ -548,15 +571,12 @@ padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;ga
   <div data-panel="schedule" hidden>
   <h2>planned schedule</h2>
   <p class="sub" id="planline">no schedule yet</p>
-  <div class="card"><table id="plan"><thead><tr><th>step</th><th>budget</th>
-    <th>what it covers</th></tr></thead><tbody></tbody></table></div>
+  <div class="card" id="plan"></div>
   </div>
 
   <div data-panel="devices" hidden>
   <h2>port ownership</h2>
-  <div class="card"><table id="ports"><thead><tr><th>node</th><th>port state</th>
-    <th>port</th><th>reconnects</th><th>dropped for</th><th>last error</th>
-    </tr></thead><tbody></tbody></table></div>
+  <div class="card" id="ports"></div>
   <h2>images</h2>
   <div class="card"><table id="imgs"><thead><tr><th>bake</th><th>env</th><th>flash</th>
     <th>ram</th><th>build s</th><th>release-repr</th></tr></thead><tbody></tbody></table></div>
@@ -570,6 +590,7 @@ padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;ga
   <div class="card"><table id="cap"><thead><tr><th>stream</th><th>rows</th><th>bytes</th>
     <th>last</th></tr></thead><tbody></tbody></table></div>
   <h2 id="tail-head">tail</h2>
+  <div class="chips" id="tailchips"></div>
   <div class="card"><pre id="tail"></pre></div>
   </div>
 </div>
@@ -580,6 +601,9 @@ const $ = s => document.querySelector(s);
 let RUN = new URLSearchParams(location.search).get("run");
 const q = p => RUN ? `${p}?run=${encodeURIComponent(RUN)}` : p;
 let TAB = new URLSearchParams(location.search).get("tab") || "overview";
+// Which nodes the tail shows. null means "all", an empty Set means "none" - the two are
+// different questions and both are worth being able to ask.
+let TAILNODES = null;
 
 function showTab(name) {
   TAB = name;
@@ -684,31 +708,79 @@ async function refresh() {
   if (plan && plan.steps) {
     const done = p.elapsed_s || 0, total = plan.total_s || 0;
     const pct = total ? Math.min(100, 100 * done / total) : 0;
+    const c = plan.counts || {};
     $("#planline").innerHTML =
-      `${plan.count} steps &middot; worst case <b>${secs(total)}</b> ` +
-      `(${Math.round(total/60)} min) &middot; elapsed ${secs(done)}` +
+      `worst case <b>${secs(total)}</b> (${Math.round(total/60)} min) &middot; ` +
+      `elapsed ${secs(done)} &middot; ` +
+      `<span class=m-done>${c.done||0} done</span> &middot; ` +
+      `<span class=m-skipped>${c.skipped||0} skipped</span> &middot; ` +
+      `<span class=m-planned>${c.planned||0} planned</span>` +
+      (c.failed ? ` &middot; <span class=m-failed>${c.failed} failed</span>` : "") +
       (p.over_plan ? ' &middot; <span class=FAIL>OVER PLAN</span>' : '') +
       `<div class=bar><i class="${p.over_plan ? 'over' : ''}" style="width:${pct}%"></i></div>`;
-    rows("#plan", plan.steps, [
-      d => { const cur = p.row && d.name.startsWith(p.row);
-             return cur ? `<b>${esc(d.name)}</b>` : esc(d.name); },
-      d => secs(d.budget_s),
-      d => `<span class=k>${esc(d.detail)}</span>`]);
+
+    // A skipped step spent none of its budget, so the total is a ceiling. Showing
+    // elapsed against budget per step is where that difference becomes readable.
+    const timing = st => {
+      if (st.elapsed_s == null) return `<span class=bud>${secs(st.budget_s)}</span>`;
+      const over = st.overran ? " FAIL" : "";
+      return `<span class="bud${over}">${secs(st.elapsed_s)} / ${secs(st.budget_s)}</span>`;
+    };
+    const mark = st => `<span class="mark m-${esc(st.status)}">${esc(st.status)}</span>`;
+
+    $("#plan").innerHTML = plan.steps.map(st => {
+      const kids = (st.children || []);
+      const openNow = st.status === "running";
+      const body = kids.map(k =>
+        `<div class=kid>${mark(k)}<span class=nm>${esc(k.name)}</span>${timing(k)}
+         <span class=k>${esc(k.outcome || k.detail || "")}</span></div>`).join("");
+      return `<details class="step${kids.length ? "" : " leaf"}"${openNow ? " open" : ""}>
+        <summary>${mark(st)}<span class=nm>${esc(st.name)}</span>${timing(st)}
+          <span class=k>${esc(st.outcome || st.detail || "")}</span></summary>
+        ${kids.length ? `<div class=kids>${body}</div>` : ""}
+      </details>`;
+    }).join("");
   } else {
     $("#planline").textContent = "no schedule recorded for this run";
+    $("#plan").innerHTML = "";
   }
 
   // --- devices tab ----------------------------------------------------------
   const pstate = s.ports || {};
-  rows("#ports", Object.keys(pstate).map(k => ({node:k, ...pstate[k]})), [
-    d => esc(d.node),
-    d => { // leased and rebooting are normal mid-operation; only these mean trouble.
-           const bad = ["gave_up","lost","absent"].includes(d.state);
-           return `<span class="${bad ? "FAIL" : "PASS"}">${esc(d.state)}</span>`; },
-    d => cell(d.port),
-    d => cell(d.reconnects),
-    d => d.dropped_for_s == null ? "<span class=k>-</span>" : secs(d.dropped_for_s),
-    d => d.last_error ? `<span class=warnrow>${esc(d.last_error)}</span>` : "<span class=k>-</span>"]);
+  $("#ports").innerHTML = Object.keys(pstate).map(name => {
+    const d = pstate[name];
+    // leased and rebooting are normal mid-operation; only these mean trouble.
+    const bad = ["gave_up","lost","absent"].includes(d.state);
+    const stateHtml = `<span class="mark ${bad ? "m-failed" : "m-done"}">${esc(d.state)}</span>`;
+    // Declared against observed. The node table is hand-written and is exactly the thing
+    // that gets a board wrong, so a mismatch is called out rather than reconciled.
+    const board = d.observed_model
+      ? (d.board_matches === false
+          ? `<span class=FAIL>${esc(d.observed_model)} (table says ${esc(d.declared_board)})</span>`
+          : esc(d.observed_model))
+      : `<span class=k>${esc(d.declared_board || "unknown")} (declared, not yet observed)</span>`;
+    const facts = [
+      ["hardware", board],
+      ["node id", cell(d.node_id)],
+      ["firmware", cell(d.firmware)],
+      ["usb serial", cell(d.serial_number)],
+      ["port", cell(d.port)],
+      ["role", cell(d.role)],
+      ["capture", cell(d.capture)],
+      ["policy", (d.never_command ? "never commanded" : "commanded") +
+                 ", " + (d.never_flash ? "never flashed" : "flashable")],
+      ["reconnects", cell(d.reconnects)],
+      ["dropped for", d.dropped_for_s == null ? "-" : secs(d.dropped_for_s)],
+      ["last error", d.last_error ? `<span class=warnrow>${esc(d.last_error)}</span>` : "-"],
+    ];
+    return `<details class=step${d.state === "leased" ? " open" : ""}>
+      <summary>${stateHtml}<span class=nm><b>${esc(name)}</b></span>
+        <span class=bud>${esc(d.port || "-")}</span>
+        <span class=k>${esc(d.observed_model || d.declared_board || "")}</span></summary>
+      <div class=kids>${facts.map(([k, v]) =>
+        `<div class=kid><span class="mark m-planned">${k}</span><span class=nm>${v}</span></div>`
+      ).join("")}</div></details>`;
+  }).join("") || "<span class=k>no devices</span>";
 
   const cap = (s.capture||{}).streams || {};
   rows("#cap", Object.entries(cap).map(([k,v]) => ({name:k, ...v})), [
@@ -718,8 +790,39 @@ async function refresh() {
 
   try {
     const t = await (await fetch(q("tail.json"), {cache:"no-store"})).json();
-    $("#tail").textContent = (t.logs||[]).slice(-25)
-      .map(r => `${(r.node||"-").padEnd(8)} ${(r.line||r.msg||"").slice(0,150)}`).join("\\n") || "no lines yet";
+    const b = t.build || {};
+    // While an image is compiling there is nothing in the firmware streams; the build
+    // log is the only thing that shows the run is still moving.
+    if (p.stage === "1-build" && (b.lines||[]).length) {
+      $("#tail-head").textContent = `build log · ${b.bake_hash} · ${b.total_lines} lines · ${b.bytes} bytes`;
+      $("#tailchips").innerHTML = "";
+      $("#tail").textContent = b.lines.join("
+");
+    } else {
+      $("#tail-head").textContent = "tail";
+      const logs = t.logs || [];
+      const nodes = [...new Set(logs.map(r => r.node).filter(Boolean))].sort();
+      const on = n => TAILNODES === null || TAILNODES.has(n);
+      $("#tailchips").innerHTML =
+        `<button class=chip data-pick="all" aria-pressed="${TAILNODES===null}">all</button>` +
+        `<button class=chip data-pick="none" aria-pressed="${TAILNODES!==null && TAILNODES.size===0}">none</button>` +
+        nodes.map(n => `<button class=chip data-pick="${esc(n)}" aria-pressed="${on(n)}">${esc(n)}</button>`).join("");
+      $("#tailchips").querySelectorAll(".chip").forEach(btn => btn.onclick = () => {
+        const pick = btn.dataset.pick;
+        if (pick === "all") TAILNODES = null;
+        else if (pick === "none") TAILNODES = new Set();
+        else {
+          if (TAILNODES === null) TAILNODES = new Set(nodes);
+          TAILNODES.has(pick) ? TAILNODES.delete(pick) : TAILNODES.add(pick);
+        }
+        refresh();
+      });
+      const shown = logs.filter(r => on(r.node));
+      $("#tail").textContent = shown.slice(-25)
+        .map(r => `${(r.node||"-").padEnd(9)} ${(r.line||r.msg||"").slice(0,150)}`).join("
+")
+        || (TAILNODES && TAILNODES.size === 0 ? "no devices selected" : "no lines yet");
+    }
   } catch (e) { $("#tail").textContent = "tail unavailable"; }
 }
 refresh(); setInterval(refresh, 3000);
