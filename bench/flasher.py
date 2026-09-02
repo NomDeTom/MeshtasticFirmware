@@ -79,6 +79,9 @@ class Flasher:
         # The observer holds the interfaces. Flashing must tell it to let go, so the
         # disconnection is attributed as a deliberate gap rather than a capture hole.
         self.observer = observer
+        # Which board the pending image targets; set by flash() and read by the locked
+        # body, so the compatibility check stays next to the code that acts on it.
+        self._image_model: str | None = None
 
     def _emit(self, kind: str, **data) -> None:
         if self.on_event:
@@ -99,21 +102,26 @@ class Flasher:
             raise FlashError(f"image does not exist: {image}")
 
         started = time.time()
+        self._image_model = image_hw_model
         self._emit("flash_start", node=node.name, image=str(image), serial=node.serial_number)
 
-        # Confirm it is alive and in app mode BEFORE anything that could bounce it.
-        port = self._require_alive(node)
+        # Hold the port for the whole flash. The observer reconnects on a timer, and a
+        # reconnect landing mid-DFU takes the port back, leaves the node in app mode and
+        # produces "no UF2 volume appeared" - a failure that looks like hardware and is
+        # not. Released in the finally below, whatever happens.
+        if self.observer is not None:
+            self.observer.suspend(node.name, reason="flash")
+        try:
+            return self._flash_locked(node, image, started)
+        finally:
+            if self.observer is not None:
+                self.observer.resume(node.name)
 
-        # And confirm the image is even for this board. Every other check here guards
-        # against a wrong answer; this one guards against losing the node, so it blocks.
+    def _flash_locked(self, node, image: Path, started: float) -> FlashResult:
+        port = self._require_alive(node)
         device_model = self._hw_model(node, port)
-        self._emit(
-            "hw_model_check",
-            node=node.name,
-            device=device_model,
-            image=image_hw_model,
-        )
-        hardware.assert_compatible(node.name, device_model, image_hw_model)
+        self._emit("hw_model_check", node=node.name, device=device_model, image=self._image_model)
+        hardware.assert_compatible(node.name, device_model, self._image_model)
 
         if image.suffix.lower() == ".zip":
             # nrfutil package: enter DFU over the protocol - no 1200-baud touch, which is
@@ -213,9 +221,6 @@ class Flasher:
         """
         if self.platform.nrfutil is None:
             return FlashResult(node.name, "protocol_serial", False, "adafruit-nrfutil absent", 0.0)
-        if self.observer is not None:
-            self.observer.mark_dropped(node.name, reason="flash")
-
         before = devices.snapshot_ports()
         self._enter_dfu(port)
 
@@ -268,9 +273,6 @@ class Flasher:
 
     def _flash_uf2(self, node: devices.BenchNode, image: Path, port: str) -> FlashResult:
         """Preferred path. Commands DFU over the protocol, then copies the .uf2."""
-        if self.observer is not None:
-            self.observer.mark_dropped(node.name, reason="flash")
-
         entered = self._enter_dfu(port)
         if not entered:
             return FlashResult(node.name, "uf2", False, "enterDFUMode did not take", 0.0)
@@ -357,15 +359,21 @@ class Flasher:
         while time.monotonic() < deadline:
             port = devices.try_resolve_port(node.serial_number)
             if port is not None:
-                if self.observer is not None:
-                    self.observer.health_tick()  # let it reclaim the port first
+                # While the flash holds the port the observer is suspended and will not
+                # reconnect, so asking it whether the node is back would wait forever.
+                # We own the port here, so probe it directly; only defer to the observer
+                # when it is the one holding the connection.
+                owns_port = self.observer is None or self.observer.is_suspended(node.name)
+                if owns_port:
+                    if self._probe(port, timeout=20.0):
+                        self._emit("flash_node_returned", node=node.name, port=port)
+                        return True
+                else:
+                    self.observer.health_tick()
                     held = self.observer.held.get(node.name)
                     if held is not None and held.connected:
                         self._emit("flash_node_returned", node=node.name, port=held.port)
                         return True
-                elif self._probe(port, timeout=20.0):
-                    self._emit("flash_node_returned", node=node.name, port=port)
-                    return True
             time.sleep(3.0)
         return False
 
@@ -376,9 +384,6 @@ class Flasher:
             return FlashResult(
                 node.name, "serial_dfu", False, "adafruit-nrfutil is not available", 0.0
             )
-        if self.observer is not None:
-            self.observer.mark_dropped(node.name, reason="flash")
-
         dfu_port = self.touch_1200bps(node, port)
         if dfu_port is None:
             return FlashResult(

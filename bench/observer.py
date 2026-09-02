@@ -81,6 +81,11 @@ class Observer:
         self.held: dict[str, Held] = {n.name: Held(node=n) for n in nodes}
         self._lock = threading.RLock()
         self._wired = False
+        # Nodes the observer must not reconnect to. Flashing needs exclusive use of the
+        # port, and a background reconnect that grabs it back mid-DFU makes the flash
+        # fail intermittently - the node stays in app mode and no bootloader volume ever
+        # appears. Dropping a node once is not enough; it has to stay dropped.
+        self._suspended: set[str] = set()
         self._stop = threading.Event()
         self._health: threading.Thread | None = None
 
@@ -202,7 +207,9 @@ class Observer:
         """Reconnect anything that dropped, with spacing and a ceiling."""
         now = time.time()
         with self._lock:
-            for held in self.held.values():
+            for name, held in self.held.items():
+                if name in self._suspended:
+                    continue  # something else owns this port right now
                 if held.connected:
                     continue
                 if held.dropped_at is None:
@@ -222,6 +229,30 @@ class Observer:
                         max_attempts=RECONNECT_MAX_ATTEMPTS,
                         detail=detail,
                     )
+
+    def suspend(self, name: str, reason: str) -> None:
+        """Release a node and stop reconnecting to it until resumed.
+
+        The serial port is exclusive, so anything that needs it - a flash above all -
+        must be able to take it and keep it. mark_dropped() alone only closes the
+        connection; the health loop then reclaims the port seconds later and the
+        operation it interrupted fails for reasons that look like hardware.
+        """
+        with self._lock:
+            self._suspended.add(name)
+        self.mark_dropped(name, reason=reason)
+        self.recorder.event("observer_suspended", node=name, reason=reason)
+
+    def resume(self, name: str) -> None:
+        """Hand a node back to the observer and let it reconnect."""
+        with self._lock:
+            self._suspended.discard(name)
+        self.recorder.event("observer_resumed", node=name)
+        self.health_tick()
+
+    def is_suspended(self, name: str) -> bool:
+        with self._lock:
+            return name in self._suspended
 
     def mark_dropped(self, name: str, reason: str) -> None:
         """Tell the observer a node is about to go away (a flash, a reboot).
