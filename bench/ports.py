@@ -501,6 +501,35 @@ class _InertStream:
         raise OSError("the bench closed this port")
 
 
+# Only one thread may ever close a given interface. Two closing the same Win32 handle is
+# an access violation, not an exception - it takes the process down with no traceback,
+# which is how a run died during preflight with nothing in its log.
+_CLOSE_CLAIM = threading.Lock()
+
+
+def _claim_close(iface: Any) -> bool:
+    """True for the first caller to take responsibility for closing this interface."""
+    with _CLOSE_CLAIM:
+        if getattr(iface, "_bench_closing", False):
+            return False
+        try:
+            iface._bench_closing = True
+        except Exception:  # noqa: BLE001 - an interface that refuses the flag is not ours
+            return False
+        return True
+
+
+def _neutralise(iface: Any) -> None:
+    """Leave an inert stand-in so nothing else can close the real handle again."""
+    for attr in ("stream", "_serial", "serial"):
+        if getattr(iface, attr, None) is not None:
+            try:
+                setattr(iface, attr, _InertStream())
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+
 def _let_go(iface: Any, abandon: bool) -> None:
     """Release an interface. `abandon` skips the protocol close, never the OS handle.
 
@@ -514,6 +543,10 @@ def _let_go(iface: Any, abandon: bool) -> None:
     underlying stream is closed directly, which is immediate and frees the port.
     """
     if iface is None:
+        return
+    if not _claim_close(iface):
+        # Someone else is already closing this one. Taking the handle out from under them
+        # is the double close that kills the process, so leave it to them.
         return
     if abandon:
         try:
@@ -539,9 +572,14 @@ def _let_go(iface: Any, abandon: bool) -> None:
         return
     thread = threading.Thread(target=_safe_close, args=(iface,), daemon=True)
     thread.start()
-    thread.join(5.0)  # abandoned past this; the handle is released below regardless
+    thread.join(5.0)
     if thread.is_alive():
-        _let_go(iface, abandon=True)  # the graceful close hung: take the handle back
+        # The graceful close is stuck inside the library. It still owns the handle, and
+        # closing it from here as well is a concurrent CloseHandle on the same Win32
+        # handle - an access violation that takes the whole process down rather than
+        # raising. A port held by a hung close is recoverable and reported; a segfault
+        # loses the run, and lost one mid-provision with both flashes already banked.
+        _neutralise(iface)
 
 
 def _safe_close(iface: Any) -> None:
