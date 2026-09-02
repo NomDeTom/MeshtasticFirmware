@@ -510,6 +510,16 @@ pre{margin:0;white-space:pre-wrap;font-size:.8rem;color:var(--mut);max-height:16
 .big{font-size:1.35rem;font-weight:600}
 .wait{border-left:3px solid var(--accent);padding-left:.7rem}
 .runs{display:flex;flex-wrap:wrap;gap:.4rem;margin:0 0 .7rem}
+.tabs{display:flex;gap:.3rem;margin:.2rem 0 .4rem;border-bottom:1px solid var(--rule)}
+.tab{background:none;border:0;border-bottom:2px solid transparent;color:var(--mut);
+cursor:pointer;font:inherit;font-size:.85rem;padding:.4rem .8rem}
+.tab:hover{color:var(--fg)}
+.tab[aria-current="true"]{color:var(--fg);border-bottom-color:var(--accent)}
+.tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+[data-panel][hidden]{display:none}
+.bar{height:6px;background:var(--rule);border-radius:3px;overflow:hidden;margin-top:.3rem}
+.bar i{display:block;height:100%;background:var(--accent)}
+.bar i.over{background:var(--bad)}
 .run{background:var(--card);border:1px solid var(--rule);border-radius:4px;
 padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;gap:.5rem;align-items:baseline}
 .run:hover{border-color:var(--rule-strong)}
@@ -521,26 +531,47 @@ padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;ga
   <h1>bench status</h1>
   <div id="runs" class="runs"></div>
   <p class="sub" id="ident">loading&hellip;</p>
+  <nav class="tabs" id="tabs">
+    <button class="tab" data-tab="overview" aria-current="true">overview</button>
+    <button class="tab" data-tab="schedule">schedule</button>
+    <button class="tab" data-tab="devices">devices</button>
+  </nav>
   <div class="card wait" id="wait" hidden></div>
+  <div data-panel="overview">
   <h2>position</h2>
   <div class="grid" id="pos"></div>
   <h2>rows</h2>
   <div class="card"><table id="rows"><thead><tr><th>row</th><th>verdict</th>
     <th>evidence</th><th>image</th><th>s</th></tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <div data-panel="schedule" hidden>
+  <h2>planned schedule</h2>
+  <p class="sub" id="planline">no schedule yet</p>
+  <div class="card"><table id="plan"><thead><tr><th>step</th><th>budget</th>
+    <th>what it covers</th></tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <div data-panel="devices" hidden>
+  <h2>port ownership</h2>
+  <div class="card"><table id="ports"><thead><tr><th>node</th><th>port state</th>
+    <th>port</th><th>reconnects</th><th>dropped for</th><th>last error</th>
+    </tr></thead><tbody></tbody></table></div>
   <h2>images</h2>
   <div class="card"><table id="imgs"><thead><tr><th>bake</th><th>env</th><th>flash</th>
     <th>ram</th><th>build s</th><th>release-repr</th></tr></thead><tbody></tbody></table></div>
   <h2>nodes</h2>
   <div class="card"><table id="nodes"><thead><tr><th>node</th><th>role</th><th>port</th>
     <th>mode</th><th>state</th><th>pkts</th><th>logs</th></tr></thead><tbody></tbody></table></div>
-  <h2>devices</h2>
-  <div class="card"><table id="ports"><thead><tr><th>node</th><th>port state</th>
-    <th>port</th><th>reconnects</th><th>last error</th></tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <div data-panel="overview">
   <h2>capture</h2>
   <div class="card"><table id="cap"><thead><tr><th>stream</th><th>rows</th><th>bytes</th>
     <th>last</th></tr></thead><tbody></tbody></table></div>
   <h2 id="tail-head">tail</h2>
   <div class="card"><pre id="tail"></pre></div>
+  </div>
 </div>
 <script>
 const $ = s => document.querySelector(s);
@@ -548,6 +579,25 @@ const $ = s => document.querySelector(s);
 // unattended watcher wants by default: the thing happening now.
 let RUN = new URLSearchParams(location.search).get("run");
 const q = p => RUN ? `${p}?run=${encodeURIComponent(RUN)}` : p;
+let TAB = new URLSearchParams(location.search).get("tab") || "overview";
+
+function showTab(name) {
+  TAB = name;
+  document.querySelectorAll("[data-panel]").forEach(el => {
+    el.hidden = el.dataset.panel !== name;
+  });
+  document.querySelectorAll(".tab").forEach(b => {
+    b.setAttribute("aria-current", String(b.dataset.tab === name));
+  });
+  const u = new URLSearchParams(location.search);
+  u.set("tab", name);
+  if (RUN) u.set("run", RUN);
+  history.replaceState(null, "", "?" + u.toString());
+}
+document.querySelectorAll(".tab").forEach(b => {
+  b.onclick = () => showTab(b.dataset.tab);
+});
+showTab(TAB);
 const esc = v => String(v ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cell = v => v === null || v === undefined ? "<span class=k>-</span>" : esc(v);
 const secs = v => v === null || v === undefined ? "-" : Math.round(v) + "s";
@@ -629,12 +679,36 @@ async function refresh() {
            return d.port ? "<span class=k>present</span>" : "<span class=FAIL>absent</span>"; },
     d => cell((obs[d.name]||{}).packets), d => cell((obs[d.name]||{}).log_lines)]);
 
+  // --- schedule tab ---------------------------------------------------------
+  const plan = s.schedule;
+  if (plan && plan.steps) {
+    const done = p.elapsed_s || 0, total = plan.total_s || 0;
+    const pct = total ? Math.min(100, 100 * done / total) : 0;
+    $("#planline").innerHTML =
+      `${plan.count} steps &middot; worst case <b>${secs(total)}</b> ` +
+      `(${Math.round(total/60)} min) &middot; elapsed ${secs(done)}` +
+      (p.over_plan ? ' &middot; <span class=FAIL>OVER PLAN</span>' : '') +
+      `<div class=bar><i class="${p.over_plan ? 'over' : ''}" style="width:${pct}%"></i></div>`;
+    rows("#plan", plan.steps, [
+      d => { const cur = p.row && d.name.startsWith(p.row);
+             return cur ? `<b>${esc(d.name)}</b>` : esc(d.name); },
+      d => secs(d.budget_s),
+      d => `<span class=k>${esc(d.detail)}</span>`]);
+  } else {
+    $("#planline").textContent = "no schedule recorded for this run";
+  }
+
+  // --- devices tab ----------------------------------------------------------
   const pstate = s.ports || {};
   rows("#ports", Object.keys(pstate).map(k => ({node:k, ...pstate[k]})), [
     d => esc(d.node),
-    d => { const bad = ["gave_up","lost","absent"].includes(d.state);
+    d => { // leased and rebooting are normal mid-operation; only these mean trouble.
+           const bad = ["gave_up","lost","absent"].includes(d.state);
            return `<span class="${bad ? "FAIL" : "PASS"}">${esc(d.state)}</span>`; },
-    d => cell(d.port), d => cell(d.reconnects), d => cell(d.last_error)]);
+    d => cell(d.port),
+    d => cell(d.reconnects),
+    d => d.dropped_for_s == null ? "<span class=k>-</span>" : secs(d.dropped_for_s),
+    d => d.last_error ? `<span class=warnrow>${esc(d.last_error)}</span>` : "<span class=k>-</span>"]);
 
   const cap = (s.capture||{}).streams || {};
   rows("#cap", Object.entries(cap).map(([k,v]) => ({name:k, ...v})), [
