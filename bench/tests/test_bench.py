@@ -490,6 +490,39 @@ class TestPreflightInventory(unittest.TestCase):
         self.assertIn("ABSENT dut", report.summary())
 
 
+class TestOnlyOneThreadCloses(unittest.TestCase):
+    def test_a_second_closer_is_turned_away(self):
+        """Two threads closing one Win32 handle is an access violation, not an exception.
+
+        It takes the process down with no traceback - a run died in preflight with an
+        empty log, and an earlier one mid-provision with both flashes already banked.
+        The graceful close runs on its own thread and can hang inside the library; the
+        fallback used to close the same handle from underneath it.
+        """
+        from bench import ports
+
+        class Handle:
+            def __init__(self):
+                self.closes = 0
+
+            def close(self):
+                self.closes += 1
+
+        class Iface:
+            def __init__(self):
+                self.stream = Handle()
+
+        iface = Iface()
+        handle = iface.stream
+        ports._let_go(iface, abandon=True)
+        self.assertEqual(handle.closes, 1)
+
+        # A second attempt - the library's reader, or the graceful-close fallback - must
+        # not reach the real handle at all.
+        ports._let_go(iface, abandon=True)
+        self.assertEqual(handle.closes, 1, "the handle must be closed exactly once")
+
+
 class TestEntryAndExitConditions(unittest.TestCase):
     def test_an_unmet_exit_condition_invalidates_a_passing_row(self):
         """Assertions read what was captured; exit conditions ask who was still capturing.
