@@ -404,6 +404,7 @@
     </button>
     <button class="tab" data-tab="schedule">schedule</button>
     <button class="tab" data-tab="devices">devices</button>
+    <button class="tab" data-tab="preflight">preflight</button>
   </nav>
   <div class="card wait" id="wait" hidden></div>
   <div data-panel="overview">
@@ -424,6 +425,18 @@
         <tbody></tbody>
       </table>
     </div>
+  </div>
+
+  <div data-panel="preflight" hidden>
+    <h2>preflight</h2>
+    <p class="sub" id="preline">no preflight recorded</p>
+    <div class="card" id="prechecks"></div>
+    <h2>bus</h2>
+    <p class="sub">
+      what was actually enumerated when the run started - a node missing from
+      here is missing from the run
+    </p>
+    <div class="card" id="prebus"></div>
   </div>
 
   <div data-panel="schedule" hidden>
@@ -868,6 +881,93 @@
         })
         .join("") || "<span class=k>no devices</span>";
     keepOpenState($("#ports"));
+
+    // -- preflight --------------------------------------------------------------
+    // The checks that decided whether this run was allowed to start, and the bus they
+    // decided it against. A blocked run says nothing else, so without this the page
+    // showed an idle bench and no reason for it.
+    const pf = s.preflight || {};
+    const checks = pf.checks || [];
+    if (!checks.length) {
+      $("#preline").textContent = "no preflight recorded for this run";
+      $("#prechecks").innerHTML = "<span class=k>nothing yet</span>";
+      $("#prebus").innerHTML = "<span class=k>nothing yet</span>";
+    } else {
+      const bad = checks.filter((c) => c.status === "block").length;
+      const warn = checks.filter((c) => c.status === "warn").length;
+      $("#preline").innerHTML =
+        `${checks.length} checks &middot; ` +
+        (bad
+          ? `<span class=m-failed>${bad} blocking</span>`
+          : `<span class=m-done>none blocking</span>`) +
+        (warn ? ` &middot; <span class=m-overdue>${warn} warning</span>` : "");
+
+      const MARK = { ok: "m-done", warn: "m-overdue", block: "m-failed" };
+      $("#prechecks").innerHTML = checks
+        .map(
+          (c) =>
+            `<div class=kid>
+               <span class="mark ${MARK[c.status] || "m-planned"}">${esc(c.status)}</span>
+               <span class=nm><b>${esc(c.name)}</b> ${esc(c.detail || "")}</span>
+             </div>` +
+            (c.fix && c.status !== "ok"
+              ? `<div class=kid><span class="mark m-planned"></span><span class=k>fix: ${esc(c.fix)}</span></div>`
+              : ""),
+        )
+        .join("");
+
+      // The bus, joined to the node table by serial number - the only identity that
+      // survives a reboot, since COM numbers move.
+      const res = pf.resources || {};
+      const bus = res.bus || {};
+      const named = {};
+      (res.nodes || []).forEach((n) => {
+        if (n.serial_number)
+          named[String(n.serial_number).toUpperCase()] = n.name;
+      });
+      const seen = new Set();
+      const lines = [];
+      (bus.serial || []).forEach((e) => {
+        const sn = String(e.serial_number || "").toUpperCase();
+        const who = named[sn];
+        if (who) seen.add(sn);
+        lines.push(
+          `<div class=kid><span class="mark m-done">port</span><span class=nm>
+             <b>${esc(e.port)}</b> ${esc(e.vid || "----")}:${esc(e.pid || "----")}
+             <span class=k>${esc(e.serial_number || "-")}</span>
+             ${who ? "= " + esc(who) : "<span class=k>(not in the node table)</span>"}
+           </span></div>`,
+        );
+      });
+      Object.entries(named).forEach(([sn, who]) => {
+        if (seen.has(sn)) return;
+        lines.push(
+          `<div class=kid><span class="mark m-failed">absent</span><span class=nm>
+             <b>${esc(who)}</b> <span class=k>${esc(sn)} - nothing on the bus</span>
+           </span></div>`,
+        );
+      });
+      (bus.volumes || []).forEach((v) =>
+        lines.push(
+          `<div class=kid><span class="mark m-overdue">volume</span><span class=nm>
+             <b>${esc(v.path)}</b> <span class=k>UF2 bootloader</span></span></div>`,
+        ),
+      );
+      (bus.in_bootloader || []).forEach((d) =>
+        lines.push(
+          `<div class=kid><span class="mark m-overdue">DFU</span><span class=nm>
+             <b>${esc(d.instance)}</b>
+             <span class=k>${esc((d.interfaces || []).join(", "))}</span></span></div>`,
+        ),
+      );
+      if ((bus.devices || []).length)
+        lines.push(
+          `<div class=kid><span class="mark m-planned">bus</span><span class=nm class=k>
+             ${bus.devices.length} USB devices present</span></div>`,
+        );
+      $("#prebus").innerHTML =
+        lines.join("") || "<span class=k>no bus inventory recorded</span>";
+    }
 
     const cap = (s.capture || {}).streams || {};
     rows(
