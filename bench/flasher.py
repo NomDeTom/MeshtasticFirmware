@@ -49,8 +49,12 @@ DFU_FAILURE_MARKERS = (
 # Budgets. Each bounds one phase, so a flash has a knowable worst case rather than an
 # open-ended one, and a phase that overruns names itself.
 PROLOGUE_S = 90.0  # prove the node, check the board, command DFU
-DFU_APPEAR_S = 60.0  # wait for a bootloader interface to show up
-TRANSFER_S = 300.0  # the image transfer itself
+# Measured on a nice!nano over USB: 42s from enterDFUMode() to the volume mounting, and
+# 311s to write a 1.5 MB image through the bootloader's mass storage - which is slow
+# because the bootloader programs flash as it receives. Both sat inside budgets of 60s
+# and 300s, close enough that an ordinary flash was a coin toss against its own clock.
+DFU_APPEAR_S = 120.0  # wait for a bootloader interface to show up (observed 42s)
+TRANSFER_S = 420.0  # the image transfer itself (observed 311s)
 RETURN_S = 180.0  # the node coming back and answering
 
 FLASH_BUDGET_S = PROLOGUE_S + DFU_APPEAR_S + TRANSFER_S + RETURN_S
