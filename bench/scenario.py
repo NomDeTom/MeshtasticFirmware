@@ -255,9 +255,23 @@ class LogCount(Assertion):
             verdict = NOT_OBSERVED if n == 0 else FAIL
             return Outcome(self.name, verdict, f"{what}, expected at least {self.at_least}",
                            {"count": n})
-        if self.at_most is not None and n > self.at_most:
-            return Outcome(self.name, FAIL, f"{what}, expected at most {self.at_most}",
-                           {"count": n})
+        if self.at_most is not None:
+            if n > self.at_most:
+                return Outcome(self.name, FAIL, f"{what}, expected at most {self.at_most}",
+                               {"count": n})
+            # "I saw none" and "I saw nothing" are different claims. An at_most check on
+            # a node that produced no log lines at all is the instrument being deaf, not
+            # the firmware being quiet, and passing it green is the worst kind of wrong:
+            # the row reports evidence it never had. Seen on a node that was in its
+            # bootloader for the whole window.
+            heard = led.logs.by_node().get(self.node, 0) if self.node else len(led.logs.rows)
+            if heard == 0:
+                return Outcome(
+                    self.name, INVALID,
+                    f"no log lines at all from {self.node or 'any node'} during the window, "
+                    "so 'at most' cannot be judged",
+                    {"count": n, "lines_from_node": 0},
+                )
         return Outcome(self.name, PASS, what, {"count": n})
 
 

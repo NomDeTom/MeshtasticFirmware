@@ -138,7 +138,12 @@ class Flasher:
         already leaving and keeps the port against everything after it.
         """
         try:
-            with owner.lease("flash", budget_s=PROLOGUE_S, reboots=True) as iface:
+            # The claim has to outlive the lease: the lease ends the moment DFU is
+            # commanded, and everything fragile happens after that.
+            with owner.lease(
+                "flash", budget_s=PROLOGUE_S, reboots=True,
+                reboot_window_s=DFU_APPEAR_S + TRANSFER_S + RETURN_S,
+            ) as iface:
                 device_model = hardware.model_from_interface(iface)
                 self._emit(
                     "hw_model_check", node=node.name,
