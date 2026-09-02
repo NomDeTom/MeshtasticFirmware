@@ -118,10 +118,110 @@ class Flasher:
                 self.observer.resume(node.name)
 
     def _flash_locked(self, node, image: Path, started: float) -> FlashResult:
-        port = self._require_alive(node)
-        device_model = self._hw_model(node, port)
-        self._emit("hw_model_check", node=node.name, device=device_model, image=self._image_model)
-        hardware.assert_compatible(node.name, device_model, self._image_model)
+        # One connection for the whole prologue. Liveness, the board check and the DFU
+        # command each used to open their own, and each open that times out leaves a
+        # thread behind still holding an exclusive port - so the next open contends with
+        # the last one and the flash stalls with no error anywhere. Measured: three
+        # connect/lose cycles and then nothing for the rest of the run.
+        port = devices.try_resolve_port(node.serial_number)
+        if port is None:
+            raise NodeNotAnswering(
+                f"{node.name} ({node.serial_number}) is not enumerated; refusing to act"
+            )
+
+        iface = self._open_once(port)
+        if iface is None:
+            raise NodeNotAnswering(
+                f"{node.name} is enumerated on {port} but not answering. It may already "
+                "be in its bootloader - touching it again is how nodes are lost. "
+                "Power-cycle it and retry."
+            )
+        try:
+            device_model = hardware.model_from_interface(iface)
+            self._emit(
+                "hw_model_check", node=node.name, device=device_model, image=self._image_model
+            )
+            hardware.assert_compatible(node.name, device_model, self._image_model)
+
+            before = devices.snapshot_ports()
+            self._emit("enter_dfu", node=node.name, port=port)
+            try:
+                iface.localNode.enterDFUMode()
+            except Exception as exc:  # noqa: BLE001 - the node reboots out from under it
+                self._emit("enter_dfu_raised", node=node.name, error=str(exc)[:120])
+        finally:
+            _close_quietly(iface)
+
+        return self._finish_dfu(node, image, before, started)
+
+    def _open_once(self, port: str, timeout: float = 25.0):
+        """Open one bounded connection, or None. The thread is abandoned on timeout."""
+        import threading
+
+        import meshtastic.serial_interface as si
+
+        out: dict = {}
+
+        def _go() -> None:
+            try:
+                out["iface"] = si.SerialInterface(devPath=port)
+            except Exception as exc:  # noqa: BLE001
+                out["error"] = exc
+
+        t = threading.Thread(target=_go, daemon=True, name=f"bench-flash-open-{port}")
+        t.start()
+        t.join(timeout)
+        return out.get("iface")
+
+    def _finish_dfu(self, node, image: Path, before: dict, started: float) -> FlashResult:
+        """Wait for whichever DFU interface appears, then transfer and verify."""
+        dfu_port = None
+        volume = None
+        deadline = time.monotonic() + 60.0
+        while dfu_port is None and volume is None and time.monotonic() < deadline:
+            time.sleep(1.0)
+            dfu_port = devices.looks_like_dfu(before)
+            volume = platform_probe.find_uf2_volume()
+
+        if dfu_port is not None and image.suffix.lower() == ".zip":
+            result = self._serial_dfu_upload(node, image, dfu_port)
+        else:
+            # Mass storage only, which is what this hardware offers. The node is already
+            # in DFU, so finish through the volume rather than abandoning it there.
+            uf2 = image if image.suffix.lower() == ".uf2" else _sibling_uf2(image)
+            if uf2 is None:
+                result = FlashResult(
+                    node.name, "dfu", False, "no .uf2 available for a volume flash", 0.0
+                )
+            else:
+                self._emit("dfu_serial_unavailable", node=node.name, falling_back="uf2_volume")
+                result = self._copy_uf2_to_volume(node, uf2)
+
+        result.duration_s = round(time.time() - started, 1)
+        self._emit("flash_done", **result.to_dict())
+        if not result.ok:
+            raise FlashError(f"{node.name}: {result.detail}")
+        return result
+
+    def _serial_dfu_upload(self, node, image: Path, dfu_port: str) -> FlashResult:
+        if self.platform.nrfutil is None:
+            return FlashResult(node.name, "serial_dfu", False, "adafruit-nrfutil absent", 0.0)
+        argv = [
+            *self.platform.nrfutil.argv, "dfu", "serial",
+            "--package", str(image), "-p", dfu_port, "-b", "115200", "--singlebank",
+        ]
+        result = proc.run(argv, env=dict(self.platform.nrfutil.env), timeout=300.0)
+        failure = next((m for m in DFU_FAILURE_MARKERS if m in result.output), None)
+        if failure or not result.ok:
+            return FlashResult(
+                node.name, "serial_dfu", False,
+                f"nrfutil failed ({failure or result.returncode}): {result.tail(10)}", 0.0)
+        if not self._wait_for_return(node):
+            return FlashResult(
+                node.name, "serial_dfu", False, "flashed but the node did not re-appear", 0.0)
+        return FlashResult(node.name, "serial_dfu", True, f"serial DFU on {dfu_port}", 0.0)
+
+    def _unused_flash_locked_tail(self, node, image: Path, started: float) -> FlashResult:
 
         if image.suffix.lower() == ".zip":
             # nrfutil package: enter DFU over the protocol - no 1200-baud touch, which is
@@ -487,3 +587,19 @@ def _sibling_uf2(package: Path) -> Path | None:
     """The .uf2 built alongside an nrfutil package, if there is one."""
     candidate = package.with_suffix(".uf2")
     return candidate if candidate.exists() else None
+
+
+def _close_quietly(iface) -> None:
+    """Close on a daemon thread and abandon it - close() can block on a rebooting node."""
+    import threading
+
+    t = threading.Thread(target=_safe_close_iface, args=(iface,), daemon=True)
+    t.start()
+    t.join(5.0)
+
+
+def _safe_close_iface(iface) -> None:
+    try:
+        iface.close()
+    except Exception:  # noqa: BLE001
+        pass
