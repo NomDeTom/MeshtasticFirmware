@@ -109,7 +109,33 @@ class Runner:
     def event(self, kind: str, data: dict | None = None, **kw: Any) -> None:
         payload = {**(data or {}), **kw}
         self.recorder.event(kind, **payload)
+        self._follow_phase(kind, payload)
         self.heartbeat(force=False)
+
+    def _follow_phase(self, kind: str, payload: dict) -> None:
+        """Drive the schedule's child steps from what the components report.
+
+        The flasher and the provisioner do the work in phases the plan already lists;
+        without this the parent step moves while everything under it stays "planned" for
+        the whole run, which is worse than showing nothing - it reads as work that never
+        started.
+        """
+        if kind not in ("flash_phase", "provision_phase") or not self._schedule:
+            return
+        node, phase = payload.get("node"), payload.get("phase")
+        if not node or not phase or not self.current_row:
+            return
+        what = "flash" if kind == "flash_phase" else "provision"
+        step_id = f"{self.current_row}:{what}:{node}:{phase}"
+        status = payload.get("status")
+        if status == "running":
+            self._schedule.begin(step_id)
+        elif status == "failed":
+            self._schedule.finish(step_id, ports.FAILED_STEP)
+        elif status == "skipped":
+            self._schedule.skip(step_id, payload.get("detail", ""))
+        else:
+            self._schedule.finish(step_id, ports.DONE)
 
     def heartbeat(self, force: bool = True) -> None:
         """Written by the run, aged by the server, so DIED is distinguishable from slow."""
@@ -248,12 +274,9 @@ class Runner:
                 step = plan.add(step_id, f"{scen.id}: flash {node.name}",
                                 flasher.FLASH_BUDGET_S, kind="flash", node=node.name,
                                 detail="skipped once the node runs this image")
-                for name, budget in (
-                    ("prove node + check board", flasher.PROLOGUE_S),
-                    ("wait for bootloader", flasher.DFU_APPEAR_S),
-                    ("transfer image", flasher.TRANSFER_S),
-                    ("wait for it to answer", flasher.RETURN_S),
-                ):
+                # Named by the flasher itself, so the plan and the thing being planned
+                # cannot drift into calling the same work by different names.
+                for name, budget in flasher.PHASES:
                     step.add(f"{step_id}:{name}", name, budget)
                 if node.name in flashed:
                     step.status = ports.SKIPPED
@@ -270,16 +293,7 @@ class Runner:
                                     provision.PROVISION_BUDGET_S, kind="provision",
                                     node=node.name,
                                     detail="verified instead when the state already matches")
-                    for name, budget in (
-                        ("factory reset", 120.0),
-                        ("region + preset", 45.0),
-                        ("other lora fields", 45.0),
-                        ("device role", 45.0),
-                        ("diagnostic flags", 45.0),
-                        ("reboot to commit", 60.0),
-                        ("channels", 30.0),
-                        ("read back + verify", 30.0),
-                    ):
+                    for name, budget in provision.PHASES:
                         step.add(f"{step_id}:{name}", name, budget)
 
             stim = scen.stimulus_params

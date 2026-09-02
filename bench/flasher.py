@@ -59,6 +59,22 @@ RETURN_S = 180.0  # the node coming back and answering
 
 FLASH_BUDGET_S = PROLOGUE_S + DFU_APPEAR_S + TRANSFER_S + RETURN_S
 
+# The phases, named once. The run schedule plans against this list and the flasher
+# reports against it, so the two cannot drift into naming the same work differently -
+# which is how a step ends up permanently "planned" while it is plainly running.
+PROVE, APPEAR, TRANSFER, RETURN = (
+    "prove node + check board",
+    "wait for bootloader",
+    "transfer image",
+    "wait for it to answer",
+)
+PHASES = (
+    (PROVE, PROLOGUE_S),
+    (APPEAR, DFU_APPEAR_S),
+    (TRANSFER, TRANSFER_S),
+    (RETURN, RETURN_S),
+)
+
 
 class FlashError(RuntimeError):
     pass
@@ -97,6 +113,10 @@ class Flasher:
     def _emit(self, kind: str, **data) -> None:
         if self.on_event:
             self.on_event(kind, data)
+
+    def _phase(self, node: str, phase: str, status: str) -> None:
+        """Report where in the flash this node is, for the run schedule to follow."""
+        self._emit("flash_phase", node=node, phase=phase, status=status)
 
     def _owner(self, node: devices.BenchNode) -> ports.PortOwner:
         if self.observer is None:
@@ -190,8 +210,10 @@ class Flasher:
                 self._emit(
                     "enter_dfu_result", node=node.name, outcome=outcome, detail=detail
                 )
+                self._phase(node.name, PROVE, "done")
                 return before
         except ports.PortBusy as exc:
+            self._phase(node.name, PROVE, "failed")
             raise NodeNotAnswering(
                 f"{node.name} could not be taken for flashing: {exc}. It may already be "
                 "in its bootloader - touching it again is how nodes are lost."
@@ -201,6 +223,7 @@ class Flasher:
         self, node: devices.BenchNode, owner: ports.PortOwner, image: Path, before: dict
     ) -> FlashResult:
         """Wait for whichever DFU interface appears, then put the image through it."""
+        self._phase(node.name, APPEAR, "running")
         budget = ports.Budget(DFU_APPEAR_S)
         # A volume that was already mounted when the flash began belongs to some other
         # device - a node stranded in its bootloader from an earlier row, most likely.
@@ -215,6 +238,7 @@ class Flasher:
             found = platform_probe.find_uf2_volume()
             volume = found if found is not None and found != standing else None
 
+        self._phase(node.name, APPEAR, "done" if (dfu_port or volume) else "failed")
         if dfu_port is not None and image.suffix.lower() == ".zip":
             return self._serial_dfu_upload(node, owner, image, dfu_port)
 
@@ -275,6 +299,7 @@ class Flasher:
         # So race the two. Either the write returns, or the volume vanishes - and the
         # volume vanishing is the bootloader saying it has what it needs. Whichever comes
         # first, the node answering again is what actually proves the flash.
+        self._phase(node.name, TRANSFER, "running")
         writer = threading.Thread(target=_write, daemon=True, name="bench-uf2-write")
         writer.start()
         budget = ports.Budget(TRANSFER_S)
@@ -287,6 +312,7 @@ class Flasher:
                 )
                 break
         if writer.is_alive() and budget.spent:
+            self._phase(node.name, TRANSFER, "failed")
             return FlashResult(
                 node.name, "uf2", False,
                 f"the write to {volume} did not finish within {TRANSFER_S:.0f}s and the "
@@ -294,7 +320,10 @@ class Flasher:
                 0.0, ports.TIMED_OUT,
             )
 
+        self._phase(node.name, TRANSFER, "done")
+        self._phase(node.name, RETURN, "running")
         back = owner.wait_answering(budget_s=RETURN_S)
+        self._phase(node.name, RETURN, "done" if back.ok else "failed")
         if not back.ok:
             return FlashResult(
                 node.name, "uf2", False,
