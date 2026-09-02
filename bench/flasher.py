@@ -243,19 +243,37 @@ class Flasher:
     def _copy_uf2_to_volume(
         self, node: devices.BenchNode, owner: ports.PortOwner, image: Path, volume: Path
     ) -> FlashResult:
-        try:
+        def _write() -> None:
             # Read once, write once. shutil.copy2 streams in small chunks, and when the
             # source sits on an external USB drive and the destination is a bootloader
             # volume on the same bus the two contend - measured at 177s for 1.5 MB.
             payload = image.read_bytes()
-            with (volume / image.name).open("wb") as fh:
-                fh.write(payload)
-                fh.flush()
-            self._emit("uf2_written", node=node.name, bytes=len(payload))
-        except OSError as exc:
-            # The bootloader reboots the instant it has the image, so the write can fail
-            # on a volume that has already gone. The node coming back is the evidence.
-            self._emit("uf2_copy_warning", node=node.name, error=str(exc)[:120])
+            try:
+                with (volume / image.name).open("wb") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                self._emit("uf2_written", node=node.name, bytes=len(payload))
+            except OSError as exc:
+                # The bootloader reboots the instant it has the image, so the write can
+                # fail on a volume that has already gone. The node coming back is the
+                # evidence, so this is a note rather than a failure.
+                self._emit("uf2_copy_warning", node=node.name, error=str(exc)[:120])
+
+        # Bounded, because this is the one step that can hang the whole run. It is a
+        # single blocking write to a device that programs flash as it receives - measured
+        # at 387s for 1.5 MB - and a volume that stops answering mid-write would
+        # otherwise leave the bench waiting on it with no deadline at all, which is the
+        # one thing the schedule exists to rule out. Abandoning a partial write is safe:
+        # a UF2 bootloader only jumps to the application once it has a complete image, so
+        # the node stays in DFU and the next attempt finds it there.
+        outcome, detail = _call_bounded(_write, TRANSFER_S)
+        if outcome == "hung":
+            return FlashResult(
+                node.name, "uf2", False,
+                f"the write to {volume} did not finish within {TRANSFER_S:.0f}s; "
+                "the node is left in its bootloader",
+                0.0, ports.TIMED_OUT,
+            )
 
         back = owner.wait_answering(budget_s=RETURN_S)
         if not back.ok:
