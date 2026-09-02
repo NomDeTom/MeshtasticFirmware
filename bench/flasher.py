@@ -82,6 +82,8 @@ class Flasher:
         # Which board the pending image targets; set by flash() and read by the locked
         # body, so the compatibility check stays next to the code that acts on it.
         self._image_model: str | None = None
+        # A live interface handed over by the observer for the duration of a flash.
+        self._handed: Any = None
 
     def _emit(self, kind: str, **data) -> None:
         if self.on_event:
@@ -110,7 +112,7 @@ class Flasher:
         # produces "no UF2 volume appeared" - a failure that looks like hardware and is
         # not. Released in the finally below, whatever happens.
         if self.observer is not None:
-            self.observer.suspend(node.name, reason="flash")
+            self._handed = self.observer.detach(node.name, reason="flash")
         try:
             return self._flash_locked(node, image, started)
         finally:
@@ -129,7 +131,12 @@ class Flasher:
                 f"{node.name} ({node.serial_number}) is not enumerated; refusing to act"
             )
 
-        iface = self._open_with_retry(node, port)
+        # Prefer the connection the observer just handed over: it is already open to
+        # this node, so no port is released and reacquired and nothing can race for it.
+        iface = self._handed
+        self._handed = None
+        if iface is None:
+            iface = self._open_with_retry(node, port)
         if iface is None:
             raise NodeNotAnswering(
                 f"{node.name} is enumerated on {port} but not answering. It may already "
