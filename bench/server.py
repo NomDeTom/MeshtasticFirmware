@@ -47,6 +47,9 @@ RUNNING = "RUNNING"
 FINISHED = "FINISHED"
 FAILED = "FAILED"
 DIED = "DIED"
+# No run has written state here at all - a build-only invocation, or a run that has
+# not started. Distinct from DIED, which means a run was here and stopped beating.
+NO_RUN = "NO RUN"
 
 # Historical medians, in seconds, for the honest estimate. Measured on the beacon run
 # rather than invented: builds were stable at ~29 min and prep at ~3 min, which makes a
@@ -123,8 +126,10 @@ def _liveness(state: dict, results: dict, beat_age: float | None) -> str:
     if stage == "done":
         verdicts = {r.get("verdict") for r in results.values()}
         return FAILED if ("FAIL" in verdicts or "INVALID" in verdicts) else FINISHED
+    if not state and beat_age is None:
+        return NO_RUN  # nothing has run here; saying DIED would invent a corpse
     if beat_age is None:
-        return RUNNING if state else DIED
+        return RUNNING
     return DIED if beat_age > DEAD_AFTER_S else RUNNING
 
 
@@ -215,12 +220,17 @@ def build_tail(run_dir: Path, limit: int = 25) -> dict:
         content = newest.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         content = []
+    # Deliberately no age here. On Windows a file's mtime is not updated while a handle
+    # is open for writing, so an actively compiling build reported its log as twelve
+    # minutes stale - which is exactly the "hung or just slow?" ambiguity this server
+    # exists to remove, invented by the server itself. Growth is the honest signal: a
+    # viewer polling every few seconds watches total_lines climb.
     return {
         "bake_hash": newest.stem,
         "path": str(newest),
         "lines": content[-limit:],
         "total_lines": len(content),
-        "age_s": round(time.time() - newest.stat().st_mtime, 1),
+        "bytes": newest.stat().st_size,
     }
 
 
