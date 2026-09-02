@@ -230,6 +230,30 @@ class Observer:
                         detail=detail,
                     )
 
+    def detach(self, name: str, reason: str) -> Any:
+        """Stop reconnecting to a node and hand over its LIVE interface, unclosed.
+
+        Closing first is the obvious move and it is wrong. iface.close() can block on a
+        node the library is still draining, so it runs on a daemon thread that is
+        abandoned after a few seconds - and that abandoned thread keeps the exclusive
+        serial port. The next open then fails for ninety seconds against hardware that is
+        perfectly healthy, and the flash refuses a node it was about to reprogram.
+
+        The interface the observer already holds is a working connection to exactly the
+        node we want. Handing it over means the port is never released and reacquired at
+        all, which is the only way to be sure nothing races for it.
+        """
+        with self._lock:
+            self._suspended.add(name)
+            held = self.held.get(name)
+            iface = held.iface if held else None
+            if held is not None:
+                held.iface = None  # ownership moves to the caller
+                held.connected = False
+                held.dropped_at = time.time()
+        self.recorder.event("observer_detached", node=name, reason=reason, handed_over=iface is not None)
+        return iface
+
     def suspend(self, name: str, reason: str) -> None:
         """Release a node and stop reconnecting to it until resumed.
 
