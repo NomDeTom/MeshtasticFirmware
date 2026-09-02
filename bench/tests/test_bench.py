@@ -490,6 +490,41 @@ class TestPreflightInventory(unittest.TestCase):
         self.assertIn("ABSENT dut", report.summary())
 
 
+class TestAbandonSurvivesADoubleClose(unittest.TestCase):
+    def test_the_library_may_close_the_stream_again(self):
+        """pyserial's close() is not idempotent on Windows, and two closes are normal.
+
+        The bench closes the handle to free the port at once; the client library's reader
+        thread then notices the device has gone and closes the same stream again from
+        _disconnected(). The second call dereferences the overlapped structure the first
+        one cleared. That took a run down with a segfault mid-provision, with both
+        flashes already banked.
+        """
+        from bench import ports
+
+        class OneShot:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                if self.closed:  # what pyserial does, in effect
+                    raise AttributeError("'NoneType' object has no attribute 'hEvent'")
+                self.closed = True
+
+        class Iface:
+            def __init__(self):
+                self.stream = OneShot()
+
+        iface = Iface()
+        real = iface.stream
+        ports._let_go(iface, abandon=True)
+
+        self.assertTrue(real.closed, "the real handle must actually be released")
+        self.assertIsNot(iface.stream, real, "and must not be left for a second close")
+        iface.stream.close()
+        iface.stream.close()  # the library's own close, twice over, must be harmless
+
+
 class TestReleaseOwnership(unittest.TestCase):
     def test_only_the_opener_may_close_a_connection(self):
         """Closing someone else's connection leaves a handle they know nothing about.

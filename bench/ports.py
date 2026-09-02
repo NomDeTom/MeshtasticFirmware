@@ -470,6 +470,37 @@ class PortOwner:
         return None, out.get("error")
 
 
+class _InertStream:
+    """Stands in for a serial handle this process has already closed.
+
+    pyserial's close() is not idempotent on Windows: the first call clears the overlapped
+    read structure, and a second dereferences it. Two closes are the normal case here -
+    the bench closes the handle to free the port immediately, and the client library's
+    own reader thread then notices the device is gone and closes it again from
+    _disconnected(). Best case that is an AttributeError on a daemon thread; worst case
+    the duplicate CloseHandle takes the whole process down. It did: a run segfaulted
+    mid-provision with both flashes already banked.
+
+    Swapping in this object after the real close leaves the library a stream it can shut
+    twice safely, and reads raise so its reader loop exits the way it expects to.
+    """
+
+    closed = True
+    in_waiting = 0
+
+    def close(self) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def read(self, *_a: Any, **_kw: Any) -> bytes:
+        raise OSError("the bench closed this port")
+
+    def write(self, *_a: Any, **_kw: Any) -> int:
+        raise OSError("the bench closed this port")
+
+
 def _let_go(iface: Any, abandon: bool) -> None:
     """Release an interface. `abandon` skips the protocol close, never the OS handle.
 
@@ -495,6 +526,13 @@ def _let_go(iface: Any, abandon: bool) -> None:
             if handle is not None and hasattr(handle, "close"):
                 try:
                     handle.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                # Leave something safe in its place: the library's reader thread closes
+                # this same stream again on its way out, and pyserial cannot survive that
+                # twice on Windows.
+                try:
+                    setattr(iface, attr, _InertStream())
                 except Exception:  # noqa: BLE001
                     pass
                 break
