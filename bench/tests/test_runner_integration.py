@@ -34,11 +34,36 @@ class _FakePlatform:
         return {"os": "windows", "wsl": False}
 
 
+class FakeOwner:
+    """Stands in for a PortOwner: records lifecycle, never opens anything."""
+
+    def __init__(self, name):
+        self.name = name
+        self.events = []
+
+    def status(self):
+        return {"node": self.name, "state": "held", "port": "COM9"}
+
+    def expect_reboot(self, reason):
+        self.events.append(("rebooting", reason))
+
+    def wait_answering(self, budget_s=180.0):
+        from bench import ports
+
+        return ports.Result(ports.OK, "", 0.0, budget_s)
+
+    def hold(self, budget_s=60.0):
+        from bench import ports
+
+        return ports.Result(ports.OK, "", 0.0, budget_s)
+
+
 class FakeHeld:
     def __init__(self, name):
         self.node = BenchNode(name, f"SER-{name}", "dut")
         self.connected = True
         self.port = "COM9"
+        self.owner = FakeOwner(name)
 
 
 class FakeObserver:
@@ -70,6 +95,9 @@ class FakeObserver:
 
     def interface(self, name):
         return mock.MagicMock()
+
+    def owner_for(self, name):
+        return self.held[name].owner
 
     def send_text(self, name, text, channel_index=0, **kw):
         self.sent.append((name, text))

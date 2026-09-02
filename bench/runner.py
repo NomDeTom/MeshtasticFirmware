@@ -32,6 +32,7 @@ from . import (
     manifest as manifest_mod,
     observer as observer_mod,
     platform_probe,
+    ports,
     preflight,
     provision,
     scenario as scenario_mod,
@@ -86,6 +87,7 @@ class Runner:
         # verified rather than reapplied.
         self._provisioned: dict[str, str] = {}
         self._provisioner: Any = None
+        self._schedule: Any = None
         self.started_at = time.time()
         self._last_heartbeat = 0.0
         self._stop_beating = threading.Event()
@@ -155,6 +157,11 @@ class Runner:
             # runs with the same table hash asked the same questions.
             "git": {"sha": sha, "dirty": dirty},
             "scenario_table_hash": self._table_hash(),
+            "schedule": self._schedule.to_dict() if self._schedule else None,
+            "ports": (
+                {n: h.owner.status() for n, h in self.observer.held.items() if h.owner}
+                if self.observer else None
+            ),
             "scenarios": [s.id for s in self._selected()],
             "stage": self.stage,
             "row": self.current_row,
@@ -170,6 +177,49 @@ class Runner:
             "manifest": self.manifest.summary(),
             "heartbeat": time.time(),
         }
+
+    def schedule(self) -> ports.Schedule:
+        """What this run intends to do, and the worst case for each step.
+
+        Computed before anything starts, so an unattended run has a knowable end rather
+        than an open-ended one. Every device operation is bounded, so the total is a real
+        ceiling: a run that exceeds it has something wrong rather than something slow.
+        """
+        plan = ports.Schedule()
+        plan.add("preflight", 60.0, "checks that refuse a run which cannot prove anything")
+
+        sha, dirty = manifest_mod.git_state(self.config.firmware_root)
+        distinct = {
+            rb.bake.content_hash(sha, dirty)
+            for scen in self._selected() for rb in scen.roles.values()
+        }
+        unbuilt = [h for h in distinct if not self.manifest.has(h)]
+        for bake_hash in unbuilt:
+            plan.add(f"build {bake_hash}", builder.BUILD_TIMEOUT_S, "compile one image")
+        if distinct and not unbuilt:
+            plan.add("build (all cached)", 0.0, f"{len(distinct)} image(s) already built")
+
+        flashed: set[str] = set()
+        for scen in self._selected():
+            for role in scen.roles:
+                node = self._node_for(role)
+                if node is None or node.never_flash or self.config.skip_flash:
+                    continue
+                if node.name not in flashed:
+                    flashed.add(node.name)
+                    plan.add(f"{scen.id}: flash {node.name}", flasher.FLASH_BUDGET_S,
+                             "once per node; later rows reuse the image")
+            if not self.config.skip_provision:
+                for role in scen.roles:
+                    node = self._node_for(role)
+                    if node is not None and not node.never_command:
+                        plan.add(f"{scen.id}: provision {node.name}",
+                                 provision.PROVISION_BUDGET_S, "reset, config, verify")
+            stim = scen.stimulus_params
+            stimulus_s = float(stim.get("count", 0)) * float(stim.get("interval_s", 0))
+            plan.add(f"{scen.id}: execute", stimulus_s + scen.duration_s,
+                     f"{stim.get('count', 0)} sends then a {scen.duration_s:.0f}s window")
+        return plan
 
     def _table_hash(self) -> str:
         """Hash of the selected scenario table, so an edited matrix is visible."""
@@ -202,6 +252,12 @@ class Runner:
                 pass
 
     def run(self) -> dict:
+        self._schedule = self.schedule()
+        streams.durable_write_text(
+            self.run_dir / "schedule.json", json.dumps(self._schedule.to_dict(), indent=2)
+        )
+        self.event("schedule", steps=len(self._schedule.steps),
+                   total_s=round(self._schedule.total_s, 1))
         self._stop_beating.clear()
         self._beat_thread = threading.Thread(
             target=self._beat_loop, daemon=True, name="bench-heartbeat"
@@ -453,12 +509,12 @@ class Runner:
             self.observer.interface(node_name).localNode.reboot()
         except Exception as exc:  # noqa: BLE001 - the node reboots out from under the call
             self.event("build_tag_reboot_raised", node=node_name, error=str(exc))
-        self.observer.mark_dropped(node_name, reason="build_tag_reboot")
+        self.observer.owner_for(node_name).expect_reboot("build_tag_reboot")
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             time.sleep(3.0)
-            self.observer.health_tick()
+            self.observer.owner_for(node_name).hold(budget_s=20.0)
             tag = self._build_tag_for(node_name, None, since=None)
             if tag:
                 self.event("build_tag_observed", node=node_name, tag=tag)

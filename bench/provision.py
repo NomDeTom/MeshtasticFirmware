@@ -38,6 +38,10 @@ from . import devices
 # Generous: a node re-enumerating after a config reboot can take well over a
 # minute on this host, and a tight bound turns slow hardware into a failed row.
 READY_TIMEOUT_S = 180.0
+
+# Worst case for one node's full prep: reset, several writes and two reboots,
+# each of which can wait out a readiness budget. Quoted by the run schedule.
+PROVISION_BUDGET_S = 420.0
 SETTLE_AFTER_WRITE_S = 2.0
 VERIFY_POLL_S = 2.0
 VERIFY_ATTEMPTS = 6
@@ -251,9 +255,10 @@ class Provisioner:
             self._emit("provision_step_raised", node=node.name, step=name, error=str(exc))
         time.sleep(SETTLE_AFTER_WRITE_S)
         if reboots:
-            # Abandon, do not close: the node is rebooting, and a close that blocks holds
+            # The node is rebooting. expect_reboot abandons the handle rather than
+            # closing it: a close blocks on a device that is already leaving and keeps
             # the port against the reconnect immediately after it.
-            self.observer.mark_dropped(node.name, reason=f"provision:{name}", abandon=True)
+            self.observer.owner_for(node.name).expect_reboot(f"provision:{name}")
 
     def _write_config(self, node: devices.BenchNode, section: str, values: dict) -> None:
         """Write one config section and commit it.
@@ -285,26 +290,26 @@ class Provisioner:
         self._wait_ready(node, reconnect=True)
 
     def _wait_ready(
-        self, node: devices.BenchNode, timeout: float = READY_TIMEOUT_S, reconnect: bool = False
+        self, node: devices.BenchNode, timeout: float = READY_TIMEOUT_S, reconnect: bool = True
     ) -> None:
-        """Block until the node is enumerated and the observer holds it again."""
-        started = time.time()
-        devices.wait_for_port(node.serial_number, timeout=timeout)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            held = self.observer.held.get(node.name)
-            if held is not None and held.connected:
-                self._emit(
-                    "node_ready", node=node.name, waited_s=round(time.time() - started, 1)
-                )
-                return
-            if reconnect:
-                self.observer.health_tick()
-            time.sleep(1.0)
-        raise ProvisionError(
-            f"{node.name} did not become ready within {timeout:.0f}s "
-            f"(waited {time.time() - started:.0f}s)"
+        """Block until the node is answering again, or fail with a named outcome.
+
+        Delegated to the port owner, which is the only thing that opens the device. It
+        retries with spacing and reports each attempt, so a node that is merely busy
+        rebooting stays distinguishable from one that is genuinely gone.
+        """
+        owner = self.observer.owner_for(node.name)
+        result = owner.wait_answering(budget_s=timeout)
+        self._emit(
+            "node_ready" if result.ok else "node_not_ready",
+            node=node.name, outcome=result.outcome,
+            waited_s=round(result.elapsed_s, 1), budget_s=result.budget_s,
         )
+        if not result.ok:
+            raise ProvisionError(
+                f"{node.name} did not become ready: {result.outcome} after "
+                f"{result.elapsed_s:.0f}s of {result.budget_s:.0f}s"
+            )
 
     # -- read-back -------------------------------------------------------------
 
@@ -320,7 +325,7 @@ class Provisioner:
         Reconnecting settles both.
         """
         self._emit("provision_refresh", node=node.name)
-        self.observer.mark_dropped(node.name, reason="config_readback", abandon=True)
+        self.observer.owner_for(node.name).expect_reboot("config_readback")
         self._wait_ready(node, reconnect=True)
 
     def read_settled_state(self, node: devices.BenchNode) -> SettledState:
