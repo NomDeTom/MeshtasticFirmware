@@ -492,17 +492,23 @@ class TestProvisionerReadBack(unittest.TestCase):
 
         calls = []
 
+        class StubOwner:
+            def expect_reboot(self, reason):
+                calls.append(("rebooting", reason))
+
+            def wait_answering(self, budget_s=180.0):
+                from bench import ports
+
+                calls.append(("waited", budget_s))
+                return ports.Result(ports.OK, "", 0.0, budget_s)
+
         class StubObserver:
             held = {}
 
-            def mark_dropped(self, name, reason, abandon=False):
-                calls.append(("dropped", name, reason))
-
-            def health_tick(self):
-                pass
+            def owner_for(self, name):
+                return StubOwner()
 
         p = provision.Provisioner(StubObserver())
-        p._wait_ready = lambda node, **kw: calls.append(("waited", node.name))
         p.read_settled_state = lambda node: calls.append(("read", node.name)) or provision.SettledState(
             node=node.name, serial_number="S", port="C", node_id="!a", node_num=1,
             firmware_version="v", build_tag="t", region="EU_868", modem_preset=None,
@@ -514,7 +520,83 @@ class TestProvisionerReadBack(unittest.TestCase):
         # The reconnect must happen BEFORE the read, or the read returns the client's
         # cached config and a write that never stuck looks identical to one that did.
         kinds = [c[0] for c in calls]
-        self.assertLess(kinds.index("dropped"), kinds.index("read"))
+        self.assertLess(kinds.index("rebooting"), kinds.index("read"))
+
+
+class TestPortOwnership(unittest.TestCase):
+    """The invariant the whole port refactor exists to hold."""
+
+    def test_only_the_port_owner_opens_a_device(self):
+        """Exactly one place in the bench may call SerialInterface().
+
+        A serial port is exclusive and this library's connect() can block indefinitely,
+        so every bounded open abandons a thread that still holds the handle. Two openers
+        on one device is a race with no winner - it produced four different failures that
+        all looked like hardware. Grepping for it keeps the rule from eroding.
+        """
+        import re
+
+        offenders = []
+        for path in Path("bench").glob("*.py"):
+            if path.name == "ports.py":
+                continue  # the one legitimate owner
+            text = path.read_text(encoding="utf-8")
+            # Strip comments and docstrings so prose about the rule does not trip it.
+            code = re.sub(r'""".*?"""', "", text, flags=re.S)
+            code = re.sub(r"^\s*#.*$", "", code, flags=re.M)
+            if "SerialInterface(" in code:
+                offenders.append(path.name)
+        self.assertEqual(offenders, [], "only ports.py may open a device")
+
+    def test_a_lease_is_exclusive(self):
+        from bench import ports
+
+        owner = ports.PortOwner(BenchNode("dut", "SER", "dut"))
+        owner.iface = object()  # pretend capture already holds it
+
+        with owner.lease("first", budget_s=5.0):
+            self.assertEqual(owner.state, ports.ST_LEASED)
+            # A second lease must not be granted while the first is live.
+            with self.assertRaises(ports.PortBusy):
+                with owner.lease("second", budget_s=1.0):
+                    pass
+
+    def test_a_rebooting_lease_abandons_rather_than_closes(self):
+        from bench import ports
+
+        closed = []
+
+        class FakeIface:
+            def close(self):
+                closed.append(True)
+
+        owner = ports.PortOwner(BenchNode("dut", "SER", "dut"))
+        owner.iface = FakeIface()
+        with owner.lease("flash", budget_s=5.0, reboots=True):
+            pass
+        # Closing a device that is already leaving blocks and keeps the port against
+        # whatever needs it next, so a rebooting lease must never close.
+        self.assertEqual(closed, [])
+        self.assertIsNone(owner.iface)
+        self.assertEqual(owner.state, ports.ST_REBOOTING)
+
+    def test_every_outcome_is_one_of_the_declared_exit_states(self):
+        from bench import ports
+
+        budget = ports.Budget(1.0)
+        for outcome in (ports.OK, ports.TIMED_OUT, ports.ABSENT,
+                        ports.BUSY, ports.REFUSED, ports.FAILED):
+            self.assertIn(outcome, ports.TERMINAL)
+            self.assertEqual(budget.result(outcome).outcome, outcome)
+
+    def test_a_schedule_sums_its_budgets(self):
+        from bench import ports
+
+        plan = ports.Schedule()
+        plan.add("flash", 630.0, "one node")
+        plan.add("provision", 420.0, "reset and verify")
+        self.assertEqual(plan.total_s, 1050.0)
+        self.assertIn("TOTAL", plan.summary())
 
 
 class TestHardwareGuard(unittest.TestCase):

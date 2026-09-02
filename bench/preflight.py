@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from . import devices, hardware, platform_probe
+from . import devices, hardware, platform_probe, ports
 
 # Severity levels. BLOCK stops the run; WARN is recorded into the artifact and shown by
 # the status server, but does not stop anything.
@@ -291,7 +291,7 @@ def _check_nodes(report: PreflightReport, nodes: Iterable[devices.BenchNode]) ->
     for node in nodes:
         if node.never_flash or not node.board or not node.present():
             continue
-        actual = hardware.read_hw_model(node.resolve())
+        actual = hardware.read_hw_model(ports.PortOwner(node))
         if actual is None:
             unknown.append(node.name)
         elif hardware.normalize(actual) != hardware.normalize(node.board):

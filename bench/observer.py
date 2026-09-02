@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import devices, packets, streams
+from . import devices, packets, ports, streams
 
 # CSI escapes the firmware uses to colour its log prefix.
 _ANSI_RE = re.compile(chr(27) + r'\[[0-9;]*[A-Za-z]')
@@ -55,9 +55,10 @@ CONNECT_TIMEOUT_S = 20.0
 
 @dataclass
 class Held:
-    """One node's live capture state."""
+    """One node's live capture state. The port itself belongs to `owner`."""
 
     node: devices.BenchNode
+    owner: Any = None
     port: str | None = None
     iface: Any = None
     serial_reader: Any = None
@@ -78,7 +79,9 @@ class Observer:
 
     def __init__(self, recorder: streams.Recorder, nodes: list[devices.BenchNode]) -> None:
         self.recorder = recorder
-        self.held: dict[str, Held] = {n.name: Held(node=n) for n in nodes}
+        self.held: dict[str, Held] = {
+            n.name: Held(node=n, owner=ports.PortOwner(n, recorder)) for n in nodes
+        }
         self._lock = threading.RLock()
         self._wired = False
         # Nodes the observer must not reconnect to. Flashing needs exclusive use of the
@@ -125,90 +128,55 @@ class Observer:
     # -- opening / closing -----------------------------------------------------
 
     def _open(self, held: Held) -> tuple[bool, str]:
-        port = devices.try_resolve_port(held.node.serial_number)
-        if port is None:
-            return False, "not enumerated"
-        held.port = port
-        try:
-            if held.raw_mode:
+        """Open capture for one node, through its port owner.
+
+        The observer no longer opens anything itself. A single owner per device means
+        capture and every other operation queue behind one lock instead of racing for an
+        exclusive handle.
+        """
+        if held.raw_mode:
+            port = held.owner.resolve()
+            if port is None:
+                return False, "not enumerated"
+            held.port = port
+            try:
                 held.serial_reader = _RawSerialReader(held, self.recorder)
                 held.serial_reader.start()
-            else:
-                held.iface = self._connect_api(port)
+            except Exception as exc:  # noqa: BLE001
+                held.connected = False
+                return False, f"{type(exc).__name__}: {exc}"
             held.connected = True
             held.attempts = 0
-            if held.dropped_at is not None:
-                gap = round(time.time() - held.dropped_at, 1)
-                self.recorder.event(
-                    "capture_gap_closed", node=held.node.name, port=port, gap_s=gap
-                )
-                held.dropped_at = None
             self.recorder.event(
-                "connection_established",
-                node=held.node.name,
-                port=port,
-                mode="raw" if held.raw_mode else "api",
+                "connection_established", node=held.node.name, port=port, mode="raw"
             )
             return True, port
-        except Exception as exc:  # noqa: BLE001 - any open failure is just "not open"
-            held.connected = False
+
+        result = held.owner.hold(budget_s=45.0)
+        held.port = held.owner.port
+        held.iface = held.owner.iface
+        held.connected = result.ok
+        if result.ok:
+            held.attempts = 0
+            held.dropped_at = None
             self.recorder.event(
-                "connection_failed", node=held.node.name, port=port, error=str(exc)
+                "connection_established", node=held.node.name, port=held.port, mode="api"
             )
-            return False, f"{type(exc).__name__}: {exc}"
-
-    def _connect_api(self, port: str) -> Any:
-        import meshtastic.serial_interface as si
-
-        result: dict[str, Any] = {}
-
-        def _do() -> None:
-            try:
-                result["iface"] = si.SerialInterface(devPath=port)
-            except Exception as exc:  # noqa: BLE001
-                result["error"] = exc
-
-        # The library's connect can block past any useful deadline; bound it.
-        t = threading.Thread(target=_do, daemon=True, name=f"bench-connect-{port}")
-        t.start()
-        t.join(CONNECT_TIMEOUT_S)
-        if "error" in result:
-            raise result["error"]
-        if "iface" not in result:
-            raise TimeoutError(f"connect to {port} did not return in {CONNECT_TIMEOUT_S}s")
-        return result["iface"]
+            return True, held.port or ""
+        return False, f"{result.outcome}: {result.detail}"
 
     def _close(self, held: Held, reason: str, abandon: bool = False) -> None:
-        """Release a node's capture. `abandon` skips the close entirely.
-
-        Closing a node that is rebooting is worse than useless: iface.close() blocks on a
-        device the library is still draining, so it runs on a thread that gets abandoned
-        anyway - and that thread keeps the exclusive serial port, which then blocks the
-        reconnect that is supposed to follow. Measured as "did not become ready within
-        90s" against hardware that was fine. When the device is going away, drop the
-        reference and let the OS reclaim the handle on re-enumeration.
-        """
-        return self._close_impl(held, reason, abandon)
-
-    def _close_impl(self, held: Held, reason: str, abandon: bool = False) -> None:
+        """Stop capturing a node. `abandon` when the device is deliberately going away."""
         if held.serial_reader is not None:
             try:
                 held.serial_reader.stop()
             except Exception:  # noqa: BLE001
                 pass
             held.serial_reader = None
-        iface, held.iface = held.iface, None
+        if held.owner is not None and not held.raw_mode:
+            held.owner.release(reason, abandon=abandon)
+        held.iface = None
         held.connected = False
-        if iface is not None:
-            if abandon:
-                try:
-                    iface._wantExit = True  # keep its reader quiet on the way out
-                except Exception:  # noqa: BLE001
-                    pass
-            else:
-                t = threading.Thread(target=_safe_close, args=(iface,), daemon=True)
-                t.start()
-                t.join(CLOSE_TIMEOUT_S)
         self.recorder.event("connection_closed", node=held.node.name, reason=reason)
 
     # -- health / reconnect ----------------------------------------------------
@@ -247,6 +215,18 @@ class Observer:
                         max_attempts=RECONNECT_MAX_ATTEMPTS,
                         detail=detail,
                     )
+
+    def owner_for(self, name: str) -> Any:
+        """The sole owner of one node's port.
+
+        Everything that needs exclusive use of a device goes through this rather than
+        opening the port itself, so operations queue behind one lock instead of racing.
+        """
+        held = self.held.get(name)
+        if held is None:
+            raise KeyError(f"unknown node {name!r}")
+        devices.assert_commandable(held.node)
+        return held.owner
 
     def detach(self, name: str, reason: str) -> Any:
         """Stop reconnecting to a node and hand over its LIVE interface, unclosed.

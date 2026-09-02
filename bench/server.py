@@ -202,7 +202,16 @@ def read_state(run_dir: Path) -> dict:
             "total": state.get("total"),
             "elapsed_s": state.get("elapsed_s"),
             "expected_stage_s": STAGE_MEDIANS_S.get(state.get("stage") or ""),
+            # Planned against actual. The schedule is a worst case computed from the
+            # budget on every device operation, so a run past it has something wrong
+            # rather than something slow - which a percentage bar could never say.
+            "planned_total_s": (state.get("schedule") or {}).get("total_s"),
+            "over_plan": (
+                bool(state.get("elapsed_s", 0) > (state.get("schedule") or {}).get("total_s", 1e9))
+            ),
         },
+        "schedule": state.get("schedule"),
+        "ports": state.get("ports"),
         "waiting": {
             "for": state.get("waiting_for"),
             "since": state.get("waiting_since"),
@@ -524,6 +533,9 @@ padding:.3rem .6rem;cursor:pointer;font-size:.8rem;color:inherit;display:flex;ga
   <h2>nodes</h2>
   <div class="card"><table id="nodes"><thead><tr><th>node</th><th>role</th><th>port</th>
     <th>mode</th><th>state</th><th>pkts</th><th>logs</th></tr></thead><tbody></tbody></table></div>
+  <h2>devices</h2>
+  <div class="card"><table id="ports"><thead><tr><th>node</th><th>port state</th>
+    <th>port</th><th>reconnects</th><th>last error</th></tr></thead><tbody></tbody></table></div>
   <h2>capture</h2>
   <div class="card"><table id="cap"><thead><tr><th>stream</th><th>rows</th><th>bytes</th>
     <th>last</th></tr></thead><tbody></tbody></table></div>
@@ -587,6 +599,7 @@ async function refresh() {
     ["elapsed", secs(p.elapsed_s), p.expected_stage_s ? "stage median " + secs(p.expected_stage_s) : ""],
     ["pass / fail", `${c.PASS||0} / ${c.FAIL||0}`, `${c["NOT OBSERVED"]||0} not-observed, ${c.INVALID||0} invalid`],
     ["heartbeat", secs(s.heartbeat_age_s) + " ago", ""],
+    ["planned", secs(p.planned_total_s), p.over_plan ? "OVER PLAN" : "worst case for this table"],
   ].map(([k,v,sub]) => `<div class="card"><div class=k>${k}</div><div class=big>${cell(v)}</div>
      <div class=k>${esc(sub)}</div></div>`).join("");
 
@@ -615,6 +628,13 @@ async function refresh() {
            if (o.dropped_for_s != null) return `<span class=FAIL>dropped ${secs(o.dropped_for_s)}</span>`;
            return d.port ? "<span class=k>present</span>" : "<span class=FAIL>absent</span>"; },
     d => cell((obs[d.name]||{}).packets), d => cell((obs[d.name]||{}).log_lines)]);
+
+  const pstate = s.ports || {};
+  rows("#ports", Object.keys(pstate).map(k => ({node:k, ...pstate[k]})), [
+    d => esc(d.node),
+    d => { const bad = ["gave_up","lost","absent"].includes(d.state);
+           return `<span class="${bad ? "FAIL" : "PASS"}">${esc(d.state)}</span>`; },
+    d => cell(d.port), d => cell(d.reconnects), d => cell(d.last_error)]);
 
   const cap = (s.capture||{}).streams || {};
   rows("#cap", Object.entries(cap).map(([k,v]) => ({name:k, ...v})), [

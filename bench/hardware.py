@@ -61,39 +61,19 @@ def model_from_interface(iface: Any) -> str | None:
         return None
 
 
-def read_hw_model(port: str, timeout: float = 25.0) -> str | None:
-    """The hardware model the DEVICE reports, via one bounded connect.
+def read_hw_model(owner: Any, budget_s: float = 30.0) -> str | None:
+    """The model the DEVICE reports, via the node's port owner.
 
-    Deliberately asks the node rather than trusting the node table: the table is
-    hand-written and is exactly what gets a board wrong.
+    Takes an owner rather than a port: opening the port here would be a second opener on
+    an exclusive device, and an open that times out abandons a thread still holding it.
+    Asks the node rather than trusting the node table, because the table is hand-written
+    and is exactly what gets a board wrong.
     """
-    import threading
-
-    import meshtastic.serial_interface as si
-
-    result: dict[str, Any] = {}
-
-    def _probe() -> None:
-        iface = None
-        try:
-            iface = si.SerialInterface(devPath=port)
-            info = iface.getMyNodeInfo() or {}
-            user = info.get("user") or {}
-            result["model"] = user.get("hwModel")
-            result["node_id"] = user.get("id")
-        except Exception as exc:  # noqa: BLE001
-            result["error"] = exc
-        finally:
-            if iface is not None:
-                try:
-                    iface.close()
-                except Exception:  # noqa: BLE001
-                    pass
-
-    thread = threading.Thread(target=_probe, daemon=True)
-    thread.start()
-    thread.join(timeout)
-    return result.get("model")
+    try:
+        with owner.lease("hw_model", budget_s=budget_s) as iface:
+            return model_from_interface(iface)
+    except Exception:  # noqa: BLE001 - busy or absent both mean "could not tell"
+        return None
 
 
 def normalize(slug: Any) -> str:
