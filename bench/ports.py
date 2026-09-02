@@ -54,6 +54,12 @@ ST_IDLE = "idle"  # enumerated, nothing open
 ST_HELD = "held"  # the observer holds it for continuous capture
 ST_LEASED = "leased"  # exclusively leased to one operation
 ST_REBOOTING = "rebooting"  # deliberately going away; do not touch
+
+# How long a "do not touch" claim survives without anyone waiting on it. The claim is
+# what keeps capture off a node crossing a reboot, but an operation that dies holding
+# one would otherwise strand the device for the rest of the run - locked out by a
+# promise nobody is left to keep. Callers that need longer say so.
+REBOOT_HOLDOFF_S = 240.0
 ST_LOST = "lost"  # was held, dropped unexpectedly
 ST_GAVE_UP = "gave_up"  # reconnect ceiling exhausted; needs a human
 
@@ -151,6 +157,7 @@ class PortOwner:
         self.iface: Any = None
         self.port: str | None = None
         self.reconnects = 0
+        self._reboot_until = 0.0
         self.dropped_at: float | None = None
         self.last_error: str | None = None
         # What the DEVICE said it is, once anything has asked. Distinct from the board
@@ -240,7 +247,7 @@ class PortOwner:
         with self._lock:
             if self.state == ST_LEASED:
                 return Result(BUSY, "leased to another operation", 0.0, budget_s)
-            if self.state == ST_REBOOTING:
+            if self._rebooting_now():
                 # The device was deliberately sent away - into DFU, or through a config
                 # reboot - and reconnecting to it now takes the port from the operation
                 # that is waiting for it to come back. Measured: capture reclaimed a node
@@ -288,6 +295,14 @@ class PortOwner:
         self.port = port
         self._to(ST_HELD if running else ST_ABSENT, "raw serial capture")
 
+    def _mark_rebooting(self, reason: str, window_s: float = REBOOT_HOLDOFF_S) -> None:
+        """Claim the device as away. Caller-sized, and always finite."""
+        self._reboot_until = time.time() + window_s
+        self._to(ST_REBOOTING, reason)
+
+    def _rebooting_now(self) -> bool:
+        return self.state == ST_REBOOTING and time.time() < self._reboot_until
+
     def release(self, reason: str, abandon: bool = False) -> None:
         """Stop holding the port.
 
@@ -302,7 +317,10 @@ class PortOwner:
             if iface is not None:
                 _let_go(iface, abandon=abandon)
             self.dropped_at = time.time()
-            self._to(ST_REBOOTING if abandon else ST_IDLE, reason)
+            if abandon:
+                self._mark_rebooting(reason)
+            else:
+                self._to(ST_IDLE, reason)
             self._event("capture_gap_opened", reason=reason, abandoned=abandon)
 
     # -- exclusive work --------------------------------------------------------
@@ -313,6 +331,7 @@ class PortOwner:
         reason: str,
         budget_s: float = 120.0,
         reboots: bool = False,
+        reboot_window_s: float = 0.0,
     ) -> Iterator[Any]:
         """Take the device exclusively and hand back a live interface.
 
@@ -348,7 +367,9 @@ class PortOwner:
                     _let_go(iface, abandon=True)
                     self.iface = None
                     self.dropped_at = time.time()
-                    self._to(ST_REBOOTING, f"{reason} (device rebooting)")
+                    self._mark_rebooting(
+                        f"{reason} (device rebooting)", reboot_window_s or REBOOT_HOLDOFF_S
+                    )
                 else:
                     self.iface = iface
                     if iface is not None:
@@ -360,10 +381,10 @@ class PortOwner:
                 )
             self._busy.release()
 
-    def expect_reboot(self, reason: str) -> None:
+    def expect_reboot(self, reason: str, window_s: float = REBOOT_HOLDOFF_S) -> None:
         """Declare that the device is about to vanish, and drop the handle for it."""
         self.release(reason, abandon=True)
-        self._to(ST_REBOOTING, reason)
+        self._mark_rebooting(reason, window_s)
 
     def wait_answering(self, budget_s: float = 180.0, spacing: float = 4.0) -> Result:
         """Wait until the device is enumerated AND holding a capture connection again.
@@ -379,6 +400,7 @@ class PortOwner:
             # This is the operation responsible for bringing the node back, so it is the
             # one that clears the rebooting hold-off.
             if self.state == ST_REBOOTING:
+                self._reboot_until = 0.0
                 self._to(ST_IDLE, "awaiting return")
         while not budget.spent:
             attempt += 1

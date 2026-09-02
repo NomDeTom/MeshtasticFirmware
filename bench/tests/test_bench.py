@@ -453,6 +453,31 @@ class TestDevicesAndObserver(unittest.TestCase):
         self.assertIn("still readable", " ".join(r.drain()))
 
 
+class TestSilenceIsNotEvidence(unittest.TestCase):
+    """A quiet instrument must not read as a quiet subject."""
+
+    def _ledger(self, rows):
+        from bench import ledger as ledger_mod
+
+        return ledger_mod.Ledger(
+            packets=ledger_mod.PacketLane([]), logs=ledger_mod.LogLane(rows)
+        )
+
+    def test_at_most_zero_on_a_silent_node_is_invalid(self):
+        from bench import scenario
+
+        check = scenario.LogCount("no_abort", [r"Duty cycle"], node="dut", at_most=0)
+        ctx = scenario.Context(scenario_id="T1")
+
+        deaf = check.check(self._ledger([{"node": "peer", "line": "hello"}]), ctx)
+        self.assertEqual(deaf.verdict, scenario.INVALID)
+
+        heard = check.check(
+            self._ledger([{"node": "dut", "line": "anything at all"}]), ctx
+        )
+        self.assertEqual(heard.verdict, scenario.PASS)
+
+
 class TestSettledStateComparison(unittest.TestCase):
     """A precondition that quietly did not apply is the hollow pass, restated."""
 

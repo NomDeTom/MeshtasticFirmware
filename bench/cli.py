@@ -62,8 +62,17 @@ def load_nodes(path: Path) -> list[devices.BenchNode]:
 
 
 def load_scenarios(dotted: str) -> list[scenario.Scenario]:
-    """Import a scenario module and take its SCENARIOS list."""
-    module = importlib.import_module(dotted)
+    """Import a scenario module and take its SCENARIOS list.
+
+    A bare name means one of the bench's own tables, so `--scenarios smoke` works and
+    a full dotted path still names a table kept anywhere else.
+    """
+    try:
+        module = importlib.import_module(dotted)
+    except ModuleNotFoundError:
+        if "." in dotted:
+            raise
+        module = importlib.import_module(f"bench.scenarios.{dotted}")
     scenarios = getattr(module, "SCENARIOS", None)
     if not scenarios:
         raise SystemExit(f"{dotted} defines no SCENARIOS")

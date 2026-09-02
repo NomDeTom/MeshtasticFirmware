@@ -402,7 +402,15 @@ class Runner:
 
     def execute_rows(self) -> None:
         for scen in self._selected():
-            if scen.id in self.results:
+            # A resume skips rows that were MEASURED, not rows that were attempted.
+            # INVALID is the bench saying it failed to take a measurement, so treating it
+            # as recorded turns the retry into a silent no-op: the run reports the same
+            # INVALID it started with, having touched no hardware.
+            recorded = self.results.get(scen.id)
+            verdict = getattr(recorded, "verdict", None) or (
+                recorded.get("verdict") if isinstance(recorded, dict) else None
+            )
+            if recorded is not None and verdict != "INVALID":
                 self.event("row_skipped", scenario=scen.id, reason="already recorded")
                 continue
             self.current_row = scen.id
