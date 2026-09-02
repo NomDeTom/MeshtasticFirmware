@@ -129,7 +129,7 @@ class Flasher:
                 f"{node.name} ({node.serial_number}) is not enumerated; refusing to act"
             )
 
-        iface = self._open_once(port)
+        iface = self._open_with_retry(node, port)
         if iface is None:
             raise NodeNotAnswering(
                 f"{node.name} is enumerated on {port} but not answering. It may already "
@@ -153,6 +153,29 @@ class Flasher:
             _close_quietly(iface)
 
         return self._finish_dfu(node, image, before, started)
+
+    def _open_with_retry(self, node, port: str, total: float = 90.0):
+        """Open the node, allowing for one that is still coming back up.
+
+        A single bounded open is not liveness. Flashing and provisioning both reboot the
+        node, and an open attempted while it is still enumerating times out and reports
+        "not answering" about hardware that is merely busy - which then refuses the flash
+        and, on a matrix, every row after it. The port is re-resolved each attempt because
+        a rebooting node can return on a different one.
+        """
+        deadline = time.monotonic() + total
+        attempt = 0
+        while time.monotonic() < deadline:
+            attempt += 1
+            current = devices.try_resolve_port(node.serial_number) or port
+            iface = self._open_once(current, timeout=20.0)
+            if iface is not None:
+                if attempt > 1:
+                    self._emit("node_answered", node=node.name, port=current, attempt=attempt)
+                return iface
+            self._emit("node_not_ready", node=node.name, port=current, attempt=attempt)
+            time.sleep(4.0)
+        return None
 
     def _open_once(self, port: str, timeout: float = 25.0):
         """Open one bounded connection, or None. The thread is abandoned on timeout."""
