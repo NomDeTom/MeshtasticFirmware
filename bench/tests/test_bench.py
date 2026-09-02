@@ -495,7 +495,7 @@ class TestProvisionerReadBack(unittest.TestCase):
         class StubObserver:
             held = {}
 
-            def mark_dropped(self, name, reason):
+            def mark_dropped(self, name, reason, abandon=False):
                 calls.append(("dropped", name, reason))
 
             def health_tick(self):

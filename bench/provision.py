@@ -35,7 +35,9 @@ from typing import Any, Callable
 
 from . import devices
 
-READY_TIMEOUT_S = 90.0
+# Generous: a node re-enumerating after a config reboot can take well over a
+# minute on this host, and a tight bound turns slow hardware into a failed row.
+READY_TIMEOUT_S = 180.0
 SETTLE_AFTER_WRITE_S = 2.0
 VERIFY_POLL_S = 2.0
 VERIFY_ATTEMPTS = 6
@@ -249,7 +251,9 @@ class Provisioner:
             self._emit("provision_step_raised", node=node.name, step=name, error=str(exc))
         time.sleep(SETTLE_AFTER_WRITE_S)
         if reboots:
-            self.observer.mark_dropped(node.name, reason=f"provision:{name}")
+            # Abandon, do not close: the node is rebooting, and a close that blocks holds
+            # the port against the reconnect immediately after it.
+            self.observer.mark_dropped(node.name, reason=f"provision:{name}", abandon=True)
 
     def _write_config(self, node: devices.BenchNode, section: str, values: dict) -> None:
         """Write one config section and commit it.
@@ -316,7 +320,7 @@ class Provisioner:
         Reconnecting settles both.
         """
         self._emit("provision_refresh", node=node.name)
-        self.observer.mark_dropped(node.name, reason="config_readback")
+        self.observer.mark_dropped(node.name, reason="config_readback", abandon=True)
         self._wait_ready(node, reconnect=True)
 
     def read_settled_state(self, node: devices.BenchNode) -> SettledState:
