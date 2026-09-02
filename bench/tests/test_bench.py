@@ -600,10 +600,40 @@ class TestPortOwnership(unittest.TestCase):
         from bench import ports
 
         plan = ports.Schedule()
-        plan.add("flash", 630.0, "one node")
-        plan.add("provision", 420.0, "reset and verify")
+        plan.add("f", "flash", 630.0, "one node")
+        plan.add("p", "provision", 420.0, "reset and verify")
         self.assertEqual(plan.total_s, 1050.0)
         self.assertIn("TOTAL", plan.summary())
+
+    def test_steps_nest_and_track_their_own_status(self):
+        from bench import ports
+
+        plan = ports.Schedule()
+        prep = plan.add("p", "provision dut", 420.0, kind="provision", node="dut")
+        prep.add("p:reset", "factory reset", 120.0)
+        prep.add("p:verify", "read back + verify", 30.0)
+
+        self.assertEqual(plan.counts[ports.PLANNED], 3)
+        plan.begin("p")
+        # Skipped is distinct from done: a skipped step spends none of its budget, which
+        # is what makes the plan's total a ceiling rather than an estimate.
+        plan.skip("p:reset", "state already matches")
+        plan.finish("p:verify")
+        counts = plan.counts
+        self.assertEqual(counts[ports.RUNNING], 1)
+        self.assertEqual(counts[ports.SKIPPED], 1)
+        self.assertEqual(counts[ports.DONE], 1)
+        self.assertEqual(plan.find("p:reset").outcome, "state already matches")
+
+    def test_a_step_reports_its_own_overrun(self):
+        from bench import ports
+
+        plan = ports.Schedule()
+        plan.add("s", "short", 0.01)
+        plan.begin("s")
+        time.sleep(0.05)
+        plan.finish("s")
+        self.assertTrue(plan.find("s").overran, "an overrun must name itself")
 
 
 class TestHardwareGuard(unittest.TestCase):

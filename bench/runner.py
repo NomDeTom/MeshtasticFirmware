@@ -181,23 +181,31 @@ class Runner:
     def schedule(self) -> ports.Schedule:
         """What this run intends to do, and the worst case for each step.
 
-        Computed before anything starts, so an unattended run has a knowable end rather
-        than an open-ended one. Every device operation is bounded, so the total is a real
-        ceiling: a run that exceeds it has something wrong rather than something slow.
+        Computed before anything starts, so an unattended run has a knowable end. Steps
+        nest, because the top line of a row's prep is one number and the eight operations
+        under it are where the time actually goes - and most of those are skipped when
+        the node already holds the required state.
         """
         plan = ports.Schedule()
-        plan.add("preflight", 60.0, "checks that refuse a run which cannot prove anything")
+        plan.add("preflight", "preflight", 60.0,
+                 "checks that refuse a run which cannot prove anything", kind="preflight")
 
         sha, dirty = manifest_mod.git_state(self.config.firmware_root)
         distinct = {
             rb.bake.content_hash(sha, dirty)
             for scen in self._selected() for rb in scen.roles.values()
         }
-        unbuilt = [h for h in distinct if not self.manifest.has(h)]
-        for bake_hash in unbuilt:
-            plan.add(f"build {bake_hash}", builder.BUILD_TIMEOUT_S, "compile one image")
-        if distinct and not unbuilt:
-            plan.add("build (all cached)", 0.0, f"{len(distinct)} image(s) already built")
+        build = plan.add("build", "build images", 0.0,
+                         f"{len(distinct)} distinct image(s)", kind="build")
+        for bake_hash in sorted(distinct):
+            cached = self.manifest.has(bake_hash)
+            child = build.add(f"build:{bake_hash}", f"image {bake_hash}",
+                              0.0 if cached else builder.BUILD_TIMEOUT_S,
+                              "already built" if cached else "compile")
+            if cached:
+                child.status = ports.SKIPPED
+                child.outcome = "already built"
+        build.budget_s = sum(c.budget_s for c in build.children)
 
         flashed: set[str] = set()
         for scen in self._selected():
@@ -205,21 +213,70 @@ class Runner:
                 node = self._node_for(role)
                 if node is None or node.never_flash or self.config.skip_flash:
                     continue
-                if node.name not in flashed:
-                    flashed.add(node.name)
-                    plan.add(f"{scen.id}: flash {node.name}", flasher.FLASH_BUDGET_S,
-                             "once per node; later rows reuse the image")
+                step_id = f"{scen.id}:flash:{node.name}"
+                step = plan.add(step_id, f"{scen.id}: flash {node.name}",
+                                flasher.FLASH_BUDGET_S, kind="flash", node=node.name,
+                                detail="skipped once the node runs this image")
+                for name, budget in (
+                    ("prove node + check board", flasher.PROLOGUE_S),
+                    ("wait for bootloader", flasher.DFU_APPEAR_S),
+                    ("transfer image", flasher.TRANSFER_S),
+                    ("wait for it to answer", flasher.RETURN_S),
+                ):
+                    step.add(f"{step_id}:{name}", name, budget)
+                if node.name in flashed:
+                    step.status = ports.SKIPPED
+                    step.outcome = "image already installed this run"
+                flashed.add(node.name)
+
             if not self.config.skip_provision:
                 for role in scen.roles:
                     node = self._node_for(role)
-                    if node is not None and not node.never_command:
-                        plan.add(f"{scen.id}: provision {node.name}",
-                                 provision.PROVISION_BUDGET_S, "reset, config, verify")
+                    if node is None or node.never_command:
+                        continue
+                    step_id = f"{scen.id}:provision:{node.name}"
+                    step = plan.add(step_id, f"{scen.id}: provision {node.name}",
+                                    provision.PROVISION_BUDGET_S, kind="provision",
+                                    node=node.name,
+                                    detail="verified instead when the state already matches")
+                    for name, budget in (
+                        ("factory reset", 120.0),
+                        ("region + preset", 45.0),
+                        ("other lora fields", 45.0),
+                        ("device role", 45.0),
+                        ("diagnostic flags", 45.0),
+                        ("reboot to commit", 60.0),
+                        ("channels", 30.0),
+                        ("read back + verify", 30.0),
+                    ):
+                        step.add(f"{step_id}:{name}", name, budget)
+
             stim = scen.stimulus_params
             stimulus_s = float(stim.get("count", 0)) * float(stim.get("interval_s", 0))
-            plan.add(f"{scen.id}: execute", stimulus_s + scen.duration_s,
-                     f"{stim.get('count', 0)} sends then a {scen.duration_s:.0f}s window")
+            step = plan.add(f"{scen.id}:execute", f"{scen.id}: execute",
+                            stimulus_s + scen.duration_s, kind="execute",
+                            detail=f"{stim.get('count', 0)} sends, then a window")
+            step.add(f"{scen.id}:execute:stimulus", "stimulus", stimulus_s,
+                     f"{stim.get('count', 0)} x {stim.get('interval_s', 0)}s")
+            step.add(f"{scen.id}:execute:window", "capture window", scen.duration_s)
+            step.add(f"{scen.id}:execute:assert", "evaluate assertions", 0.0,
+                     f"{len(scen.assertions)} checks")
         return plan
+
+    def _begin(self, step_id: str) -> None:
+        if self._schedule is not None:
+            self._schedule.begin(step_id)
+            self.heartbeat(force=False)
+
+    def _finish(self, step_id: str, status: str = ports.DONE, outcome: str | None = None) -> None:
+        if self._schedule is not None:
+            self._schedule.finish(step_id, status, outcome)
+            self.heartbeat(force=False)
+
+    def _skip(self, step_id: str, why: str) -> None:
+        if self._schedule is not None:
+            self._schedule.skip(step_id, why)
+            self.heartbeat(force=False)
 
     def _table_hash(self) -> str:
         """Hash of the selected scenario table, so an edited matrix is visible."""
@@ -288,9 +345,11 @@ class Runner:
         if builder.restore_userprefs(self.config.firmware_root):
             self.event("userprefs_restored", note="a previous build left an injected file")
 
+        self._begin("preflight")
         report = preflight.run_preflight(
             nodes=self.config.nodes, firmware_root=self.config.firmware_root
         )
+        self._finish("preflight", ports.FAILED_STEP if report.blocked else ports.DONE)
         report.write(self.run_dir / "preflight.json")
         self.platform = platform_probe.probe()
         self.event("preflight", report=report.to_dict())
@@ -317,9 +376,11 @@ class Runner:
             manifest=self.manifest,
             on_event=lambda kind, data: self.event(kind, data),
         )
+        self._begin("build")
         self.wait_note("building images")
         outcome = b.build_all(wanted)
         self.wait_note(None)
+        self._finish("build", ports.FAILED_STEP if outcome["failed"] else ports.DONE)
         self.event("build_stage_done", outcome=outcome)
         if outcome["failed"]:
             raise builder.BuildError(f"{len(outcome['failed'])} bakes failed to build")
@@ -355,11 +416,16 @@ class Runner:
             ctx = self._context_for(scen, result, images)
 
             self.stage = STAGE_EXECUTE
+            self._begin(f"{scen.id}:execute")
             self.recorder.mark(f"{scen.id}:start", scenario=scen.to_dict())
+            self._begin(f"{scen.id}:execute:stimulus")
             self._stimulate(scen)
+            self._finish(f"{scen.id}:execute:stimulus")
+            self._begin(f"{scen.id}:execute:window")
             self.wait_note(f"{scen.id} capture window {scen.duration_s:.0f}s")
             time.sleep(scen.duration_s)
             self.wait_note(None)
+            self._finish(f"{scen.id}:execute:window")
             self.recorder.mark(f"{scen.id}:end")
 
             # Liveness before interpretation: silence from a dead stream is not evidence.
@@ -372,8 +438,11 @@ class Runner:
 
             self._resolve_build_tags(result, images)
             led = ledger_mod.Ledger.for_scenario(self.run_dir, scen.id)
+            self._begin(f"{scen.id}:execute:assert")
             result.outcomes = [a.evaluate(led, ctx) for a in scen.assertions]
             result.verdict = scenario_mod.roll_up(result.outcomes)
+            self._finish(f"{scen.id}:execute:assert", outcome=result.verdict)
+            self._finish(f"{scen.id}:execute", outcome=result.verdict)
             (self.run_dir / "rows").mkdir(exist_ok=True)
             (self.run_dir / "rows" / f"{scen.id}.json").write_text(
                 json.dumps({"result": result.to_dict(), "ledger": led.summary()}, indent=2, default=str),
@@ -416,14 +485,15 @@ class Runner:
             # firmware the node already runs. The build tag is what makes skipping safe:
             # identity is carried by the image itself rather than inferred, and stage 3
             # reads it back off the device to confirm.
+            step_id = f"{scen.id}:flash:{node.name}"
             if self._running_image.get(node.name) == entry.bake_hash:
+                self._skip(step_id, "node already runs this image")
                 self.event(
-                    "flash_skipped",
-                    node=node.name,
-                    bake_hash=entry.bake_hash,
+                    "flash_skipped", node=node.name, bake_hash=entry.bake_hash,
                     reason="node already runs this image",
                 )
                 continue
+            self._begin(step_id)
             self.stage = STAGE_FLASH
             self.wait_note(f"flashing {node.name} for {scen.id}")
             # Prefer the nrfutil package: it streams over the bootloader's CDC instead
@@ -441,8 +511,13 @@ class Runner:
                 on_event=lambda kind, data: self.event(kind, data),
                 observer=self.observer,
             )
-            f.flash(node, Path(image), image_hw_model=entry.hw_model)
+            try:
+                f.flash(node, Path(image), image_hw_model=entry.hw_model)
+            except Exception:
+                self._finish(step_id, ports.FAILED_STEP)
+                raise
             self._running_image[node.name] = entry.bake_hash
+            self._finish(step_id)
             self.wait_note(None)
 
         for role, role_bake in scen.roles.items():
@@ -454,7 +529,14 @@ class Runner:
             self.wait_note(f"provisioning {node.name} for {scen.id}")
             p = self._provisioner_for_run()
             spec = role_bake.spec or provision.NodeSpec()
-            state = self._provision_or_verify(p, node, spec)
+            step_id = f"{scen.id}:provision:{node.name}"
+            self._begin(step_id)
+            try:
+                state = self._provision_or_verify(p, node, spec, step_id)
+            except Exception:
+                self._finish(step_id, ports.FAILED_STEP)
+                raise
+            self._finish(step_id)
             state_dict = state.to_dict()
             # The tag is resolved after the capture window, not here. The boot banner is
             # delivered when the firmware flushes its log buffer to a newly attached
@@ -540,6 +622,7 @@ class Runner:
         provisioner: provision.Provisioner,
         node: devices.BenchNode,
         spec: provision.NodeSpec,
+        step_id: str | None = None,
     ) -> provision.SettledState:
         """Provision, or - if the node is already in this exact state - just prove it.
 
@@ -555,9 +638,16 @@ class Runner:
         if self._provisioned.get(node.name) == fingerprint:
             state, problems = provisioner.verify(node, spec)
             if not problems:
+                # The plan's budget is a ceiling, not an estimate: every write under this
+                # step is skipped when the node already holds the required state, and the
+                # expanded view is where that difference becomes visible.
+                if step_id and self._schedule is not None:
+                    parent = self._schedule.find(step_id)
+                    for child in (parent.children if parent else []):
+                        if child.name != "read back + verify":
+                            self._schedule.skip(child.id, "state already matches")
                 self.event(
-                    "provision_skipped",
-                    node=node.name,
+                    "provision_skipped", node=node.name,
                     reason="already in this state, verified on device",
                 )
                 return state
