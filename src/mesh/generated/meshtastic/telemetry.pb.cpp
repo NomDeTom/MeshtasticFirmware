@@ -42,6 +42,12 @@ PB_BIND(meshtastic_SEN5XState, meshtastic_SEN5XState, AUTO)
 PB_BIND(meshtastic_SEN6XState, meshtastic_SEN6XState, AUTO)
 
 
+PB_BIND(meshtastic_TelemetryRecord, meshtastic_TelemetryRecord, 2)
+
+
+PB_BIND(meshtastic_TelemetryRecordHistory, meshtastic_TelemetryRecordHistory, 4)
+
+
 
 
 

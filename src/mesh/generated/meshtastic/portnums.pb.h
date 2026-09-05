@@ -165,6 +165,10 @@ typedef enum _meshtastic_PortNum {
 
  ENCODING: binary (ota-common transport frames) */
     meshtastic_PortNum_LORA_OTA_APP = 79,
+    /* Batched telemetry readings accumulated between publishes, sent as a
+ TelemetryRecordHistory by SENSOR-role nodes
+ ENCODING: Protobuf */
+    meshtastic_PortNum_TELEMETRY_HISTORY_APP = 80,
     /* GroupAlarm integration
  Used for transporting GroupAlarm-related messages between Meshtastic nodes
  and companion applications/services. */

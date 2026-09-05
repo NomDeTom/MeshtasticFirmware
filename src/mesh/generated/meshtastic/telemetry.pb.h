@@ -569,6 +569,34 @@ typedef struct _meshtastic_SEN6XState {
     uint64_t voc_state_array;
 } meshtastic_SEN6XState;
 
+typedef struct _meshtastic_TelemetryRecord {
+    pb_size_t which_telemetry_variant;
+    union {
+        /* Environment Telemetry variant */
+        meshtastic_EnvironmentMetrics environment_metrics;
+        /* Power Telemetry variant */
+        meshtastic_PowerMetrics power_metrics;
+        /* Air quality Telemetry variant */
+        meshtastic_AirQualityMetrics air_quality_metrics;
+    } telemetry_variant;
+    /* Seconds since 1970. Unset if the sender had no real time source when captured.
+ Takes priority when set. A reading never has both time and delta_secs. */
+    bool has_time;
+    uint32_t time;
+    /* Seconds since the node's previous history record was captured. Set only
+ when time is unset. To reconstruct a time, check the nearest reading in either direction
+ with a real timestamp and sum deltas between.
+ If no reading with real timestamp is reachable, mark the last reading's timestamp as reception time. */
+    bool has_delta_secs;
+    uint32_t delta_secs;
+} meshtastic_TelemetryRecord;
+
+typedef struct _meshtastic_TelemetryRecordHistory {
+    /* Telemetry readings, oldest first */
+    pb_size_t readings_count;
+    meshtastic_TelemetryRecord readings[16];
+} meshtastic_TelemetryRecordHistory;
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -578,6 +606,8 @@ extern "C" {
 #define _meshtastic_TelemetrySensorType_MIN meshtastic_TelemetrySensorType_SENSOR_UNSET
 #define _meshtastic_TelemetrySensorType_MAX meshtastic_TelemetrySensorType_SEN6X
 #define _meshtastic_TelemetrySensorType_ARRAYSIZE ((meshtastic_TelemetrySensorType)(meshtastic_TelemetrySensorType_SEN6X+1))
+
+
 
 
 
@@ -605,6 +635,8 @@ extern "C" {
 #define meshtastic_Nau7802Config_init_default    {0, 0}
 #define meshtastic_SEN5XState_init_default       {0, 0, 0, false, 0, false, 0, false, 0}
 #define meshtastic_SEN6XState_init_default       {0, 0, 0, false, 0, false, 0, false, 0}
+#define meshtastic_TelemetryRecord_init_default  {0, {meshtastic_EnvironmentMetrics_init_default}, false, 0, false, 0}
+#define meshtastic_TelemetryRecordHistory_init_default {0, {meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default, meshtastic_TelemetryRecord_init_default}}
 #define meshtastic_DeviceMetrics_init_zero       {false, 0, false, 0, false, 0, false, 0, false, 0}
 #define meshtastic_EnvironmentMetrics_init_zero  {false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0}
 #define meshtastic_PowerMetrics_init_zero        {false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0}
@@ -617,6 +649,8 @@ extern "C" {
 #define meshtastic_Nau7802Config_init_zero       {0, 0}
 #define meshtastic_SEN5XState_init_zero          {0, 0, 0, false, 0, false, 0, false, 0}
 #define meshtastic_SEN6XState_init_zero          {0, 0, 0, false, 0, false, 0, false, 0}
+#define meshtastic_TelemetryRecord_init_zero     {0, {meshtastic_EnvironmentMetrics_init_zero}, false, 0, false, 0}
+#define meshtastic_TelemetryRecordHistory_init_zero {0, {meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero, meshtastic_TelemetryRecord_init_zero}}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define meshtastic_DeviceMetrics_battery_level_tag 1
@@ -761,6 +795,12 @@ extern "C" {
 #define meshtastic_SEN6XState_voc_state_time_tag 4
 #define meshtastic_SEN6XState_voc_state_valid_tag 5
 #define meshtastic_SEN6XState_voc_state_array_tag 6
+#define meshtastic_TelemetryRecord_environment_metrics_tag 1
+#define meshtastic_TelemetryRecord_power_metrics_tag 2
+#define meshtastic_TelemetryRecord_air_quality_metrics_tag 3
+#define meshtastic_TelemetryRecord_time_tag      4
+#define meshtastic_TelemetryRecord_delta_secs_tag 5
+#define meshtastic_TelemetryRecordHistory_readings_tag 1
 
 /* Struct field encoding specification for nanopb */
 #define meshtastic_DeviceMetrics_FIELDLIST(X, a) \
@@ -961,6 +1001,24 @@ X(a, STATIC,   OPTIONAL, FIXED64,  voc_state_array,   6)
 #define meshtastic_SEN6XState_CALLBACK NULL
 #define meshtastic_SEN6XState_DEFAULT NULL
 
+#define meshtastic_TelemetryRecord_FIELDLIST(X, a) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (telemetry_variant,environment_metrics,telemetry_variant.environment_metrics),   1) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (telemetry_variant,power_metrics,telemetry_variant.power_metrics),   2) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (telemetry_variant,air_quality_metrics,telemetry_variant.air_quality_metrics),   3) \
+X(a, STATIC,   OPTIONAL, FIXED32,  time,              4) \
+X(a, STATIC,   OPTIONAL, UINT32,   delta_secs,        5)
+#define meshtastic_TelemetryRecord_CALLBACK NULL
+#define meshtastic_TelemetryRecord_DEFAULT NULL
+#define meshtastic_TelemetryRecord_telemetry_variant_environment_metrics_MSGTYPE meshtastic_EnvironmentMetrics
+#define meshtastic_TelemetryRecord_telemetry_variant_power_metrics_MSGTYPE meshtastic_PowerMetrics
+#define meshtastic_TelemetryRecord_telemetry_variant_air_quality_metrics_MSGTYPE meshtastic_AirQualityMetrics
+
+#define meshtastic_TelemetryRecordHistory_FIELDLIST(X, a) \
+X(a, STATIC,   REPEATED, MESSAGE,  readings,          1)
+#define meshtastic_TelemetryRecordHistory_CALLBACK NULL
+#define meshtastic_TelemetryRecordHistory_DEFAULT NULL
+#define meshtastic_TelemetryRecordHistory_readings_MSGTYPE meshtastic_TelemetryRecord
+
 extern const pb_msgdesc_t meshtastic_DeviceMetrics_msg;
 extern const pb_msgdesc_t meshtastic_EnvironmentMetrics_msg;
 extern const pb_msgdesc_t meshtastic_PowerMetrics_msg;
@@ -973,6 +1031,8 @@ extern const pb_msgdesc_t meshtastic_Telemetry_msg;
 extern const pb_msgdesc_t meshtastic_Nau7802Config_msg;
 extern const pb_msgdesc_t meshtastic_SEN5XState_msg;
 extern const pb_msgdesc_t meshtastic_SEN6XState_msg;
+extern const pb_msgdesc_t meshtastic_TelemetryRecord_msg;
+extern const pb_msgdesc_t meshtastic_TelemetryRecordHistory_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define meshtastic_DeviceMetrics_fields &meshtastic_DeviceMetrics_msg
@@ -987,9 +1047,11 @@ extern const pb_msgdesc_t meshtastic_SEN6XState_msg;
 #define meshtastic_Nau7802Config_fields &meshtastic_Nau7802Config_msg
 #define meshtastic_SEN5XState_fields &meshtastic_SEN5XState_msg
 #define meshtastic_SEN6XState_fields &meshtastic_SEN6XState_msg
+#define meshtastic_TelemetryRecord_fields &meshtastic_TelemetryRecord_msg
+#define meshtastic_TelemetryRecordHistory_fields &meshtastic_TelemetryRecordHistory_msg
 
 /* Maximum encoded size of messages (where known) */
-#define MESHTASTIC_MESHTASTIC_TELEMETRY_PB_H_MAX_SIZE meshtastic_Telemetry_size
+#define MESHTASTIC_MESHTASTIC_TELEMETRY_PB_H_MAX_SIZE meshtastic_TelemetryRecordHistory_size
 #define meshtastic_AirQualityMetrics_size        157
 #define meshtastic_DeviceMetrics_size            27
 #define meshtastic_EnvironmentMetrics_size       209
@@ -1000,6 +1062,8 @@ extern const pb_msgdesc_t meshtastic_SEN6XState_msg;
 #define meshtastic_PowerMetrics_size             81
 #define meshtastic_SEN5XState_size               27
 #define meshtastic_SEN6XState_size               27
+#define meshtastic_TelemetryRecordHistory_size   3616
+#define meshtastic_TelemetryRecord_size          223
 #define meshtastic_Telemetry_size                272
 #define meshtastic_TrafficManagementStats_size   42
 

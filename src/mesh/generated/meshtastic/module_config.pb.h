@@ -177,6 +177,8 @@ typedef struct _meshtastic_ModuleConfig_MQTTConfig {
     /* Settings for reporting information about our node to a map via MQTT */
     bool has_map_report_settings;
     meshtastic_ModuleConfig_MapReportSettings map_report_settings;
+    /* If true, we will always upload telemetry via MQTT at reading interval if connected */
+    bool telemetry_uplink_enabled;
 } meshtastic_ModuleConfig_MQTTConfig;
 
 /* NeighborInfoModule Config */
@@ -406,6 +408,12 @@ typedef struct _meshtastic_ModuleConfig_TelemetryConfig {
     bool device_telemetry_enabled;
     /* Enable/Disable the air quality telemetry measurement module on-device display */
     bool air_quality_screen_enabled;
+    /* Power telemetry read interval */
+    uint32_t power_telemetry_read_interval;
+    /* Environment telemetry read interval */
+    uint32_t environment_telemetry_read_interval;
+    /* Air quality telemetry read interval */
+    uint32_t air_quality_telemetry_read_interval;
 } meshtastic_ModuleConfig_TelemetryConfig;
 
 /* Canned Messages Module Config */
@@ -497,7 +505,7 @@ typedef struct _meshtastic_ModuleConfig_MeshBeaconConfig {
     /* Single-target TX channel: channel settings (name + PSK) to send beacons on.
  If unset, beacons go out on the primary channel. Used only when broadcast_targets is empty.
  NOTE: the single-target path embeds the ChannelSettings inline here, whereas a
- broadcast_targets entry references a channel-table slot by channel_index instead — see
+ broadcast_targets entry references a channel-table slot by channel_index instead - see
  BroadcastTarget. The two paths are equal, first-class options; only this representation differs. */
     bool has_broadcast_on_channel;
     meshtastic_ChannelSettings broadcast_on_channel;
@@ -514,7 +522,7 @@ typedef struct _meshtastic_ModuleConfig_MeshBeaconConfig {
  each temporarily switching the radio to that entry's preset/region/channel.
  When empty, the broadcaster uses the scalar broadcast_on_preset / broadcast_on_region /
  broadcast_on_channel fields instead (the single-target path).
- Single- and multi-target are equal, first-class options — neither is preferred or
+ Single- and multi-target are equal, first-class options - neither is preferred or
  deprecated. They differ only in how the TX channel is named: broadcast_on_channel embeds a
  ChannelSettings inline, while a target references an existing channel-table slot by
  channel_index (see BroadcastTarget). */
@@ -668,7 +676,7 @@ extern "C" {
 
 /* Initializer values for message structs */
 #define meshtastic_ModuleConfig_init_default     {0, {meshtastic_ModuleConfig_MQTTConfig_init_default}}
-#define meshtastic_ModuleConfig_MQTTConfig_init_default {0, "", "", "", 0, 0, 0, "", 0, 0, false, meshtastic_ModuleConfig_MapReportSettings_init_default}
+#define meshtastic_ModuleConfig_MQTTConfig_init_default {0, "", "", "", 0, 0, 0, "", 0, 0, false, meshtastic_ModuleConfig_MapReportSettings_init_default, 0}
 #define meshtastic_ModuleConfig_MapReportSettings_init_default {0, 0, 0}
 #define meshtastic_ModuleConfig_RemoteHardwareConfig_init_default {0, 0, 0, {meshtastic_RemoteHardwarePin_init_default, meshtastic_RemoteHardwarePin_init_default, meshtastic_RemoteHardwarePin_init_default, meshtastic_RemoteHardwarePin_init_default}}
 #define meshtastic_ModuleConfig_NeighborInfoConfig_init_default {0, 0, 0}
@@ -680,7 +688,7 @@ extern "C" {
 #define meshtastic_ModuleConfig_ExternalNotificationConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_StoreForwardConfig_init_default {0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_RangeTestConfig_init_default {0, 0, 0, 0}
-#define meshtastic_ModuleConfig_TelemetryConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_ModuleConfig_TelemetryConfig_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_CannedMessageConfig_init_default {0, 0, 0, 0, _meshtastic_ModuleConfig_CannedMessageConfig_InputEventChar_MIN, _meshtastic_ModuleConfig_CannedMessageConfig_InputEventChar_MIN, _meshtastic_ModuleConfig_CannedMessageConfig_InputEventChar_MIN, 0, 0, "", 0}
 #define meshtastic_ModuleConfig_AmbientLightingConfig_init_default {0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_StatusMessageConfig_init_default {""}
@@ -689,7 +697,7 @@ extern "C" {
 #define meshtastic_ModuleConfig_TAKConfig_init_default {_meshtastic_Team_MIN, _meshtastic_MemberRole_MIN}
 #define meshtastic_RemoteHardwarePin_init_default {0, "", _meshtastic_RemoteHardwarePinType_MIN}
 #define meshtastic_ModuleConfig_init_zero        {0, {meshtastic_ModuleConfig_MQTTConfig_init_zero}}
-#define meshtastic_ModuleConfig_MQTTConfig_init_zero {0, "", "", "", 0, 0, 0, "", 0, 0, false, meshtastic_ModuleConfig_MapReportSettings_init_zero}
+#define meshtastic_ModuleConfig_MQTTConfig_init_zero {0, "", "", "", 0, 0, 0, "", 0, 0, false, meshtastic_ModuleConfig_MapReportSettings_init_zero, 0}
 #define meshtastic_ModuleConfig_MapReportSettings_init_zero {0, 0, 0}
 #define meshtastic_ModuleConfig_RemoteHardwareConfig_init_zero {0, 0, 0, {meshtastic_RemoteHardwarePin_init_zero, meshtastic_RemoteHardwarePin_init_zero, meshtastic_RemoteHardwarePin_init_zero, meshtastic_RemoteHardwarePin_init_zero}}
 #define meshtastic_ModuleConfig_NeighborInfoConfig_init_zero {0, 0, 0}
@@ -701,7 +709,7 @@ extern "C" {
 #define meshtastic_ModuleConfig_ExternalNotificationConfig_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_StoreForwardConfig_init_zero {0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_RangeTestConfig_init_zero {0, 0, 0, 0}
-#define meshtastic_ModuleConfig_TelemetryConfig_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_ModuleConfig_TelemetryConfig_init_zero {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_CannedMessageConfig_init_zero {0, 0, 0, 0, _meshtastic_ModuleConfig_CannedMessageConfig_InputEventChar_MIN, _meshtastic_ModuleConfig_CannedMessageConfig_InputEventChar_MIN, _meshtastic_ModuleConfig_CannedMessageConfig_InputEventChar_MIN, 0, 0, "", 0}
 #define meshtastic_ModuleConfig_AmbientLightingConfig_init_zero {0, 0, 0, 0, 0}
 #define meshtastic_ModuleConfig_StatusMessageConfig_init_zero {""}
@@ -725,6 +733,7 @@ extern "C" {
 #define meshtastic_ModuleConfig_MQTTConfig_proxy_to_client_enabled_tag 9
 #define meshtastic_ModuleConfig_MQTTConfig_map_reporting_enabled_tag 10
 #define meshtastic_ModuleConfig_MQTTConfig_map_report_settings_tag 11
+#define meshtastic_ModuleConfig_MQTTConfig_telemetry_uplink_enabled_tag 12
 #define meshtastic_ModuleConfig_NeighborInfoConfig_enabled_tag 1
 #define meshtastic_ModuleConfig_NeighborInfoConfig_update_interval_tag 2
 #define meshtastic_ModuleConfig_NeighborInfoConfig_transmit_over_lora_tag 3
@@ -800,6 +809,9 @@ extern "C" {
 #define meshtastic_ModuleConfig_TelemetryConfig_health_screen_enabled_tag 13
 #define meshtastic_ModuleConfig_TelemetryConfig_device_telemetry_enabled_tag 14
 #define meshtastic_ModuleConfig_TelemetryConfig_air_quality_screen_enabled_tag 15
+#define meshtastic_ModuleConfig_TelemetryConfig_power_telemetry_read_interval_tag 16
+#define meshtastic_ModuleConfig_TelemetryConfig_environment_telemetry_read_interval_tag 17
+#define meshtastic_ModuleConfig_TelemetryConfig_air_quality_telemetry_read_interval_tag 18
 #define meshtastic_ModuleConfig_CannedMessageConfig_rotary1_enabled_tag 1
 #define meshtastic_ModuleConfig_CannedMessageConfig_inputbroker_pin_a_tag 2
 #define meshtastic_ModuleConfig_CannedMessageConfig_inputbroker_pin_b_tag 3
@@ -907,7 +919,8 @@ X(a, STATIC,   SINGULAR, BOOL,     tls_enabled,       7) \
 X(a, STATIC,   SINGULAR, STRING,   root,              8) \
 X(a, STATIC,   SINGULAR, BOOL,     proxy_to_client_enabled,   9) \
 X(a, STATIC,   SINGULAR, BOOL,     map_reporting_enabled,  10) \
-X(a, STATIC,   OPTIONAL, MESSAGE,  map_report_settings,  11)
+X(a, STATIC,   OPTIONAL, MESSAGE,  map_report_settings,  11) \
+X(a, STATIC,   SINGULAR, BOOL,     telemetry_uplink_enabled,  12)
 #define meshtastic_ModuleConfig_MQTTConfig_CALLBACK NULL
 #define meshtastic_ModuleConfig_MQTTConfig_DEFAULT NULL
 #define meshtastic_ModuleConfig_MQTTConfig_map_report_settings_MSGTYPE meshtastic_ModuleConfig_MapReportSettings
@@ -1038,7 +1051,10 @@ X(a, STATIC,   SINGULAR, BOOL,     health_measurement_enabled,  11) \
 X(a, STATIC,   SINGULAR, UINT32,   health_update_interval,  12) \
 X(a, STATIC,   SINGULAR, BOOL,     health_screen_enabled,  13) \
 X(a, STATIC,   SINGULAR, BOOL,     device_telemetry_enabled,  14) \
-X(a, STATIC,   SINGULAR, BOOL,     air_quality_screen_enabled,  15)
+X(a, STATIC,   SINGULAR, BOOL,     air_quality_screen_enabled,  15) \
+X(a, STATIC,   SINGULAR, UINT32,   power_telemetry_read_interval,  16) \
+X(a, STATIC,   SINGULAR, UINT32,   environment_telemetry_read_interval,  17) \
+X(a, STATIC,   SINGULAR, UINT32,   air_quality_telemetry_read_interval,  18)
 #define meshtastic_ModuleConfig_TelemetryConfig_CALLBACK NULL
 #define meshtastic_ModuleConfig_TelemetryConfig_DEFAULT NULL
 
@@ -1161,7 +1177,7 @@ extern const pb_msgdesc_t meshtastic_RemoteHardwarePin_msg;
 #define meshtastic_ModuleConfig_CannedMessageConfig_size 49
 #define meshtastic_ModuleConfig_DetectionSensorConfig_size 44
 #define meshtastic_ModuleConfig_ExternalNotificationConfig_size 42
-#define meshtastic_ModuleConfig_MQTTConfig_size  224
+#define meshtastic_ModuleConfig_MQTTConfig_size  226
 #define meshtastic_ModuleConfig_MapReportSettings_size 14
 #define meshtastic_ModuleConfig_MeshBeaconConfig_BroadcastTarget_size 10
 #define meshtastic_ModuleConfig_MeshBeaconConfig_size 324
@@ -1173,7 +1189,7 @@ extern const pb_msgdesc_t meshtastic_RemoteHardwarePin_msg;
 #define meshtastic_ModuleConfig_StatusMessageConfig_size 81
 #define meshtastic_ModuleConfig_StoreForwardConfig_size 24
 #define meshtastic_ModuleConfig_TAKConfig_size   4
-#define meshtastic_ModuleConfig_TelemetryConfig_size 50
+#define meshtastic_ModuleConfig_TelemetryConfig_size 71
 #define meshtastic_ModuleConfig_TrafficManagementConfig_size 30
 #define meshtastic_ModuleConfig_size             328
 #define meshtastic_RemoteHardwarePin_size        21
