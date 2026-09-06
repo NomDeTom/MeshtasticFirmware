@@ -46,14 +46,14 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
     opt.fixed32IsFloat = true;
 
     // One stack buffer for the variant actually present, rather than a union of all of them.
+    // Value-initialised rather than assigned TYPE##_init_zero, because HostMetrics ends in a
+    // char array and a struct holding one is not assignable from a braced list.
 #define BISCUIT_DECODE_VARIANT(TYPE, FIELD)                                                                                      \
     case meshtastic_Telemetry_##FIELD##_tag: {                                                                                   \
-        TYPE m[BISCUIT_MAX_BATCH];                                                                                               \
+        TYPE m[BISCUIT_MAX_BATCH] = {};                                                                                          \
         void *slots[BISCUIT_MAX_BATCH];                                                                                          \
-        for (uint8_t i = 0; i < BISCUIT_MAX_BATCH; i++) {                                                                        \
-            m[i] = TYPE##_init_zero;                                                                                             \
+        for (uint8_t i = 0; i < BISCUIT_MAX_BATCH; i++)                                                                          \
             slots[i] = &m[i];                                                                                                    \
-        }                                                                                                                        \
         n = biscuit::decode(&TYPE##_msg, mp.decoded.payload.bytes, mp.decoded.payload.size, slots, BISCUIT_MAX_BATCH, times,     \
                             opt);                                                                                                \
         for (uint8_t i = 0; i < n; i++) {                                                                                        \

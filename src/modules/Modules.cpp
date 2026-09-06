@@ -57,8 +57,10 @@
 #if !MESHTASTIC_EXCLUDE_WAYPOINT
 #include "modules/WaypointModule.h"
 #endif
-#if ARCH_PORTDUINO
+#if MESHTASTIC_BISCUIT_ENABLED
 #include "mesh/biscuit/BiscuitModule.h"
+#endif
+#if ARCH_PORTDUINO
 #include "modules/Telemetry/HostMetrics.h"
 #if !MESHTASTIC_EXCLUDE_STOREFORWARD
 #include "modules/StoreForwardModule.h"
