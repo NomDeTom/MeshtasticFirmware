@@ -169,6 +169,12 @@ typedef enum _meshtastic_PortNum {
  TelemetryRecordHistory by SENSOR-role nodes
  ENCODING: Protobuf */
     meshtastic_PortNum_TELEMETRY_HISTORY_APP = 80,
+    /* Batched readings re-encoded columnwise by the Biscuit factory. The payload is not
+ protobuf: its first byte carries a version and the encoding tier, and the decoder
+ reconstructs the original messages from it. Distinct from TELEMETRY_HISTORY_APP so a
+ receiver that cannot decode it rejects the packet instead of misreading one.
+ ENCODING: Biscuit v1 */
+    meshtastic_PortNum_BISCUIT_APP = 81,
     /* GroupAlarm integration
  Used for transporting GroupAlarm-related messages between Meshtastic nodes
  and companion applications/services. */

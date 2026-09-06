@@ -10,6 +10,34 @@
 #include "mqtt/MQTT.h"
 #include "sleep.h"
 
+// Hold a batch until this many readings are pending, then flush. 0 publishes at every
+// opportunity, which is the pre-Biscuit behaviour. Six is the floor at which batching pays:
+// below it the column framing costs more than the tags it removes.
+#ifndef MESHTASTIC_BISCUIT_FLUSH_COUNT
+#ifdef USERPREFS_BISCUIT_FLUSH_COUNT
+#define MESHTASTIC_BISCUIT_FLUSH_COUNT USERPREFS_BISCUIT_FLUSH_COUNT
+#else
+#define MESHTASTIC_BISCUIT_FLUSH_COUNT 6
+#endif
+#endif
+
+// Readings repeated from the previous packet, so a single lost packet does not lose its
+// readings outright - the next one carries the last N again. Costs airtime: a batch of
+// FLUSH_COUNT carries OVERLAP_COUNT repeats and FLUSH_COUNT - OVERLAP_COUNT new readings, so
+// the effective rate falls by that ratio. The receiver must discard duplicates by timestamp.
+#ifndef MESHTASTIC_BISCUIT_OVERLAP_COUNT
+#ifdef USERPREFS_BISCUIT_OVERLAP_COUNT
+#define MESHTASTIC_BISCUIT_OVERLAP_COUNT USERPREFS_BISCUIT_OVERLAP_COUNT
+#else
+#define MESHTASTIC_BISCUIT_OVERLAP_COUNT 0
+#endif
+#endif
+
+// Without this the newest readings are never retired and the node resends forever.
+static_assert(MESHTASTIC_BISCUIT_OVERLAP_COUNT == 0 || MESHTASTIC_BISCUIT_FLUSH_COUNT == 0 ||
+                  MESHTASTIC_BISCUIT_OVERLAP_COUNT < MESHTASTIC_BISCUIT_FLUSH_COUNT,
+              "BISCUIT_OVERLAP_COUNT must be below BISCUIT_FLUSH_COUNT or no reading is ever retired");
+
 #ifndef MESHTASTIC_MAX_READINGS_PER_MESH_PACKET
 #define MESHTASTIC_MAX_READINGS_PER_MESH_PACKET 10
 #endif

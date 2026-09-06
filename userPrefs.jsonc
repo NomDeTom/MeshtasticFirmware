@@ -1,4 +1,11 @@
 {
+  // Hold buffered telemetry until this many readings are pending, then flush as one
+  // Biscuit-encoded packet. 0 (default) publishes at every opportunity. Batching only pays
+  // above ~6 readings; below that the column framing costs more than the tags it removes.
+  // "USERPREFS_BISCUIT_FLUSH_COUNT": "8",
+  // Readings repeated from the previous packet so one lost packet does not lose its readings.
+  // Must be below the flush count. Each packet then carries FLUSH - OVERLAP new readings.
+  // "USERPREFS_BISCUIT_OVERLAP_COUNT": "2",
   // "USERPREFS_BUTTON_PIN": "36",
   // "USERPREFS_CHANNELS_TO_WRITE": "3",
   // "USERPREFS_CHANNEL_0_DOWNLINK_ENABLED": "false",

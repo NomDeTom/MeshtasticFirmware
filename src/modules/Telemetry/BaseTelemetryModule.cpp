@@ -1,4 +1,5 @@
 #include "BaseTelemetryModule.h"
+#include "mesh/biscuit/Biscuit.h"
 
 #if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
 #include "AirQualityTelemetry.h"
@@ -71,6 +72,44 @@ static __attribute__((noinline)) size_t encodeHistoryBatch(meshtastic_MeshPacket
 }
 
 /**
+ * Re-encode the same readings columnwise. Returns how many fitted, 0 if Biscuit declined -
+ * which it does when the result would be no smaller than the protobuf it replaces, so a
+ * refusal is a correct outcome and the caller falls back to encodeHistoryBatch().
+ *
+ * Shrinks the batch on overflow exactly as encodeHistoryBatch does, so a node never fails to
+ * publish merely because the newest readings would not fit.
+ */
+template <typename T, uint8_t N>
+static __attribute__((noinline)) size_t encodeBiscuitBatch(meshtastic_MeshPacket &p, const TelemetryHistoryBuffer<T, N> &history,
+                                                           const uint8_t *indices, size_t maxTake)
+{
+    if (maxTake > BISCUIT_MAX_BATCH)
+        maxTake = BISCUIT_MAX_BATCH;
+
+    biscuit::Options opt;
+    opt.fixed32IsFloat = true; // every fixed32 in a telemetry message is a float
+
+    const void *msgs[BISCUIT_MAX_BATCH];
+    uint32_t times[BISCUIT_MAX_BATCH];
+    for (size_t take = maxTake; take > 0; take--) {
+        for (size_t i = 0; i < take; i++) {
+            const BufferedReading<T> &b = history.at(indices[i]);
+            msgs[i] = &b.metrics;
+            times[i] = b.time;
+        }
+        biscuit::Result r = biscuit::encode(metricsDescriptor<T>(), msgs, (uint8_t)take, times, p.decoded.payload.bytes,
+                                            sizeof(p.decoded.payload.bytes), opt);
+        if (r.size) {
+            p.decoded.payload.size = r.size;
+            LOG_DEBUG("Biscuit tier %u: %u readings in %u B (protobuf would be %u B)", r.tier, (unsigned)take, (unsigned)r.size,
+                      (unsigned)r.baseline);
+            return take;
+        }
+    }
+    return 0;
+}
+
+/**
  * Publish every reading in history not yet marked for target's channel as a single
  * TelemetryRecordHistory
  *
@@ -97,6 +136,15 @@ bool BaseTelemetryModule::publishBufferedTelemetry(TelemetryHistoryBuffer<T, N> 
     if (unpublishedCount == 0)
         return false;
 
+    // Hold the batch until enough readings accumulate. Below ~6 the column framing costs more
+    // than the tags it removes, so flushing early spends airtime to save nothing.
+    if (MESHTASTIC_BISCUIT_FLUSH_COUNT && unpublishedCount < MESHTASTIC_BISCUIT_FLUSH_COUNT &&
+        unpublishedCount < history.size()) {
+        LOG_DEBUG("Holding %u/%u buffered readings until %u", (unsigned)unpublishedCount, (unsigned)history.size(),
+                  (unsigned)MESHTASTIC_BISCUIT_FLUSH_COUNT);
+        return false;
+    }
+
     meshtastic_MeshPacket *p = allocTelemetryHistoryPacket();
     if (!p)
         return false;
@@ -106,7 +154,16 @@ bool BaseTelemetryModule::publishBufferedTelemetry(TelemetryHistoryBuffer<T, N> 
     p->priority = meshtastic_MeshPacket_Priority_RELIABLE;
 
     const size_t maxReadingsPerPacket = target == PublishTarget::Mesh ? kMaxReadingsPerMeshPacket : kMaxReadingsPerMqttPacket;
-    size_t take = encodeHistoryBatch(*p, history, indices, min((size_t)unpublishedCount, maxReadingsPerPacket));
+    const size_t want = min((size_t)unpublishedCount, maxReadingsPerPacket);
+
+    // Biscuit first; it declines rather than emit a packet larger than the protobuf, and a
+    // decline leaves the payload untouched for the fallback below.
+    size_t take = encodeBiscuitBatch(*p, history, indices, want);
+    if (take) {
+        p->decoded.portnum = meshtastic_PortNum_BISCUIT_APP;
+    } else {
+        take = encodeHistoryBatch(*p, history, indices, want);
+    }
 
     if (take == 0) {
         packetPool.release(p);
@@ -140,11 +197,16 @@ bool BaseTelemetryModule::publishBufferedTelemetry(TelemetryHistoryBuffer<T, N> 
     if (!sent)
         return false;
 
-    for (size_t i = 0; i < take; i++)
+    // Retire everything except the overlap tail, which rides again in the next packet so a
+    // lost one does not take its readings with it. Always retire at least one, or a node that
+    // sets overlap >= take would resend the same batch forever.
+    const size_t retire = biscuit::retireCount(take, MESHTASTIC_BISCUIT_OVERLAP_COUNT);
+    for (size_t i = 0; i < retire; i++)
         history.markPublished(indices[i], channelBit);
 
-    LOG_INFO("Publishing %u/%u buffered telemetry readings to %s (%u still pending for this channel)", (unsigned)take,
-             (unsigned)unpublishedCount, target == PublishTarget::Mesh ? "mesh" : "mqtt", (unsigned)(unpublishedCount - take));
+    LOG_INFO("Publishing %u/%u buffered telemetry readings to %s (%u retired, %u repeat next time, %u still pending)",
+             (unsigned)take, (unsigned)unpublishedCount, target == PublishTarget::Mesh ? "mesh" : "mqtt", (unsigned)retire,
+             (unsigned)(take - retire), (unsigned)(unpublishedCount - take));
 
     return true;
 }

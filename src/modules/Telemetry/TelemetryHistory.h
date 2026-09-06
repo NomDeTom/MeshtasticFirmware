@@ -67,6 +67,22 @@ template <typename T, uint8_t N> class TelemetryHistoryBuffer
     }
 };
 
+// The nanopb descriptor for each buffered metrics type, so Biscuit can encode any of them
+// without a per-type encoder. Mirrors the assignTelemetryRecord overloads below.
+template <typename T> const pb_msgdesc_t *metricsDescriptor();
+template <> inline const pb_msgdesc_t *metricsDescriptor<meshtastic_EnvironmentMetrics>()
+{
+    return &meshtastic_EnvironmentMetrics_msg;
+}
+template <> inline const pb_msgdesc_t *metricsDescriptor<meshtastic_PowerMetrics>()
+{
+    return &meshtastic_PowerMetrics_msg;
+}
+template <> inline const pb_msgdesc_t *metricsDescriptor<meshtastic_AirQualityMetrics>()
+{
+    return &meshtastic_AirQualityMetrics_msg;
+}
+
 // time/deltaSecs are only meaningful together with the metrics they were captured with
 template <typename T> inline void assignTelemetryRecordTimeInfo(meshtastic_TelemetryRecord &r, const BufferedReading<T> &reading)
 {
