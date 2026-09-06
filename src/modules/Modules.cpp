@@ -58,6 +58,7 @@
 #include "modules/WaypointModule.h"
 #endif
 #if ARCH_PORTDUINO
+#include "mesh/biscuit/BiscuitModule.h"
 #include "modules/Telemetry/HostMetrics.h"
 #if !MESHTASTIC_EXCLUDE_STOREFORWARD
 #include "modules/StoreForwardModule.h"
@@ -230,6 +231,11 @@ void setupModules()
         (moduleConfig.telemetry.air_quality_enabled || moduleConfig.telemetry.air_quality_screen_enabled)) {
         new AirQualityTelemetryModule();
     }
+#endif
+#if MESHTASTIC_BISCUIT_ENABLED
+    // Listens on BISCUIT_APP regardless of whether this node ever sends one, so a receiver
+    // can be deployed ahead of any sender.
+    biscuitModule = new BiscuitModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_HEALTH_TELEMETRY
     if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_MAX30102].first > 0 ||
