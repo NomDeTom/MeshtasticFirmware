@@ -82,6 +82,9 @@ struct Options {
     /// Multiplier used to make a float an integer when no per-tag hint overrides it.
     /// 10000 keeps four decimals, which is finer than any telemetry sensor resolves.
     uint16_t floatScale = 10000;
+    /// Timestamp quantum in seconds, honoured from tier 3. 1 keeps stamps exact, which is
+    /// the default because coarsening time buys about two points and costs a user-visible edge.
+    uint16_t timeRes = 1;
     /// Families to stack, laid out channel-major so each channel's samples stay contiguous
     /// and delta encoding still sees a time series rather than channel-to-channel jumps.
     const FieldFamily *families = nullptr;

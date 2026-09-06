@@ -184,12 +184,6 @@ enum ColCode : uint8_t {
     COL_RAW = 0,   ///< zigzag varints, absolute
     COL_DELTA = 1, ///< zigzag varints, first absolute then differences
     COL_CONST = 2, ///< one value, repeated
-#if BISCUIT_MAX_TIER >= 4
-    COL_PACKED = 3, ///< seed varint, width byte, fixed-width deltas with an escape
-#endif
-#if BISCUIT_MAX_TIER >= 3
-    COL_GCD = 4, ///< divisor varint, then zigzag deltas of value/divisor. Lossless.
-#endif
 };
 
 /// One column's working set. Gathered, encoded and discarded before the next, so peak
@@ -202,7 +196,7 @@ struct Column {
     int64_t v[BISCUIT_MAX_BATCH * 4]; ///< a family of up to 4 channels, channel-major
 };
 
-#if BISCUIT_MAX_TIER >= 3
+#if BISCUIT_MAX_TIER >= 4
 /// Largest divisor every value shares. Sensor readings are often integer multiples of a
 /// hardware quantum - an INA226 bus LSB is 1.25 mV, an INA3221 shunt step 400 uA - so
 /// dividing it out is exact and shrinks every value, unlike a decimal shift which rounds.
@@ -219,14 +213,6 @@ int64_t gcdOfColumn(const int64_t *v, uint8_t n)
         g = b;
     }
     return g > 1 ? g : 1;
-}
-
-size_t sizeGcdDelta(const int64_t *v, uint8_t n, int64_t g)
-{
-    size_t s = varintLen(g) + varintLen(zz(v[0] / g));
-    for (uint8_t i = 1; i < n; i++)
-        s += varintLen(zz(v[i] / g - v[i - 1] / g));
-    return s;
 }
 #endif
 
@@ -306,6 +292,49 @@ struct BitReader {
 };
 #endif // BISCUIT_MAX_TIER >= 4
 
+/// Gather one column channel-major, applying the resolution shift. False if any reading is
+/// missing the field, which disqualifies the column.
+bool gatherColumn(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, const Options &opt, uint8_t tier, uint8_t tag,
+                  Column &col)
+{
+    const FieldHint *h = findHint(opt, tag);
+    col.tag = tag;
+    col.resLog2 = (tier >= TIER_RESOLUTION && h) ? h->resLog2 : 0;
+    const FieldFamily *fam = familyLedBy(opt, tag);
+    // Channel-major: every sample of channel 1, then channel 2, and so on. Reading-major
+    // would make each delta a channel-to-channel difference, which does not compress.
+    const uint8_t chans = fam ? fam->count : 1;
+    col.rows = 0;
+    for (uint8_t ch = 0; ch < chans; ch++) {
+        const uint8_t tg = fam ? fam->tags[ch] : tag;
+        const FieldHint *ch_h = fam ? findHint(opt, tg) : h;
+        for (uint8_t i = 0; i < n; i++) {
+            pb_field_iter_t jt;
+            if (!pb_field_iter_begin_const(&jt, desc, msgs[i]) || !pb_field_iter_find(&jt, tg) || !fieldPresent(jt))
+                return false;
+            col.v[col.rows] = readScalar(jt, ch_h, opt);
+            if (col.resLog2)
+                col.v[col.rows] >>= col.resLog2;
+            col.rows++;
+        }
+    }
+    return true;
+}
+
+/// Values a column holds once its family is stacked in. Both ends derive this from the
+/// shared family table, so the channel count needs no wire byte.
+uint8_t rowsOf(const Options &opt, uint8_t tag, uint8_t n)
+{
+    const FieldFamily *fam = familyLedBy(opt, tag);
+    return (uint8_t)(n * (fam ? fam->count : 1));
+}
+
+/// Quantised timestamp. opt.timeRes is 1 - exact - unless the user has chosen a coarser
+/// stamp, which only tier 3 and above honour.
+int64_t timeQuantum(const Options &opt, uint8_t tier)
+{
+    return (tier >= TIER_RESOLUTION && opt.timeRes > 1) ? (int64_t)opt.timeRes : 1;
+}
 } // namespace
 
 // ---------------------------------------------------------------- encode
@@ -372,7 +401,11 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
     at = putVarint(out, cap, at, opt.context);
     if (at == SIZE_MAX)
         return r;
-    at = putVarint(out, cap, at, times[0]);
+    // A coarser stamp is lossy in the time domain only; worstErr stays a value-domain figure.
+    const int64_t tq = timeQuantum(opt, tier);
+    if (tq > 1)
+        r.lossless = false;
+    at = putVarint(out, cap, at, (uint64_t)((int64_t)times[0] / tq));
     if (at == SIZE_MAX)
         return r;
 
@@ -392,118 +425,126 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
 
     // Time column: gaps, or second differences from tier 2.
     for (uint8_t i = 1; i < n && at != SIZE_MAX; i++) {
-        int64_t g = (int64_t)times[i] - (int64_t)times[i - 1];
+        int64_t g = (int64_t)times[i] / tq - (int64_t)times[i - 1] / tq;
         if (tier >= TIER_BITMAP && i > 1)
-            g -= (int64_t)times[i - 1] - (int64_t)times[i - 2];
+            g -= (int64_t)times[i - 1] / tq - (int64_t)times[i - 2] / tq;
         at = putVarint(out, cap, at, zz(g));
     }
     if (at == SIZE_MAX)
         return r;
 
     Column col; // reused for every column; see the note on Column above
-    for (uint8_t c = 0; c < nCols; c++) {
-        const FieldHint *h = findHint(opt, tags[c]);
-        col.tag = tags[c];
-        col.resLog2 = (tier >= TIER_RESOLUTION && h) ? h->resLog2 : 0;
-        const FieldFamily *fam = familyLedBy(opt, col.tag);
-        // Channel-major: every sample of channel 1, then channel 2, and so on. Reading-major
-        // would make each delta a channel-to-channel difference, which does not compress.
-        const uint8_t chans = fam ? fam->count : 1;
-        col.rows = 0;
-        for (uint8_t ch = 0; ch < chans; ch++) {
-            const uint8_t tg = fam ? fam->tags[ch] : col.tag;
-            const FieldHint *ch_h = fam ? findHint(opt, tg) : h;
-            for (uint8_t i = 0; i < n; i++) {
-                pb_field_iter_t jt;
-                if (!pb_field_iter_begin_const(&jt, desc, msgs[i]) || !pb_field_iter_find(&jt, tg) || !fieldPresent(jt))
-                    return r;
-                col.v[col.rows] = readScalar(jt, ch_h, opt);
-                if (col.resLog2)
-                    col.v[col.rows] >>= col.resLog2;
-                col.rows++;
-            }
-        }
-        if (col.resLog2) {
-            r.lossless = false;
-            uint32_t e = (uint32_t)1 << (col.resLog2 - 1);
-            if (e > r.worstErr)
-                r.worstErr = e;
-        }
-        size_t sr = sizeRaw(col.v, col.rows), sd = sizeDelta(col.v, col.rows);
-        bool isConst = true;
-        for (uint8_t i = 1; i < col.rows; i++)
-            if (col.v[i] != col.v[0]) {
-                isConst = false;
-                break;
-            }
-        uint8_t code = isConst ? COL_CONST : (sd <= sr ? COL_DELTA : COL_RAW);
-#if BISCUIT_MAX_TIER >= 3
-        int64_t gdiv = 1;
-        if (tier >= TIER_RESOLUTION && !isConst) {
-            gdiv = gcdOfColumn(col.v, col.rows);
-            if (gdiv > 1 && sizeGcdDelta(col.v, col.rows, gdiv) < (code == COL_DELTA ? sd : sr))
-                code = COL_GCD;
-        }
-#endif
-#if BISCUIT_MAX_TIER >= 4
-        size_t packedBytes = SIZE_MAX;
-        uint8_t width = 0;
-        if (tier >= TIER_PACKED && !isConst && col.rows > 1) {
-            width = chooseWidth(col.v, col.rows, &packedBytes);
-            packedBytes += varintLen(zz(col.v[0])) + 1; // seed + width byte
-            if (packedBytes < (code == COL_DELTA ? sd : sr))
-                code = COL_PACKED;
-        }
-#endif
-        if (at >= cap)
-            return r;
-        out[at++] = (uint8_t)(code | (col.resLog2 << 4));
 
-        if (code == COL_CONST) {
-            at = putVarint(out, cap, at, zz(col.v[0]));
-        } else if (code == COL_RAW) {
-            for (uint8_t i = 0; i < col.rows && at != SIZE_MAX; i++)
-                at = putVarint(out, cap, at, zz(col.v[i]));
-        } else if (code == COL_DELTA) {
-            at = putVarint(out, cap, at, zz(col.v[0]));
-            for (uint8_t i = 1; i < col.rows && at != SIZE_MAX; i++)
-                at = putVarint(out, cap, at, zz(col.v[i] - col.v[i - 1]));
-        }
-#if BISCUIT_MAX_TIER >= 3
-        else if (code == COL_GCD) {
-            at = putVarint(out, cap, at, (uint64_t)gdiv);
-            if (at != SIZE_MAX)
-                at = putVarint(out, cap, at, zz(col.v[0] / gdiv));
-            for (uint8_t i = 1; i < col.rows && at != SIZE_MAX; i++)
-                at = putVarint(out, cap, at, zz(col.v[i] / gdiv - col.v[i - 1] / gdiv));
-        }
-#endif
 #if BISCUIT_MAX_TIER >= 4
-        else {
-            at = putVarint(out, cap, at, zz(col.v[0]));
-            if (at == SIZE_MAX || at >= cap)
+    if (tier >= TIER_PACKED) {
+        // Tier 4 drops per-column framing entirely: a 5-bit width table, one divisor and seed
+        // per column, then every column's deltas concatenated into a single unaligned bit area
+        // with the escapes trailing it. Framing is what dominates a wide message at small n.
+        uint8_t widths[BISCUIT_MAX_COLUMNS];
+        int64_t seeds[BISCUIT_MAX_COLUMNS], divs[BISCUIT_MAX_COLUMNS];
+        size_t totalBits = 0;
+        for (uint8_t c = 0; c < nCols; c++) {
+            if (!gatherColumn(desc, msgs, n, opt, tier, tags[c], col))
                 return r;
-            out[at++] = width;
-            uint64_t esc = ((uint64_t)1 << width) - 1;
-            BitWriter bw{out + at, cap - at, 0};
-            memset(out + at, 0, cap - at);
-            for (uint8_t i = 1; i < col.rows; i++) {
-                uint64_t d = zz(col.v[i] - col.v[i - 1]);
-                if (!bw.put(d >= esc ? esc : d, width))
-                    return r;
+            if (col.resLog2) {
+                r.lossless = false;
+                uint32_t e = (uint32_t)1 << (col.resLog2 - 1);
+                if (e > r.worstErr)
+                    r.worstErr = e;
             }
-            at += bw.bytes();
-            for (uint8_t i = 1; i < col.rows && at != SIZE_MAX; i++) {
-                uint64_t d = zz(col.v[i] - col.v[i - 1]);
-                if (d >= esc)
-                    at = putVarint(out, cap, at, d);
-            }
+            // A quantum the values already share divides out exactly. Skipped where a
+            // resolution shift applies, since that has already scaled the column.
+            divs[c] = col.resLog2 ? 1 : gcdOfColumn(col.v, col.rows);
+            if (divs[c] > 1)
+                for (uint8_t i = 0; i < col.rows; i++)
+                    col.v[i] /= divs[c];
+            seeds[c] = col.v[0];
+            size_t unused = 0;
+            widths[c] = chooseWidth(col.v, col.rows, &unused);
+            totalBits += (size_t)(col.rows - 1) * widths[c];
         }
-#endif
+
+        // Width table: five bits per column, holding width - 1 so 1..32 fits.
+        size_t wtabBytes = ((size_t)nCols * 5 + 7) / 8;
+        if (at + wtabBytes > cap)
+            return r;
+        memset(out + at, 0, wtabBytes);
+        BitWriter wtab{out + at, wtabBytes, 0};
+        for (uint8_t c = 0; c < nCols; c++)
+            if (!wtab.put((uint64_t)(widths[c] - 1), 5))
+                return r;
+        at += wtabBytes;
+
+        for (uint8_t c = 0; c < nCols && at != SIZE_MAX; c++) {
+            at = putVarint(out, cap, at, (uint64_t)divs[c]);
+            if (at != SIZE_MAX)
+                at = putVarint(out, cap, at, zz(seeds[c]));
+        }
         if (at == SIZE_MAX)
             return r;
-    }
 
+        // Escapes trail the bit area, so its length has to be known before either is written.
+        const size_t bitBytes = (totalBits + 7) / 8;
+        if (at + bitBytes > cap)
+            return r;
+        memset(out + at, 0, bitBytes);
+        BitWriter bw{out + at, bitBytes, 0};
+        size_t escAt = at + bitBytes;
+        for (uint8_t c = 0; c < nCols; c++) {
+            if (!gatherColumn(desc, msgs, n, opt, tier, tags[c], col))
+                return r;
+            if (divs[c] > 1)
+                for (uint8_t i = 0; i < col.rows; i++)
+                    col.v[i] /= divs[c];
+            const uint64_t esc = ((uint64_t)1 << widths[c]) - 1;
+            for (uint8_t i = 1; i < col.rows; i++) {
+                const uint64_t d = zz(col.v[i] - col.v[i - 1]);
+                if (!bw.put(d >= esc ? esc : d, widths[c]))
+                    return r;
+                if (d >= esc) {
+                    escAt = putVarint(out, cap, escAt, d);
+                    if (escAt == SIZE_MAX)
+                        return r;
+                }
+            }
+        }
+        at = escAt;
+    } else
+#endif
+        for (uint8_t c = 0; c < nCols; c++) {
+            if (!gatherColumn(desc, msgs, n, opt, tier, tags[c], col))
+                return r;
+            if (col.resLog2) {
+                r.lossless = false;
+                uint32_t e = (uint32_t)1 << (col.resLog2 - 1);
+                if (e > r.worstErr)
+                    r.worstErr = e;
+            }
+            size_t sr = sizeRaw(col.v, col.rows), sd = sizeDelta(col.v, col.rows);
+            bool isConst = true;
+            for (uint8_t i = 1; i < col.rows; i++)
+                if (col.v[i] != col.v[0]) {
+                    isConst = false;
+                    break;
+                }
+            uint8_t code = isConst ? COL_CONST : (sd <= sr ? COL_DELTA : COL_RAW);
+            if (at >= cap)
+                return r;
+            out[at++] = (uint8_t)(code | (col.resLog2 << 4));
+
+            if (code == COL_CONST) {
+                at = putVarint(out, cap, at, zz(col.v[0]));
+            } else if (code == COL_RAW) {
+                for (uint8_t i = 0; i < col.rows && at != SIZE_MAX; i++)
+                    at = putVarint(out, cap, at, zz(col.v[i]));
+            } else {
+                at = putVarint(out, cap, at, zz(col.v[0]));
+                for (uint8_t i = 1; i < col.rows && at != SIZE_MAX; i++)
+                    at = putVarint(out, cap, at, zz(col.v[i] - col.v[i - 1]));
+            }
+            if (at == SIZE_MAX)
+                return r;
+        }
     // A batch of one, or a message wide enough that column headers dominate, can encode larger
     // than the protobuf it replaces. Report that rather than shipping a worse packet.
     if (opt.neverInflate && r.baseline && at >= r.baseline) {
@@ -568,7 +609,10 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
         }
     }
 
-    times[0] = (uint32_t)t0;
+    // Gaps are in quanta, so each stamp is rebuilt from the running quantised count.
+    const int64_t tq = timeQuantum(opt, tier);
+    int64_t qt = (int64_t)t0;
+    times[0] = (uint32_t)(qt * tq);
     int64_t prevGap = 0;
     for (uint8_t i = 1; i < n; i++) {
         uint64_t z;
@@ -578,121 +622,128 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
         int64_t g = unzz(z);
         if (tier >= TIER_BITMAP && i > 1)
             g += prevGap;
-        times[i] = (uint32_t)((int64_t)times[i - 1] + g);
+        qt += g;
+        times[i] = (uint32_t)(qt * tq);
         prevGap = g;
     }
 
-    for (uint8_t c = 0; c < nCols; c++) {
-        if (at >= len)
-            return 0;
-        uint8_t codeByte = in[at++];
-        uint8_t code = codeByte & 0x0F, resLog2 = codeByte >> 4;
-        // The family table is shared by both ends, so the channel count needs no wire byte.
-        const FieldFamily *fam = familyLedBy(opt, tags[c]);
-        const uint8_t chans = fam ? fam->count : 1;
-        const uint16_t rows = (uint16_t)n * chans;
-        int64_t v[BISCUIT_MAX_BATCH * 4];
-        uint64_t z;
-        if (code == COL_CONST) {
-            at = getVarint(in, len, at, &z);
-            if (at == SIZE_MAX)
-                return 0;
-            for (uint8_t i = 0; i < rows; i++)
-                v[i] = unzz(z);
-        } else if (code == COL_RAW) {
-            for (uint8_t i = 0; i < rows; i++) {
-                at = getVarint(in, len, at, &z);
-                if (at == SIZE_MAX)
-                    return 0;
-                v[i] = unzz(z);
-            }
-        } else if (code == COL_DELTA) {
-            at = getVarint(in, len, at, &z);
-            if (at == SIZE_MAX)
-                return 0;
-            v[0] = unzz(z);
-            for (uint8_t i = 1; i < rows; i++) {
-                at = getVarint(in, len, at, &z);
-                if (at == SIZE_MAX)
-                    return 0;
-                v[i] = v[i - 1] + unzz(z);
-            }
-        }
-#if BISCUIT_MAX_TIER >= 3
-        else if (code == COL_GCD) {
-            uint64_t g;
-            at = getVarint(in, len, at, &g);
-            if (at == SIZE_MAX || g == 0)
-                return 0;
-            at = getVarint(in, len, at, &z);
-            if (at == SIZE_MAX)
-                return 0;
-            int64_t acc = unzz(z);
-            v[0] = acc * (int64_t)g;
-            for (uint8_t i = 1; i < rows; i++) {
-                at = getVarint(in, len, at, &z);
-                if (at == SIZE_MAX)
-                    return 0;
-                acc += unzz(z);
-                v[i] = acc * (int64_t)g;
-            }
-        }
-#endif
-#if BISCUIT_MAX_TIER >= 4
-        else if (code == COL_PACKED) {
-            at = getVarint(in, len, at, &z);
-            if (at == SIZE_MAX || at >= len)
-                return 0;
-            v[0] = unzz(z);
-            uint8_t width = in[at++];
-            if (width == 0 || width > 32)
-                return 0;
-            uint64_t esc = ((uint64_t)1 << width) - 1;
-            size_t bits = (size_t)(rows - 1) * width;
-            size_t nbytes = (bits + 7) / 8;
-            if (at + nbytes > len)
-                return 0;
-            BitReader br{in + at, nbytes, 0};
-            uint64_t d[BISCUIT_MAX_BATCH * 4];
-            uint8_t nEsc = 0;
-            for (uint8_t i = 1; i < rows; i++) {
-                if (!br.get(width, &d[i]))
-                    return 0;
-                if (d[i] == esc)
-                    nEsc++;
-            }
-            at += nbytes;
-            for (uint8_t i = 1; i < rows; i++) {
-                if (d[i] == esc) {
-                    at = getVarint(in, len, at, &z);
-                    if (at == SIZE_MAX)
-                        return 0;
-                    d[i] = z;
-                }
-            }
-            (void)nEsc;
-            for (uint8_t i = 1; i < rows; i++)
-                v[i] = v[i - 1] + unzz(d[i]);
-        }
-#endif
-        else {
-            return 0;
-        }
-
-        // Scatter back: channel ch owns rows [ch*n, ch*n + n). With one channel this is the
-        // plain case; the family layout must match the encoder's channel-major order exactly.
+    // Scatter one column's values back. Channel ch owns rows [ch*n, ch*n + n), matching the
+    // encoder's channel-major layout; with no family that is just the plain case.
+    auto scatter = [&](uint8_t tag, const int64_t *v, uint8_t chans, uint8_t resLog2) -> bool {
+        const FieldFamily *fam = familyLedBy(opt, tag);
         for (uint8_t ch = 0; ch < chans; ch++) {
-            const uint8_t tg = fam ? fam->tags[ch] : tags[c];
+            const uint8_t tg = fam ? fam->tags[ch] : tag;
             const FieldHint *h = findHint(opt, tg);
             for (uint8_t i = 0; i < n; i++) {
                 pb_field_iter_t jt;
                 if (!pb_field_iter_begin(&jt, desc, msgs[i]) || !pb_field_iter_find(&jt, tg))
-                    return 0;
+                    return false;
                 const int64_t val = v[(uint16_t)ch * n + i];
                 writeScalar(jt, h, opt, resLog2 ? (val << resLog2) : val);
             }
         }
-    }
+        return true;
+    };
+
+#if BISCUIT_MAX_TIER >= 4
+    if (tier >= TIER_PACKED) {
+        uint8_t widths[BISCUIT_MAX_COLUMNS];
+        const size_t wtabBytes = ((size_t)nCols * 5 + 7) / 8;
+        if (at + wtabBytes > len)
+            return 0;
+        BitReader wtab{in + at, wtabBytes, 0};
+        for (uint8_t c = 0; c < nCols; c++) {
+            uint64_t w;
+            if (!wtab.get(5, &w))
+                return 0;
+            widths[c] = (uint8_t)w + 1;
+        }
+        at += wtabBytes;
+
+        int64_t seeds[BISCUIT_MAX_COLUMNS], divs[BISCUIT_MAX_COLUMNS];
+        size_t totalBits = 0;
+        for (uint8_t c = 0; c < nCols; c++) {
+            uint64_t g, s;
+            at = getVarint(in, len, at, &g);
+            if (at == SIZE_MAX || g == 0)
+                return 0;
+            at = getVarint(in, len, at, &s);
+            if (at == SIZE_MAX)
+                return 0;
+            divs[c] = (int64_t)g;
+            seeds[c] = unzz(s);
+            totalBits += (size_t)(rowsOf(opt, tags[c], n) - 1) * widths[c];
+        }
+
+        const size_t bitBytes = (totalBits + 7) / 8;
+        if (at + bitBytes > len)
+            return 0;
+        BitReader br{in + at, bitBytes, 0};
+        size_t escAt = at + bitBytes;
+        for (uint8_t c = 0; c < nCols; c++) {
+            const uint8_t rows = rowsOf(opt, tags[c], n);
+            const uint64_t esc = ((uint64_t)1 << widths[c]) - 1;
+            int64_t v[BISCUIT_MAX_BATCH * 4];
+            int64_t acc = seeds[c];
+            v[0] = acc * divs[c];
+            for (uint8_t i = 1; i < rows; i++) {
+                uint64_t d;
+                if (!br.get(widths[c], &d))
+                    return 0;
+                if (d == esc) {
+                    escAt = getVarint(in, len, escAt, &d);
+                    if (escAt == SIZE_MAX)
+                        return 0;
+                }
+                acc += unzz(d);
+                v[i] = acc * divs[c];
+            }
+            const FieldHint *h = findHint(opt, tags[c]);
+            const uint8_t resLog2 = (tier >= TIER_RESOLUTION && h) ? h->resLog2 : 0;
+            if (!scatter(tags[c], v, (uint8_t)(rows / n), resLog2))
+                return 0;
+        }
+        at = escAt;
+    } else
+#endif
+        for (uint8_t c = 0; c < nCols; c++) {
+            if (at >= len)
+                return 0;
+            const uint8_t codeByte = in[at++];
+            const uint8_t code = codeByte & 0x0F, resLog2 = codeByte >> 4;
+            const uint8_t rows = rowsOf(opt, tags[c], n);
+            int64_t v[BISCUIT_MAX_BATCH * 4];
+            uint64_t z;
+            if (code == COL_CONST) {
+                at = getVarint(in, len, at, &z);
+                if (at == SIZE_MAX)
+                    return 0;
+                for (uint8_t i = 0; i < rows; i++)
+                    v[i] = unzz(z);
+            } else if (code == COL_RAW) {
+                for (uint8_t i = 0; i < rows; i++) {
+                    at = getVarint(in, len, at, &z);
+                    if (at == SIZE_MAX)
+                        return 0;
+                    v[i] = unzz(z);
+                }
+            } else if (code == COL_DELTA) {
+                at = getVarint(in, len, at, &z);
+                if (at == SIZE_MAX)
+                    return 0;
+                v[0] = unzz(z);
+                for (uint8_t i = 1; i < rows; i++) {
+                    at = getVarint(in, len, at, &z);
+                    if (at == SIZE_MAX)
+                        return 0;
+                    v[i] = v[i - 1] + unzz(z);
+                }
+            } else {
+                return 0;
+            }
+            if (!scatter(tags[c], v, (uint8_t)(rows / n), resLog2))
+                return 0;
+        }
     return n;
 }
 
