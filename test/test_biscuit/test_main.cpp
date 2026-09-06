@@ -361,10 +361,145 @@ void test_realCorpusData_sizesAreStable(void)
     char msg[128];
     snprintf(msg, sizeof(msg), "sizes t1..t%u = %u %u %u %u (baseline %u)", BISCUIT_MAX_TIER, got[1], got[2], got[3],
              BISCUIT_MAX_TIER >= 4 ? got[4] : 0u, (unsigned)baseline);
-    // Measured on the fixture above, not predicted. Update deliberately if the format changes.
-    static const uint32_t expect[] = {142, 127, 127, 112};
+    // Measured on the fixture above, not predicted. Update deliberately if the format changes -
+    // adding the context word moved every tier by exactly one byte, which this caught.
+    static const uint32_t expect[] = {143, 128, 128, 113};
     for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++)
         TEST_ASSERT_EQUAL_UINT32_MESSAGE(expect[tier - 1], got[tier], msg);
+}
+
+// ---------------------------------------------------------------- RTC-less: ages, not epochs
+
+// A node that has never had a clock sends each reading's age in seconds instead of an epoch,
+// and the receiver dates them against its own clock. Ages run BACKWARDS - the oldest reading
+// has the largest age - so consecutive gaps are negative, which no epoch-based batch produces.
+// Every delta in the time column is therefore signed, and a decoder that assumed monotonically
+// increasing timestamps would reconstruct garbage without failing.
+
+/// Ages derived from the real fixture's intervals: oldest first, so counting down to zero.
+static void makeAgeBatch(meshtastic_DeviceMetrics *m, uint32_t *t, uint8_t n)
+{
+    makeRealBatch(m, t, n);
+    const uint32_t newest = kRealTimes[n - 1];
+    for (uint8_t i = 0; i < n; i++)
+        t[i] = newest - kRealTimes[i]; // age at send: largest first, 0 for the newest
+}
+
+void test_uptimeAges_decreasingTimestampsRoundTrip(void)
+{
+    meshtastic_DeviceMetrics src[12], dst[12];
+    uint32_t ages[12], agesOut[12];
+    makeAgeBatch(src, ages, 12);
+
+    // The fixture must actually count down, or this test proves nothing.
+    TEST_ASSERT_GREATER_THAN_UINT32(ages[11], ages[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, ages[11]);
+
+    const void *sp[12];
+    void *dp[12];
+    for (uint8_t i = 0; i < 12; i++) {
+        sp[i] = &src[i];
+        dst[i] = meshtastic_DeviceMetrics_init_zero;
+        dp[i] = &dst[i];
+    }
+    biscuit::Options opt;
+    opt.fixed32IsFloat = true;
+    opt.context = 1u << 24; // the ages-not-epochs flag the telemetry module sets
+
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        opt.maxTier = tier;
+        uint8_t buf[233];
+        Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ages, buf, sizeof(buf), opt);
+        TEST_ASSERT_TRUE(r.size > 0);
+
+        uint32_t ctx = 0;
+        TEST_ASSERT_TRUE(peekContext(buf, r.size, &ctx));
+        TEST_ASSERT_EQUAL_UINT32(1u << 24, ctx); // survives the round trip, so the receiver knows
+
+        TEST_ASSERT_EQUAL(12, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 12, agesOut, opt));
+        for (uint8_t i = 0; i < 12; i++) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "tier %u reading %u", tier, i);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(ages[i], agesOut[i], msg);
+        }
+    }
+}
+
+/// The receiver's conversion: epoch = now - age. Reconstructed instants must match the
+/// originals, which is the whole point of sending ages rather than a fabricated 1970 date.
+void test_uptimeAges_datedAgainstReceiverClockMatchOriginals(void)
+{
+    meshtastic_DeviceMetrics src[12], dst[12];
+    uint32_t ages[12], agesOut[12];
+    makeAgeBatch(src, ages, 12);
+    const void *sp[12];
+    void *dp[12];
+    for (uint8_t i = 0; i < 12; i++) {
+        sp[i] = &src[i];
+        dst[i] = meshtastic_DeviceMetrics_init_zero;
+        dp[i] = &dst[i];
+    }
+    biscuit::Options opt;
+    opt.fixed32IsFloat = true;
+    uint8_t buf[233];
+    Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ages, buf, sizeof(buf), opt);
+    TEST_ASSERT_TRUE(r.size > 0);
+    TEST_ASSERT_EQUAL(12, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 12, agesOut, opt));
+
+    // The receiver's clock at the moment the batch lands - here, the newest reading's instant.
+    const uint32_t nowEpoch = kRealTimes[11];
+    for (uint8_t i = 0; i < 12; i++)
+        TEST_ASSERT_EQUAL_UINT32(kRealTimes[i], nowEpoch - agesOut[i]);
+}
+
+/// A batch captured entirely within one second: every age identical, so every gap is zero.
+void test_uptimeAges_allZeroGapsRoundTrip(void)
+{
+    meshtastic_DeviceMetrics src[8], dst[8];
+    uint32_t ages[8], out[8];
+    makeRealBatch(src, ages, 8);
+    for (uint8_t i = 0; i < 8; i++)
+        ages[i] = 42; // all captured at the same age
+    const void *sp[8];
+    void *dp[8];
+    for (uint8_t i = 0; i < 8; i++) {
+        sp[i] = &src[i];
+        dst[i] = meshtastic_DeviceMetrics_init_zero;
+        dp[i] = &dst[i];
+    }
+    biscuit::Options opt;
+    opt.fixed32IsFloat = true;
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        opt.maxTier = tier;
+        uint8_t buf[233];
+        Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 8, ages, buf, sizeof(buf), opt);
+        TEST_ASSERT_TRUE(r.size > 0);
+        TEST_ASSERT_EQUAL(8, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 8, out, opt));
+        for (uint8_t i = 0; i < 8; i++)
+            TEST_ASSERT_EQUAL_UINT32(42, out[i]);
+    }
+}
+
+/// An age column costs no more than the epoch column it replaces - ages are small numbers
+/// where epochs are ~1.7 billion, so the anchor varint shrinks from five bytes to one or two.
+void test_uptimeAges_areNoLargerThanEpochs(void)
+{
+    meshtastic_DeviceMetrics src[12];
+    uint32_t epochs[12], ages[12];
+    makeRealBatch(src, epochs, 12);
+    makeAgeBatch(src, ages, 12);
+    const void *sp[12];
+    for (uint8_t i = 0; i < 12; i++)
+        sp[i] = &src[i];
+    biscuit::Options opt;
+    opt.fixed32IsFloat = true;
+    uint8_t a[233], b[233];
+    size_t withEpochs = encode(&meshtastic_DeviceMetrics_msg, sp, 12, epochs, a, sizeof(a), opt).size;
+    size_t withAges = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ages, b, sizeof(b), opt).size;
+    TEST_ASSERT_TRUE(withEpochs > 0 && withAges > 0);
+    char msg[80];
+    snprintf(msg, sizeof(msg), "ages %u B vs epochs %u B", (unsigned)withAges, (unsigned)withEpochs);
+    TEST_ASSERT_LESS_OR_EQUAL_MESSAGE(withEpochs, withAges, msg);
 }
 
 void setup()
@@ -388,6 +523,10 @@ void setup()
     RUN_TEST(test_retireCount_progressRateIsFlushMinusOverlap);
     RUN_TEST(test_realCorpusData_roundTripsExactly);
     RUN_TEST(test_realCorpusData_sizesAreStable);
+    RUN_TEST(test_uptimeAges_decreasingTimestampsRoundTrip);
+    RUN_TEST(test_uptimeAges_datedAgainstReceiverClockMatchOriginals);
+    RUN_TEST(test_uptimeAges_allZeroGapsRoundTrip);
+    RUN_TEST(test_uptimeAges_areNoLargerThanEpochs);
     exit(UNITY_END());
 }
 
