@@ -13,6 +13,12 @@
 #include "../mesh/generated/meshtastic/telemetry.pb.h"
 #include "NodeDB.h"
 #include "ProtobufModule.h"
+#include "TelemetryHistory.h"
+
+// Readings held for batched publishing; a board with RAM to spare can raise it in variant.h.
+#ifndef ENVIRONMENT_TELEMETRY_HISTORY_SIZE
+#define ENVIRONMENT_TELEMETRY_HISTORY_SIZE 16
+#endif
 #include "detect/ScanI2CConsumer.h"
 #include <OLEDDisplay.h>
 #include <OLEDDisplayUi.h>
@@ -91,6 +97,9 @@ class EnvironmentTelemetryModule : private concurrency::OSThread,
     uint32_t lastLocalDisplayRefreshMs = 0;
     uint32_t sendToPhoneIntervalMs = SECONDS_IN_MINUTE * 1000; // Send to phone every minute
     uint32_t lastSentToPhone = 0;
+
+    // Telemetry record history, shared by the mesh and mqtt publish paths
+    TelemetryHistoryBuffer<meshtastic_EnvironmentMetrics, ENVIRONMENT_TELEMETRY_HISTORY_SIZE> history;
 };
 
 #endif

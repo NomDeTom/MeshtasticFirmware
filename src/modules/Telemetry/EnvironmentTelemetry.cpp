@@ -443,8 +443,14 @@ int32_t EnvironmentTelemetryModule::runOnce()
                                                                         TrafficType::TELEMETRY))) &&
             airTime->isTxAllowedChannelUtil(config.device.role != meshtastic_Config_DeviceConfig_Role_SENSOR) &&
             airTime->isTxAllowedAirUtil()) {
-            sendTelemetry();
-            if (transmitHistory)
+            // A SENSOR node publishes the accumulated batch; every other role sends the latest
+            // reading as before. Mirrors AirQualityTelemetryModule.
+            bool sent;
+            if (config.device.role == meshtastic_Config_DeviceConfig_Role_SENSOR && !history.isEmpty())
+                sent = publishBufferedTelemetry(history, PublishTarget::Mesh);
+            else
+                sent = sendTelemetry();
+            if (transmitHistory && sent)
                 transmitHistory->setLastSentToMesh(TX_HISTORY_KEY_ENVIRONMENT_TELEMETRY);
         } else if (((lastSentToPhone == 0) || !Throttle::isWithinTimespanMs(lastSentToPhone, sendToPhoneIntervalMs)) &&
                    (service->isToPhoneQueueEmpty())) {
@@ -771,6 +777,9 @@ bool EnvironmentTelemetryModule::sendTelemetry(NodeNum dest, bool phoneOnly)
     bool validTelemetry = getEnvironmentTelemetry(&m);
 
     if (validTelemetry) {
+        // Accumulate for batched publishing. getValidTime() is 0 without a trustworthy clock, so
+        // push() stamps uptime alongside and the reading can still be dated.
+        history.push(m.variant.environment_metrics, getValidTime(RTCQualityDevice));
         if (m.variant.environment_metrics.has_temperature || m.variant.environment_metrics.has_relative_humidity ||
             m.variant.environment_metrics.has_barometric_pressure)
             LOG_INFO("Send: barometric_pressure=%fkPa, relative_humidity=%f%RH, temperature=%fdegC",

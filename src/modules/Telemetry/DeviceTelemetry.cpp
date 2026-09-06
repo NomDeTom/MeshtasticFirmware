@@ -32,8 +32,19 @@ int32_t DeviceTelemetryModule::runOnce()
         airTime->isTxAllowedChannelUtil(!isImpoliteRole) && airTime->isTxAllowedAirUtil() &&
         config.device.role != meshtastic_Config_DeviceConfig_Role_CLIENT_HIDDEN &&
         moduleConfig.telemetry.device_telemetry_enabled) {
-        sendTelemetry();
-        if (transmitHistory)
+        // A SENSOR node publishes the accumulated batch; every other role sends the latest
+        // reading as before. Gated on the diversion because TelemetryRecord's oneof has no
+        // device_metrics, so without Biscuit a DeviceMetrics batch has no format at all.
+        bool sent;
+#if MESHTASTIC_BISCUIT_DIVERT
+        if (config.device.role == meshtastic_Config_DeviceConfig_Role_SENSOR && !history.isEmpty())
+            sent = publishBufferedTelemetry(history, PublishTarget::Mesh);
+        else
+            sent = sendTelemetry();
+#else
+        sent = sendTelemetry();
+#endif
+        if (transmitHistory && sent)
             transmitHistory->setLastSentToMesh(TX_HISTORY_KEY_DEVICE_TELEMETRY);
     } else if (service->isToPhoneQueueEmpty()) {
         // Just send to phone when it's not our time to send to mesh yet
@@ -185,6 +196,9 @@ void DeviceTelemetryModule::sendLocalStatsToPhone()
 bool DeviceTelemetryModule::sendTelemetry(NodeNum dest, bool phoneOnly)
 {
     meshtastic_Telemetry telemetry = getDeviceTelemetry();
+    // Accumulate for batched publishing. getValidTime() is 0 without a trustworthy clock, so
+    // push() stamps uptime alongside and the reading can still be dated.
+    history.push(telemetry.variant.device_metrics, getValidTime(RTCQualityDevice));
     LOG_INFO("Send: air_util_tx=%f, channel_utilization=%f, battery_level=%i, voltage=%f, uptime=%i",
              telemetry.variant.device_metrics.air_util_tx, telemetry.variant.device_metrics.channel_utilization,
              telemetry.variant.device_metrics.battery_level, telemetry.variant.device_metrics.voltage,
