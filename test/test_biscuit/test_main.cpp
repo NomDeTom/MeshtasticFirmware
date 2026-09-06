@@ -478,6 +478,169 @@ void test_timeResolution_errorIsBoundedAndDeclared(void)
     }
 }
 
+// ---------------------------------------------------------------- field families
+
+// PowerMetrics is the only variant with parallel channels: ch1/ch2/ch3 voltage are one
+// measurement sampled three times over, and likewise for current. Stacking a family into its
+// leader's column pays the per-column framing once instead of three times. The model puts this
+// at 31% for the 7% of readings that carry three channels - narrow, but it is the difference
+// between the six-field case fitting at N=2 and not paying until N=6.
+//
+// Nothing exercised this before: every other test in this file uses DeviceMetrics, which has
+// no families, so the gather, the channel-major layout and the scatter were all unrun.
+
+static const FieldFamily kPowerFamilies[] = {
+    {{meshtastic_PowerMetrics_ch1_voltage_tag, meshtastic_PowerMetrics_ch2_voltage_tag, meshtastic_PowerMetrics_ch3_voltage_tag,
+      0},
+     3},
+    {{meshtastic_PowerMetrics_ch1_current_tag, meshtastic_PowerMetrics_ch2_current_tag, meshtastic_PowerMetrics_ch3_current_tag,
+      0},
+     3},
+};
+
+/// Three INA channels drifting independently, so a decoder that crossed them over would be
+/// caught rather than returning plausible-looking numbers.
+static void makePowerBatch(meshtastic_PowerMetrics *m, uint32_t *t, uint8_t n)
+{
+    for (uint8_t i = 0; i < n; i++) {
+        m[i] = meshtastic_PowerMetrics_init_zero;
+        m[i].has_ch1_voltage = m[i].has_ch2_voltage = m[i].has_ch3_voltage = true;
+        m[i].has_ch1_current = m[i].has_ch2_current = m[i].has_ch3_current = true;
+        m[i].ch1_voltage = 4.200f - 0.008f * i; // discharging
+        m[i].ch2_voltage = 3.700f + 0.004f * i; // charging
+        m[i].ch3_voltage = 5.000f;              // rail, constant
+        m[i].ch1_current = 120.0f + 4.0f * i;
+        m[i].ch2_current = -55.0f - 2.0f * i; // negative: zigzag must survive
+        m[i].ch3_current = 0.0f;
+        t[i] = 1757000000u + 900u * i;
+    }
+}
+
+/// Every channel must come back on its own tag. A family that scattered channel-major data
+/// back in reading-major order would put ch2's series into ch1 and still decode cleanly.
+void test_families_everyChannelRoundTripsToItsOwnTag(void)
+{
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        meshtastic_PowerMetrics src[12], dst[12];
+        uint32_t ts[12], tsOut[12];
+        makePowerBatch(src, ts, 12);
+        const void *sp[12];
+        void *dp[12];
+        for (uint8_t i = 0; i < 12; i++) {
+            sp[i] = &src[i];
+            dst[i] = meshtastic_PowerMetrics_init_zero;
+            dp[i] = &dst[i];
+        }
+        Options opt;
+        opt.maxTier = tier;
+        opt.fixed32IsFloat = true;
+        opt.families = kPowerFamilies;
+        opt.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
+        opt.neverInflate = false;
+
+        uint8_t buf[233];
+        Result r = encode(&meshtastic_PowerMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt);
+        char msg[64];
+        snprintf(msg, sizeof(msg), "tier %u", tier);
+        TEST_ASSERT_TRUE_MESSAGE(r.size > 0, msg);
+        TEST_ASSERT_EQUAL_MESSAGE(12, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, opt), msg);
+
+        for (uint8_t i = 0; i < 12; i++) {
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(ts[i], tsOut[i], msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch1_voltage, dst[i].ch1_voltage, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch2_voltage, dst[i].ch2_voltage, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch3_voltage, dst[i].ch3_voltage, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch1_current, dst[i].ch1_current, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch2_current, dst[i].ch2_current, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch3_current, dst[i].ch3_current, msg);
+        }
+    }
+}
+
+/// Three cells on one INA3221, which is what a family is actually for: parallel channels of
+/// the same measurement, tracking each other closely. The round-trip fixture above deliberately
+/// makes them diverge to catch a crossover; that is the wrong shape for measuring the saving,
+/// because stacking dissimilar series turns each channel boundary into a large delta.
+static void makeParallelPowerBatch(meshtastic_PowerMetrics *m, uint32_t *t, uint8_t n)
+{
+    for (uint8_t i = 0; i < n; i++) {
+        m[i] = meshtastic_PowerMetrics_init_zero;
+        m[i].has_ch1_voltage = m[i].has_ch2_voltage = m[i].has_ch3_voltage = true;
+        m[i].has_ch1_current = m[i].has_ch2_current = m[i].has_ch3_current = true;
+        m[i].ch1_voltage = 3.980f - 0.006f * i;
+        m[i].ch2_voltage = 3.976f - 0.006f * i;
+        m[i].ch3_voltage = 3.984f - 0.005f * i;
+        m[i].ch1_current = 210.0f + 3.0f * i;
+        m[i].ch2_current = 208.0f + 3.0f * i;
+        m[i].ch3_current = 212.0f + 4.0f * i;
+        t[i] = 1757000000u + 900u * i;
+    }
+}
+/// The point of stacking is fewer columns, so it must actually be smaller than not stacking.
+/// If this ever inverts, the feature is costing airtime for nothing and should be dropped.
+void test_families_areSmallerThanSeparateColumns(void)
+{
+    meshtastic_PowerMetrics src[12];
+    uint32_t ts[12];
+    makeParallelPowerBatch(src, ts, 12);
+    const void *sp[12];
+    for (uint8_t i = 0; i < 12; i++)
+        sp[i] = &src[i];
+
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        Options plain;
+        plain.maxTier = tier;
+        plain.fixed32IsFloat = true;
+        plain.neverInflate = false;
+        Options stacked = plain;
+        stacked.families = kPowerFamilies;
+        stacked.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
+
+        uint8_t a[233], b[233];
+        const size_t sPlain = encode(&meshtastic_PowerMetrics_msg, sp, 12, ts, a, sizeof(a), plain).size;
+        const size_t sStack = encode(&meshtastic_PowerMetrics_msg, sp, 12, ts, b, sizeof(b), stacked).size;
+        char msg[80];
+        snprintf(msg, sizeof(msg), "tier %u: stacked %u B, separate %u B", tier, (unsigned)sStack, (unsigned)sPlain);
+        TEST_ASSERT_TRUE_MESSAGE(sPlain > 0 && sStack > 0, msg);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE((uint32_t)sPlain, (uint32_t)sStack, msg);
+    }
+}
+
+/// A channel missing from one reading disqualifies the whole family, because a stacked column
+/// has no way to say "this channel stops here". It must fall back to encoding without that
+/// family rather than emit a column the decoder would misread as another channel's samples.
+void test_families_missingChannelDoesNotCorruptTheBatch(void)
+{
+    meshtastic_PowerMetrics src[8], dst[8];
+    uint32_t ts[8], tsOut[8];
+    makePowerBatch(src, ts, 8);
+    src[3].has_ch2_voltage = false; // one hole, mid-batch
+
+    const void *sp[8];
+    void *dp[8];
+    for (uint8_t i = 0; i < 8; i++) {
+        sp[i] = &src[i];
+        dst[i] = meshtastic_PowerMetrics_init_zero;
+        dp[i] = &dst[i];
+    }
+    Options opt;
+    opt.fixed32IsFloat = true;
+    opt.families = kPowerFamilies;
+    opt.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
+    opt.neverInflate = false;
+
+    uint8_t buf[233];
+    Result r = encode(&meshtastic_PowerMetrics_msg, sp, 8, ts, buf, sizeof(buf), opt);
+    TEST_ASSERT_TRUE(r.size > 0);
+    TEST_ASSERT_EQUAL(8, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 8, tsOut, opt));
+
+    // The current family is untouched by the voltage hole and must survive intact.
+    for (uint8_t i = 0; i < 8; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch1_current, dst[i].ch1_current);
+        TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch2_current, dst[i].ch2_current);
+        TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch3_current, dst[i].ch3_current);
+    }
+}
 // ---------------------------------------------------------------- RTC-less: ages, not epochs
 
 // A node that has never had a clock sends each reading's age in seconds instead of an epoch,
@@ -514,10 +677,11 @@ void test_uptimeAges_decreasingTimestampsRoundTrip(void)
     }
     biscuit::Options opt;
     opt.fixed32IsFloat = true;
-    // A realistic full context word: variant tag, portnum, and the time-quality byte in the top
-    // eight bits - tier 4 (GPS) with UPTIME_BASED set. The codec must carry all 32 bits: if it
-    // truncated the top byte the receiver would read an age as an epoch and date it to 1970.
-    static const uint32_t kCtx = (uint32_t)(0x10u | 0x04u) << 24 | ((uint32_t)67u << 8) | 2u;
+    // A realistic context word in the module's layout: variant 0 (device_metrics), RTC tier 4
+    // (GPS) at bits 3-6, UPTIME_BASED at bit 7, quantum code 7 (60 s) at bits 10-13. The codec
+    // carries it opaquely, and must return every bit: a receiver that lost bit 7 would read an
+    // age as an epoch and date the batch to 1970.
+    static const uint32_t kCtx = 0u | (4u << 3) | (1u << 7) | (7u << 10);
     opt.context = kCtx;
 
     for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
@@ -640,6 +804,9 @@ void setup()
     RUN_TEST(test_realCorpusData_meetsTierModelSavings);
     RUN_TEST(test_tierAboveCompiledMax_clamps);
     RUN_TEST(test_timeResolution_errorIsBoundedAndDeclared);
+    RUN_TEST(test_families_everyChannelRoundTripsToItsOwnTag);
+    RUN_TEST(test_families_areSmallerThanSeparateColumns);
+    RUN_TEST(test_families_missingChannelDoesNotCorruptTheBatch);
     RUN_TEST(test_uptimeAges_decreasingTimestampsRoundTrip);
     RUN_TEST(test_uptimeAges_datedAgainstReceiverClockMatchOriginals);
     RUN_TEST(test_uptimeAges_allZeroGapsRoundTrip);
