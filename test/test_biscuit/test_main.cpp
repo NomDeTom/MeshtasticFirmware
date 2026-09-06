@@ -514,7 +514,11 @@ void test_uptimeAges_decreasingTimestampsRoundTrip(void)
     }
     biscuit::Options opt;
     opt.fixed32IsFloat = true;
-    opt.context = 1u << 24; // the ages-not-epochs flag the telemetry module sets
+    // A realistic full context word: variant tag, portnum, and the time-quality byte in the top
+    // eight bits - tier 4 (GPS) with UPTIME_BASED set. The codec must carry all 32 bits: if it
+    // truncated the top byte the receiver would read an age as an epoch and date it to 1970.
+    static const uint32_t kCtx = (uint32_t)(0x10u | 0x04u) << 24 | ((uint32_t)67u << 8) | 2u;
+    opt.context = kCtx;
 
     for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
         opt.maxTier = tier;
@@ -524,7 +528,7 @@ void test_uptimeAges_decreasingTimestampsRoundTrip(void)
 
         uint32_t ctx = 0;
         TEST_ASSERT_TRUE(peekContext(buf, r.size, &ctx));
-        TEST_ASSERT_EQUAL_UINT32(1u << 24, ctx); // survives the round trip, so the receiver knows
+        TEST_ASSERT_EQUAL_UINT32(kCtx, ctx); // survives whole, so the receiver knows how to read it
 
         TEST_ASSERT_EQUAL(12, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 12, agesOut, opt));
         for (uint8_t i = 0; i < 12; i++) {

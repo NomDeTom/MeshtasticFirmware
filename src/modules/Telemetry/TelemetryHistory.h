@@ -3,6 +3,7 @@
 #if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR || !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
 
 #include "UptimeClock.h"
+#include "mesh/biscuit/BiscuitVariants.h"
 #include "mesh/generated/meshtastic/telemetry.pb.h"
 
 enum TelemetryPublishChannel : uint8_t {
@@ -73,38 +74,6 @@ template <typename T, uint8_t N> class TelemetryHistoryBuffer
         count = 0;
     }
 };
-
-// The nanopb descriptor for each buffered metrics type, so Biscuit can encode any of them
-// without a per-type encoder. Mirrors the assignTelemetryRecord overloads below.
-template <typename T> const pb_msgdesc_t *metricsDescriptor();
-template <> inline const pb_msgdesc_t *metricsDescriptor<meshtastic_EnvironmentMetrics>()
-{
-    return &meshtastic_EnvironmentMetrics_msg;
-}
-template <> inline const pb_msgdesc_t *metricsDescriptor<meshtastic_PowerMetrics>()
-{
-    return &meshtastic_PowerMetrics_msg;
-}
-template <> inline const pb_msgdesc_t *metricsDescriptor<meshtastic_AirQualityMetrics>()
-{
-    return &meshtastic_AirQualityMetrics_msg;
-}
-
-// The TelemetryRecord oneof tag for each buffered type, so a Biscuit batch records what it
-// holds and a receiver can rebuild the record the sender would otherwise have sent.
-template <typename T> constexpr uint8_t variantTagFor();
-template <> constexpr uint8_t variantTagFor<meshtastic_EnvironmentMetrics>()
-{
-    return meshtastic_TelemetryRecord_environment_metrics_tag;
-}
-template <> constexpr uint8_t variantTagFor<meshtastic_PowerMetrics>()
-{
-    return meshtastic_TelemetryRecord_power_metrics_tag;
-}
-template <> constexpr uint8_t variantTagFor<meshtastic_AirQualityMetrics>()
-{
-    return meshtastic_TelemetryRecord_air_quality_metrics_tag;
-}
 
 // time/deltaSecs are only meaningful together with the metrics they were captured with
 template <typename T> inline void assignTelemetryRecordTimeInfo(meshtastic_TelemetryRecord &r, const BufferedReading<T> &reading)

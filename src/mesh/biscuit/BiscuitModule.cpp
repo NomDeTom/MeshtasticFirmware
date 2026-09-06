@@ -4,6 +4,7 @@
 
 #include "MeshService.h"
 #include "gps/RTC.h"
+#include "mesh/biscuit/BiscuitVariants.h"
 #include "mesh/generated/meshtastic/telemetry.pb.h"
 
 BiscuitModule *biscuitModule;
@@ -30,8 +31,14 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
     const uint8_t variantTag = context & 0xFF;
     // A sender with no clock sends ages; date them against ours. Without a clock of our own we
     // cannot, so the readings go on undated rather than carrying a fabricated epoch.
-    const bool agesNotEpochs = (context & CTX_AGES_NOT_EPOCHS) != 0;
+    const uint8_t senderQ = timeQualityOf(context);
+    const bool agesNotEpochs = (senderQ & TIMEQ_UPTIME_BASED) != 0;
     const uint32_t nowEpoch = agesNotEpochs ? getValidTime(RTCQualityFromNet) : 0;
+    // What the readings end up dated by: our clock and our tier where we applied it, the
+    // sender's where we did not. RECEIVER_APPLIED plus a GPS tier is a different and more
+    // useful statement than either half alone.
+    const uint8_t appliedQ =
+        (agesNotEpochs && nowEpoch) ? (uint8_t)((getRTCQuality() & TIMEQ_TIER_MASK) | TIMEQ_RECEIVER_APPLIED) : senderQ;
     uint32_t times[BISCUIT_MAX_BATCH];
     uint8_t n = 0;
 
@@ -39,8 +46,8 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
     opt.fixed32IsFloat = true;
 
     // One stack buffer for the variant actually present, rather than a union of all of them.
-#define BISCUIT_DECODE_VARIANT(TAG, TYPE, FIELD)                                                                                 \
-    case TAG: {                                                                                                                  \
+#define BISCUIT_DECODE_VARIANT(TYPE, FIELD)                                                                                      \
+    case meshtastic_Telemetry_##FIELD##_tag: {                                                                                   \
         TYPE m[BISCUIT_MAX_BATCH];                                                                                               \
         void *slots[BISCUIT_MAX_BATCH];                                                                                          \
         for (uint8_t i = 0; i < BISCUIT_MAX_BATCH; i++) {                                                                        \
@@ -60,11 +67,7 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
     }
 
     switch (variantTag) {
-        BISCUIT_DECODE_VARIANT(meshtastic_TelemetryRecord_environment_metrics_tag, meshtastic_EnvironmentMetrics,
-                               environment_metrics)
-        BISCUIT_DECODE_VARIANT(meshtastic_TelemetryRecord_power_metrics_tag, meshtastic_PowerMetrics, power_metrics)
-        BISCUIT_DECODE_VARIANT(meshtastic_TelemetryRecord_air_quality_metrics_tag, meshtastic_AirQualityMetrics,
-                               air_quality_metrics)
+        BISCUIT_METRICS_TYPES(BISCUIT_DECODE_VARIANT)
     default:
         LOG_WARN("Biscuit: unknown variant %u in 0x%08x", variantTag, mp.id);
         return ProcessMessage::STOP;
@@ -74,7 +77,7 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
     if (!n)
         LOG_WARN("Biscuit: 0x%08x decoded to nothing", mp.id);
     else
-        LOG_INFO("Biscuit: %u readings from 0x%08x delivered to phone", n, mp.id);
+        LOG_INFO("Biscuit: %u readings from 0x%08x delivered to phone, time quality 0x%02x", n, mp.id, appliedQ);
 
     return ProcessMessage::STOP;
 }

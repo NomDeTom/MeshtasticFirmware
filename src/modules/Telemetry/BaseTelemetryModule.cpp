@@ -101,7 +101,11 @@ static __attribute__((noinline)) size_t encodeBiscuitBatch(meshtastic_MeshPacket
 
     biscuit::Options opt;
     opt.fixed32IsFloat = true; // every fixed32 in a telemetry message is a float
-    opt.context = BiscuitModule::makeContext(meshtastic_PortNum_TELEMETRY_HISTORY_APP, variantTagFor<T>(), sendAges);
+    // The stamp is only as good as the clock that made it, so say which one that was.
+    uint8_t timeQ = (uint8_t)(getRTCQuality() & BiscuitModule::TIMEQ_TIER_MASK);
+    if (sendAges)
+        timeQ |= BiscuitModule::TIMEQ_UPTIME_BASED;
+    opt.context = BiscuitModule::makeContext(meshtastic_PortNum_TELEMETRY_HISTORY_APP, variantTagFor<T>(), timeQ);
 
     const void *msgs[BISCUIT_MAX_BATCH];
     uint32_t times[BISCUIT_MAX_BATCH];

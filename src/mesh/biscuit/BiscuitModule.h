@@ -21,15 +21,23 @@ class BiscuitModule : public SinglePortModule
   public:
     BiscuitModule();
 
-    /// Set when the batch carries ages in seconds rather than epochs, because the sender had
-    /// no trustworthy clock. The receiver dates them against its own: epoch = now - age.
-    static constexpr uint32_t CTX_AGES_NOT_EPOCHS = 1u << 24;
+    /// Time-quality byte, carried in the top eight bits of the context word. The low nibble is
+    /// RTCQuality unchanged; the high nibble says how to read the value. Wire type only - the
+    /// RTCQuality ladder in gps/RTC.h is untouched, so none of its comparisons change. Uptime
+    /// is not a worse epoch, it is not an epoch, which is why it is a flag and not a tier.
+    enum TimeQuality : uint8_t {
+        TIMEQ_TIER_MASK = 0x0F,          ///< RTCQuality: None 0, Device 1, FromNet 2, NTP 3, GPS 4
+        TIMEQ_UPTIME_BASED = 1u << 4,    ///< the value is an age in seconds, not an epoch
+        TIMEQ_REBOOT_TAINTED = 1u << 5,  ///< stamped before a reboot; the uptime base is gone
+        TIMEQ_RECEIVER_APPLIED = 1u << 6 ///< dated by the receiver, not by the origin
+    };
 
-    /// Pack the source portnum and variant tag for Options::context.
-    static uint32_t makeContext(meshtastic_PortNum port, uint8_t variantTag, bool ages = false)
+    /// Pack the source portnum, variant tag and time-quality byte for Options::context.
+    static uint32_t makeContext(meshtastic_PortNum port, uint8_t variantTag, uint8_t timeQuality = 0)
     {
-        return ((uint32_t)port << 8) | variantTag | (ages ? CTX_AGES_NOT_EPOCHS : 0u);
+        return ((uint32_t)timeQuality << 24) | ((uint32_t)port << 8) | variantTag;
     }
+    static uint8_t timeQualityOf(uint32_t context) { return (uint8_t)(context >> 24); }
 
   protected:
     virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
