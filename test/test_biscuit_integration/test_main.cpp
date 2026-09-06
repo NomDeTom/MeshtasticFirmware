@@ -10,6 +10,7 @@
 #include "TestUtil.h"
 #include "UptimeClock.h"
 #include "configuration.h"
+#include "gps/RTC.h"
 #include "mesh/CryptoEngine.h"
 #include "mesh/MeshService.h"
 #include "mesh/NodeDB.h"
@@ -43,6 +44,19 @@ namespace
 {
 constexpr NodeNum LOCAL_NODE = 0x11111111;
 constexpr NodeNum REMOTE_NODE = 0x22222222;
+
+/// A wall-clock time the RTC will accept. perhapsSetRTC refuses anything before BUILD_EPOCH, so a
+/// hardcoded constant here silently stops working the day the firmware is built past it - which
+/// is exactly what happened: every RTC-dependent case failed with RTCSetResultInvalidTime and the
+/// batches quietly fell back to ages.
+inline uint32_t acceptableEpoch()
+{
+#ifdef BUILD_EPOCH
+    return (uint32_t)BUILD_EPOCH + 86400u;
+#else
+    return 1788800000u;
+#endif
+}
 
 class MockNodeDB : public NodeDB
 {
@@ -171,6 +185,15 @@ void setUp(void)
     capturingRouter->addInterface(std::unique_ptr<RadioInterface>(new MockRadioInterface()));
     router = capturingRouter;
 
+    // Every case starts with a known, trustworthy clock. The RTC-less cases reset it themselves;
+    // without pinning it here they would leak a clockless state into whatever ran next, and a
+    // batch that silently switched to ages would still decode - just against the wrong basis.
+    resetRTCStateForTests();
+    struct timeval tv;
+    tv.tv_sec = (time_t)acceptableEpoch();
+    tv.tv_usec = 0;
+    TEST_ASSERT_EQUAL_MESSAGE(RTCSetResultSuccess, perhapsSetRTC(RTCQualityNTP, &tv), "test clock rejected by the RTC");
+
     harness = new Harness();
     biscuitUnderTest = new TestBiscuitModule();
     history = new TelemetryHistoryBuffer<meshtastic_DeviceMetrics, DEVICE_TELEMETRY_HISTORY_SIZE>();
@@ -179,6 +202,7 @@ void setUp(void)
 void tearDown(void)
 {
     Time::useRealClock(); // several cases drive a virtual timebase; do not leak it to the next
+    resetRTCStateForTests();
 
     delete history;
     history = nullptr;
@@ -395,6 +419,127 @@ void test_time_clockArrivedLateBackDatesFromUptime(void)
     TEST_ASSERT_TRUE(capturingRouter->sent[0].decoded.payload.size > 0);
 }
 
+/// The third sender case, and the one that has no epoch to fall back on: a node that has never
+/// had a clock at all. It sends each reading's AGE in seconds instead of a timestamp and says so
+/// in the context word, because a fabricated epoch would be filed as a real 1970 date and is
+/// worse than an honest "I do not know when".
+///
+/// Ages run backwards - the oldest reading has the largest age - so every gap in the time column
+/// is negative, which no epoch-based batch ever produces.
+void test_time_neverHadAClockSendsAges(void)
+{
+    resetRTCStateForTests(); // no clock this boot, and none ever
+    TEST_ASSERT_EQUAL(0, getValidTime(RTCQualityFromNet));
+
+    Time::setTestMillis(10000u * 1000u);
+    for (uint8_t i = 0; i < 12; i++) {
+        meshtastic_DeviceMetrics m = meshtastic_DeviceMetrics_init_zero;
+        m.has_battery_level = true;
+        m.battery_level = (uint32_t)(90 - i);
+        m.has_uptime_seconds = true;
+        m.uptime_seconds = Time::getUptimeSecs();
+        history->push(m, 0); // undated: there is no clock to date it with
+        Time::advanceTestMillis(900u * 1000u);
+    }
+
+    TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
+    TEST_ASSERT_EQUAL(1, capturingRouter->sent.size());
+    const meshtastic_MeshPacket &p = capturingRouter->sent[0];
+
+    uint32_t ctx = 0;
+    TEST_ASSERT_TRUE(peekContext(p.decoded.payload.bytes, p.decoded.payload.size, &ctx));
+    // The flag is the whole contract. Without it a receiver reads an age of 9900 as an epoch and
+    // files the reading in January 1970.
+    TEST_ASSERT_TRUE_MESSAGE(ctx & BiscuitModule::CTX_UPTIME_BASED, "a clockless sender must declare UPTIME_BASED");
+    TEST_ASSERT_EQUAL_MESSAGE(0, ctx & (BiscuitModule::CTX_TIER_MASK << BiscuitModule::CTX_TIER_SHIFT),
+                              "with no clock the RTC tier must be None, not merely absent");
+}
+
+/// A receiver that also has no clock cannot date what it is given, and must pass the readings on
+/// undated rather than inventing an epoch. Losing the timestamp is recoverable; a wrong one that
+/// looks right is not.
+void test_time_clocklessReceiverLeavesReadingsUndated(void)
+{
+    resetRTCStateForTests();
+    Time::setTestMillis(10000u * 1000u);
+    for (uint8_t i = 0; i < 8; i++) {
+        meshtastic_DeviceMetrics m = meshtastic_DeviceMetrics_init_zero;
+        m.has_battery_level = true;
+        m.battery_level = (uint32_t)(90 - i);
+        history->push(m, 0);
+        Time::advanceTestMillis(900u * 1000u);
+    }
+    TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
+
+    meshtastic_MeshPacket rx = capturingRouter->sent[0];
+    rx.from = REMOTE_NODE;
+    TEST_ASSERT_EQUAL(ProcessMessage::STOP, biscuitUnderTest->handleReceived(rx));
+
+    uint8_t got = 0;
+    while (meshtastic_MeshPacket *out = mockService->getForPhone()) {
+        meshtastic_Telemetry t = meshtastic_Telemetry_init_zero;
+        pb_istream_t stream = pb_istream_from_buffer(out->decoded.payload.bytes, out->decoded.payload.size);
+        TEST_ASSERT_TRUE(pb_decode(&stream, &meshtastic_Telemetry_msg, &t));
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, t.time, "no clock at either end means undated, never fabricated");
+        mockService->releaseToPool(out);
+        got++;
+    }
+    TEST_ASSERT_TRUE(got > 0);
+}
+
+/// The case the whole scheme exists for: a clockless sender, and a receiver that does have a
+/// clock. The ages are turned back into instants against the receiver's time, so readings taken
+/// before anyone knew the date still land in the right order and the right hour.
+void test_time_agesAreDatedAgainstTheReceiversClock(void)
+{
+    resetRTCStateForTests();
+    Time::setTestMillis(10000u * 1000u);
+    const uint32_t uptimeAtFirst = Time::getUptimeSecs();
+    for (uint8_t i = 0; i < 8; i++) {
+        meshtastic_DeviceMetrics m = meshtastic_DeviceMetrics_init_zero;
+        m.has_battery_level = true;
+        m.battery_level = (uint32_t)(90 - i);
+        history->push(m, 0);
+        Time::advanceTestMillis(900u * 1000u);
+    }
+    const uint32_t uptimeAtSend = Time::getUptimeSecs();
+    TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
+    meshtastic_MeshPacket rx = capturingRouter->sent[0];
+    rx.from = REMOTE_NODE;
+
+    // Now give this node a clock, standing in for the receiving node having one all along.
+    struct timeval tv;
+    tv.tv_sec = (time_t)acceptableEpoch();
+    tv.tv_usec = 0;
+    TEST_ASSERT_EQUAL(RTCSetResultSuccess, perhapsSetRTC(RTCQualityNTP, &tv));
+    const uint32_t nowEpoch = getValidTime(RTCQualityFromNet);
+    TEST_ASSERT_TRUE(nowEpoch > 0);
+
+    TEST_ASSERT_EQUAL(ProcessMessage::STOP, biscuitUnderTest->handleReceived(rx));
+
+    uint8_t got = 0;
+    uint32_t previous = 0;
+    while (meshtastic_MeshPacket *out = mockService->getForPhone()) {
+        meshtastic_Telemetry t = meshtastic_Telemetry_init_zero;
+        pb_istream_t stream = pb_istream_from_buffer(out->decoded.payload.bytes, out->decoded.payload.size);
+        TEST_ASSERT_TRUE(pb_decode(&stream, &meshtastic_Telemetry_msg, &t));
+
+        char msg[80];
+        snprintf(msg, sizeof(msg), "reading %u dated %u against now %u", got, (unsigned)t.time, (unsigned)nowEpoch);
+        // Dated, in the past, and no older than the whole capture window - an age read as an
+        // epoch would land near 1970 and fail all three.
+        TEST_ASSERT_TRUE_MESSAGE(t.time > 0, msg);
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32_MESSAGE(nowEpoch, t.time, msg);
+        TEST_ASSERT_GREATER_OR_EQUAL_UINT32_MESSAGE(nowEpoch - (uptimeAtSend - uptimeAtFirst) - 60u, t.time, msg);
+        // Oldest first, which is the order the ages counted down in.
+        TEST_ASSERT_GREATER_OR_EQUAL_UINT32_MESSAGE(previous, t.time, msg);
+        previous = t.time;
+
+        mockService->releaseToPool(out);
+        got++;
+    }
+    TEST_ASSERT_EQUAL(8, got);
+}
 // ---------------------------------------------------------------- mqtt target
 
 /// The mqtt target shares the encode path and differs only in delivery. Without a broker it must
@@ -584,6 +729,9 @@ void setup()
     RUN_TEST(test_deviceMetrics_hasNoRecordFallback);
     RUN_TEST(test_time_clockPresentSendsEpochs);
     RUN_TEST(test_time_clockArrivedLateBackDatesFromUptime);
+    RUN_TEST(test_time_neverHadAClockSendsAges);
+    RUN_TEST(test_time_clocklessReceiverLeavesReadingsUndated);
+    RUN_TEST(test_time_agesAreDatedAgainstTheReceiversClock);
     RUN_TEST(test_mqttTarget_withoutABrokerRetiresNothing);
     RUN_TEST(test_publishTargets_haveIndependentMasks);
 #if MESHTASTIC_BISCUIT_DIVERT
