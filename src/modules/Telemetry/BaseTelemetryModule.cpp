@@ -98,7 +98,7 @@ static __attribute__((noinline)) size_t encodeHistoryBatch(meshtastic_MeshPacket
  */
 template <typename T, uint8_t N>
 static __attribute__((noinline)) size_t encodeBiscuitBatch(meshtastic_MeshPacket &p, const TelemetryHistoryBuffer<T, N> &history,
-                                                           const uint8_t *indices, size_t maxTake)
+                                                           uint8_t maxTier, const uint8_t *indices, size_t maxTake)
 {
     if (maxTake > BISCUIT_MAX_BATCH)
         maxTake = BISCUIT_MAX_BATCH;
@@ -112,6 +112,7 @@ static __attribute__((noinline)) size_t encodeBiscuitBatch(meshtastic_MeshPacket
     const bool sendAges = (nowEpoch == 0);
 
     biscuit::Options opt;
+    opt.maxTier = maxTier;
     opt.fixed32IsFloat = true; // every fixed32 in a telemetry message is a float
     // The stamp is only as good as the clock that made it, so say which one that was, and
     // declare the quantum so a receiver need not be configured to match us.
@@ -205,7 +206,7 @@ bool BaseTelemetryModule::publishBufferedTelemetry(TelemetryHistoryBuffer<T, N> 
 #if MESHTASTIC_BISCUIT_DIVERT
     // Biscuit first; it declines rather than emit a packet larger than the protobuf, and a
     // decline leaves the payload untouched for the fallback below.
-    take = encodeBiscuitBatch(*p, history, indices, want);
+    take = encodeBiscuitBatch(*p, history, biscuitMaxTier, indices, want);
     if (take)
         p->decoded.portnum = meshtastic_PortNum_BISCUIT_APP;
 #endif

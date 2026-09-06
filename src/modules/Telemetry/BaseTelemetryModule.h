@@ -108,6 +108,11 @@ class BaseTelemetryModule
     uint32_t lastSentToMqtt = 0;
     uint32_t lastRead = 0;
 
+    /// Highest Biscuit tier this node will encode at, capped by what was compiled in. A member
+    /// rather than a constant so the tiers can be exercised at runtime in one build, which is
+    /// how the suite covers all four without four binaries; a node could also cap it to trade
+    /// compression for decode cost on the receiving side.
+    uint8_t biscuitMaxTier = BISCUIT_MAX_TIER;
     virtual meshtastic_MeshPacket *allocTelemetryHistoryPacket() { return nullptr; }
     virtual meshtastic_MeshPacket *allocTelemetryPacket(const meshtastic_Telemetry &m) { return nullptr; }
 

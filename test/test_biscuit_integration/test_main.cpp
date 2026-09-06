@@ -88,6 +88,7 @@ class CapturingRouter : public Router
 class Harness : public BaseTelemetryModule
 {
   public:
+    using BaseTelemetryModule::biscuitMaxTier;
     using BaseTelemetryModule::publishBufferedTelemetry;
 
   protected:
@@ -246,20 +247,25 @@ void test_fullBufferPublishesBelowTheThreshold(void)
 /// to decode it - or worse, decode part of it - and the readings are lost either way.
 void test_portnumMatchesTheFormatUsed(void)
 {
-    pushReadings(12);
-    TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
-    TEST_ASSERT_EQUAL(1, capturingRouter->sent.size());
-    const meshtastic_MeshPacket &p = capturingRouter->sent[0];
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        history->clear();
+        capturingRouter->sent.clear();
+        harness->biscuitMaxTier = tier;
+        pushReadings(12);
+        TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
+        TEST_ASSERT_EQUAL(1, capturingRouter->sent.size());
+        const meshtastic_MeshPacket &p = capturingRouter->sent[0];
 
 #if MESHTASTIC_BISCUIT_DIVERT
-    // Diverted: the payload must actually be a Biscuit one, not merely labelled as such.
-    TEST_ASSERT_EQUAL(meshtastic_PortNum_BISCUIT_APP, p.decoded.portnum);
-    uint32_t ctx = 0;
-    TEST_ASSERT_TRUE(peekContext(p.decoded.payload.bytes, p.decoded.payload.size, &ctx));
-    TEST_ASSERT_EQUAL(meshtastic_Telemetry_device_metrics_tag, BiscuitModule::variantOf(ctx));
+        // Diverted: the payload must actually be a Biscuit one, not merely labelled as such.
+        TEST_ASSERT_EQUAL(meshtastic_PortNum_BISCUIT_APP, p.decoded.portnum);
+        uint32_t ctx = 0;
+        TEST_ASSERT_TRUE(peekContext(p.decoded.payload.bytes, p.decoded.payload.size, &ctx));
+        TEST_ASSERT_EQUAL(meshtastic_Telemetry_device_metrics_tag, BiscuitModule::variantOf(ctx));
 #else
-    TEST_ASSERT_EQUAL(meshtastic_PortNum_TELEMETRY_HISTORY_APP, p.decoded.portnum);
+        TEST_ASSERT_EQUAL(meshtastic_PortNum_TELEMETRY_HISTORY_APP, p.decoded.portnum);
 #endif
+    }
 }
 
 // ---------------------------------------------------------------- retire and overlap
@@ -425,53 +431,67 @@ void test_publishTargets_haveIndependentMasks(void)
 /// unsent time quantum did, and what a family table or a resolution hint could still do.
 void test_nodeToNode_batchSurvivesTheModuleBoundary(void)
 {
-    const uint8_t n = 12;
-    pushReadings(n);
+    // Every tier, in one binary: the encodings differ completely between them - tier 4 shares one
+    // bit area across all columns and carries no column headers at all - so a boundary that works
+    // at the default proves nothing about the other three.
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        history->clear();
+        capturingRouter->sent.clear();
+        harness->biscuitMaxTier = tier;
+        // A fresh receiver each time. The module remembers the newest stamp it has taken from a
+        // sender so it can drop declared repeats, and every tier here replays the same twelve
+        // readings - without this, tier 2 onward correctly discards the overlap tail as already
+        // seen, which is the dedup working rather than the boundary failing.
+        delete biscuitUnderTest;
+        biscuitUnderTest = new TestBiscuitModule();
+        const uint8_t n = 12;
+        pushReadings(n);
 
-    meshtastic_DeviceMetrics expect[16];
-    uint32_t expectTimes[16];
-    for (uint8_t i = 0; i < history->size(); i++) {
-        expect[i] = history->at(i).metrics;
-        expectTimes[i] = history->at(i).time;
+        meshtastic_DeviceMetrics expect[16];
+        uint32_t expectTimes[16];
+        for (uint8_t i = 0; i < history->size(); i++) {
+            expect[i] = history->at(i).metrics;
+            expectTimes[i] = history->at(i).time;
+        }
+
+        TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
+        TEST_ASSERT_EQUAL(1, capturingRouter->sent.size());
+
+        meshtastic_MeshPacket rx = capturingRouter->sent[0];
+        rx.from = REMOTE_NODE; // it came from the other node, as far as we are concerned
+        TEST_ASSERT_EQUAL(meshtastic_PortNum_BISCUIT_APP, rx.decoded.portnum);
+
+        const uint8_t took = peekCount(rx.decoded.payload.bytes, rx.decoded.payload.size);
+        TEST_ASSERT_TRUE(took > 0);
+
+        // Drive the receiving module the way the router would.
+        TEST_ASSERT_EQUAL(ProcessMessage::STOP, biscuitUnderTest->handleReceived(rx));
+
+        // Each reading is delivered to the phone as an ordinary Telemetry message. Pull them back
+        // out of the phone queue and compare against what the sender accumulated.
+        uint8_t got = 0;
+        while (meshtastic_MeshPacket *out = mockService->getForPhone()) {
+            TEST_ASSERT_EQUAL(meshtastic_PortNum_TELEMETRY_APP, out->decoded.portnum);
+            meshtastic_Telemetry t = meshtastic_Telemetry_init_zero;
+            pb_istream_t stream = pb_istream_from_buffer(out->decoded.payload.bytes, out->decoded.payload.size);
+            TEST_ASSERT_TRUE(pb_decode(&stream, &meshtastic_Telemetry_msg, &t));
+            TEST_ASSERT_EQUAL(meshtastic_Telemetry_device_metrics_tag, t.which_variant);
+
+            char msg[48];
+            snprintf(msg, sizeof(msg), "tier %u reading %u", tier, got);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(expectTimes[got], t.time, msg);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(expect[got].battery_level, t.variant.device_metrics.battery_level, msg);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(expect[got].uptime_seconds, t.variant.device_metrics.uptime_seconds, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, expect[got].voltage, t.variant.device_metrics.voltage, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, expect[got].channel_utilization,
+                                             t.variant.device_metrics.channel_utilization, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, expect[got].air_util_tx, t.variant.device_metrics.air_util_tx, msg);
+
+            mockService->releaseToPool(out);
+            got++;
+        }
+        TEST_ASSERT_EQUAL_MESSAGE(took, got, "every reading in the batch must reach the phone");
     }
-
-    TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
-    TEST_ASSERT_EQUAL(1, capturingRouter->sent.size());
-
-    meshtastic_MeshPacket rx = capturingRouter->sent[0];
-    rx.from = REMOTE_NODE; // it came from the other node, as far as we are concerned
-    TEST_ASSERT_EQUAL(meshtastic_PortNum_BISCUIT_APP, rx.decoded.portnum);
-
-    const uint8_t took = peekCount(rx.decoded.payload.bytes, rx.decoded.payload.size);
-    TEST_ASSERT_TRUE(took > 0);
-
-    // Drive the receiving module the way the router would.
-    TEST_ASSERT_EQUAL(ProcessMessage::STOP, biscuitUnderTest->handleReceived(rx));
-
-    // Each reading is delivered to the phone as an ordinary Telemetry message. Pull them back
-    // out of the phone queue and compare against what the sender accumulated.
-    uint8_t got = 0;
-    while (meshtastic_MeshPacket *out = mockService->getForPhone()) {
-        TEST_ASSERT_EQUAL(meshtastic_PortNum_TELEMETRY_APP, out->decoded.portnum);
-        meshtastic_Telemetry t = meshtastic_Telemetry_init_zero;
-        pb_istream_t stream = pb_istream_from_buffer(out->decoded.payload.bytes, out->decoded.payload.size);
-        TEST_ASSERT_TRUE(pb_decode(&stream, &meshtastic_Telemetry_msg, &t));
-        TEST_ASSERT_EQUAL(meshtastic_Telemetry_device_metrics_tag, t.which_variant);
-
-        char msg[48];
-        snprintf(msg, sizeof(msg), "reading %u", got);
-        TEST_ASSERT_EQUAL_UINT32_MESSAGE(expectTimes[got], t.time, msg);
-        TEST_ASSERT_EQUAL_UINT32_MESSAGE(expect[got].battery_level, t.variant.device_metrics.battery_level, msg);
-        TEST_ASSERT_EQUAL_UINT32_MESSAGE(expect[got].uptime_seconds, t.variant.device_metrics.uptime_seconds, msg);
-        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, expect[got].voltage, t.variant.device_metrics.voltage, msg);
-        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, expect[got].channel_utilization, t.variant.device_metrics.channel_utilization,
-                                         msg);
-        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, expect[got].air_util_tx, t.variant.device_metrics.air_util_tx, msg);
-
-        mockService->releaseToPool(out);
-        got++;
-    }
-    TEST_ASSERT_EQUAL_MESSAGE(took, got, "every reading in the batch must reach the phone");
 }
 
 /// A payload that is not ours must be refused rather than decoded into invented readings.

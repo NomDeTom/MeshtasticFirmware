@@ -612,34 +612,37 @@ void test_families_areSmallerThanSeparateColumns(void)
 /// family rather than emit a column the decoder would misread as another channel's samples.
 void test_families_missingChannelDoesNotCorruptTheBatch(void)
 {
-    meshtastic_PowerMetrics src[8], dst[8];
-    uint32_t ts[8], tsOut[8];
-    makePowerBatch(src, ts, 8);
-    src[3].has_ch2_voltage = false; // one hole, mid-batch
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        meshtastic_PowerMetrics src[8], dst[8];
+        uint32_t ts[8], tsOut[8];
+        makePowerBatch(src, ts, 8);
+        src[3].has_ch2_voltage = false; // one hole, mid-batch
 
-    const void *sp[8];
-    void *dp[8];
-    for (uint8_t i = 0; i < 8; i++) {
-        sp[i] = &src[i];
-        dst[i] = meshtastic_PowerMetrics_init_zero;
-        dp[i] = &dst[i];
-    }
-    Options opt;
-    opt.fixed32IsFloat = true;
-    opt.families = kPowerFamilies;
-    opt.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
-    opt.neverInflate = false;
+        const void *sp[8];
+        void *dp[8];
+        for (uint8_t i = 0; i < 8; i++) {
+            sp[i] = &src[i];
+            dst[i] = meshtastic_PowerMetrics_init_zero;
+            dp[i] = &dst[i];
+        }
+        Options opt;
+        opt.maxTier = tier;
+        opt.fixed32IsFloat = true;
+        opt.families = kPowerFamilies;
+        opt.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
+        opt.neverInflate = false;
 
-    uint8_t buf[233];
-    Result r = encode(&meshtastic_PowerMetrics_msg, sp, 8, ts, buf, sizeof(buf), opt);
-    TEST_ASSERT_TRUE(r.size > 0);
-    TEST_ASSERT_EQUAL(8, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 8, tsOut, opt));
+        uint8_t buf[233];
+        Result r = encode(&meshtastic_PowerMetrics_msg, sp, 8, ts, buf, sizeof(buf), opt);
+        TEST_ASSERT_TRUE(r.size > 0);
+        TEST_ASSERT_EQUAL(8, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 8, tsOut, opt));
 
-    // The current family is untouched by the voltage hole and must survive intact.
-    for (uint8_t i = 0; i < 8; i++) {
-        TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch1_current, dst[i].ch1_current);
-        TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch2_current, dst[i].ch2_current);
-        TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch3_current, dst[i].ch3_current);
+        // The current family is untouched by the voltage hole and must survive intact.
+        for (uint8_t i = 0; i < 8; i++) {
+            TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch1_current, dst[i].ch1_current);
+            TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch2_current, dst[i].ch2_current);
+            TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch3_current, dst[i].ch3_current);
+        }
     }
 }
 
@@ -716,47 +719,50 @@ void test_selfDescribing_resolutionSurvivesADifferentReceiver(void)
 /// another's, which is the failure that produces plausible wrong numbers rather than an error.
 void test_selfDescribing_familyMismatchIsRefused(void)
 {
-    meshtastic_PowerMetrics src[12], dst[12];
-    uint32_t ts[12], tsOut[12];
-    makeParallelPowerBatch(src, ts, 12);
-    const void *sp[12];
-    void *dp[12];
-    for (uint8_t i = 0; i < 12; i++) {
-        sp[i] = &src[i];
-        dst[i] = meshtastic_PowerMetrics_init_zero;
-        dp[i] = &dst[i];
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        meshtastic_PowerMetrics src[12], dst[12];
+        uint32_t ts[12], tsOut[12];
+        makeParallelPowerBatch(src, ts, 12);
+        const void *sp[12];
+        void *dp[12];
+        for (uint8_t i = 0; i < 12; i++) {
+            sp[i] = &src[i];
+            dst[i] = meshtastic_PowerMetrics_init_zero;
+            dp[i] = &dst[i];
+        }
+
+        Options send;
+        send.maxTier = tier;
+        send.fixed32IsFloat = true;
+        send.families = kPowerFamilies;
+        send.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
+        send.neverInflate = false;
+
+        uint8_t buf[233];
+        Result r = encode(&meshtastic_PowerMetrics_msg, sp, 12, ts, buf, sizeof(buf), send);
+        TEST_ASSERT_TRUE(r.size > 0);
+
+        // No families at all: refused.
+        Options none;
+        none.fixed32IsFloat = true;
+        TEST_ASSERT_EQUAL(0, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, none));
+
+        // A different grouping of the same tags: also refused, because the channel-major layout the
+        // sender wrote is not the one this receiver would read.
+        static const FieldFamily kOther[] = {
+            {{meshtastic_PowerMetrics_ch1_voltage_tag, meshtastic_PowerMetrics_ch2_voltage_tag, 0, 0}, 2},
+        };
+        Options other;
+        other.fixed32IsFloat = true;
+        other.families = kOther;
+        other.familyCount = 1;
+        TEST_ASSERT_EQUAL(0, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, other));
+
+        // The matching table decodes, so the refusal above is the signature and not a broken batch.
+        TEST_ASSERT_EQUAL(12, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, send));
+        for (uint8_t i = 0; i < 12; i++)
+            TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch2_voltage, dst[i].ch2_voltage);
     }
-
-    Options send;
-    send.fixed32IsFloat = true;
-    send.families = kPowerFamilies;
-    send.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
-    send.neverInflate = false;
-
-    uint8_t buf[233];
-    Result r = encode(&meshtastic_PowerMetrics_msg, sp, 12, ts, buf, sizeof(buf), send);
-    TEST_ASSERT_TRUE(r.size > 0);
-
-    // No families at all: refused.
-    Options none;
-    none.fixed32IsFloat = true;
-    TEST_ASSERT_EQUAL(0, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, none));
-
-    // A different grouping of the same tags: also refused, because the channel-major layout the
-    // sender wrote is not the one this receiver would read.
-    static const FieldFamily kOther[] = {
-        {{meshtastic_PowerMetrics_ch1_voltage_tag, meshtastic_PowerMetrics_ch2_voltage_tag, 0, 0}, 2},
-    };
-    Options other;
-    other.fixed32IsFloat = true;
-    other.families = kOther;
-    other.familyCount = 1;
-    TEST_ASSERT_EQUAL(0, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, other));
-
-    // The matching table decodes, so the refusal above is the signature and not a broken batch.
-    TEST_ASSERT_EQUAL(12, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, send));
-    for (uint8_t i = 0; i < 12; i++)
-        TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch2_voltage, dst[i].ch2_voltage);
 }
 
 // ---------------------------------------------------------------- declared repeats
@@ -773,20 +779,22 @@ void test_repeats_areDeclaredInTheHeader(void)
     for (uint8_t i = 0; i < 12; i++)
         sp[i] = &src[i];
 
-    for (uint8_t rep = 0; rep <= 7; rep++) {
-        Options opt;
-        opt.fixed32IsFloat = true;
-        opt.repeats = rep;
-        opt.neverInflate = false;
-        uint8_t buf[233];
-        Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt);
-        char msg[48];
-        snprintf(msg, sizeof(msg), "repeats %u", rep);
-        TEST_ASSERT_TRUE_MESSAGE(r.size > 0, msg);
-        TEST_ASSERT_EQUAL_UINT8_MESSAGE(rep, peekRepeats(buf, r.size), msg);
-        // The count must not disturb the reading count sharing the byte.
-        TEST_ASSERT_EQUAL_UINT8_MESSAGE(12, peekCount(buf, r.size), msg);
-    }
+    for (uint8_t rep = 0; rep <= 7; rep++)
+        for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+            Options opt;
+            opt.maxTier = tier;
+            opt.fixed32IsFloat = true;
+            opt.repeats = rep;
+            opt.neverInflate = false;
+            uint8_t buf[233];
+            Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt);
+            char msg[48];
+            snprintf(msg, sizeof(msg), "repeats %u", rep);
+            TEST_ASSERT_TRUE_MESSAGE(r.size > 0, msg);
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(rep, peekRepeats(buf, r.size), msg);
+            // The count must not disturb the reading count sharing the byte.
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(12, peekCount(buf, r.size), msg);
+        }
 }
 
 /// The count byte holds n in five bits and the repeat count in three, so both caps must be
