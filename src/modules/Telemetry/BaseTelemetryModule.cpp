@@ -1,5 +1,8 @@
 #include "BaseTelemetryModule.h"
+#include "UptimeClock.h"
+#include "gps/RTC.h"
 #include "mesh/biscuit/Biscuit.h"
+#include "mesh/biscuit/BiscuitModule.h"
 
 #if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
 #include "AirQualityTelemetry.h"
@@ -71,6 +74,7 @@ static __attribute__((noinline)) size_t encodeHistoryBatch(meshtastic_MeshPacket
     return 0;
 }
 
+#if MESHTASTIC_BISCUIT_DIVERT
 /**
  * Re-encode the same readings columnwise. Returns how many fitted, 0 if Biscuit declined -
  * which it does when the result would be no smaller than the protobuf it replaces, so a
@@ -86,8 +90,17 @@ static __attribute__((noinline)) size_t encodeBiscuitBatch(meshtastic_MeshPacket
     if (maxTake > BISCUIT_MAX_BATCH)
         maxTake = BISCUIT_MAX_BATCH;
 
+    // Date the batch. A node with a trustworthy clock converts any reading captured before the
+    // clock arrived, exactly as MeshService::reconcilePendingRxTimes() does for the phone queue -
+    // both stamps are monotonic uptime, so the elapsed term is exact at any age. A node that has
+    // never had a clock sends ages instead, and the receiver dates them against its own.
+    const uint32_t nowEpoch = getValidTime(RTCQualityFromNet);
+    const uint32_t nowUptime = Time::getUptimeSecs();
+    const bool sendAges = (nowEpoch == 0);
+
     biscuit::Options opt;
     opt.fixed32IsFloat = true; // every fixed32 in a telemetry message is a float
+    opt.context = BiscuitModule::makeContext(meshtastic_PortNum_TELEMETRY_HISTORY_APP, variantTagFor<T>(), sendAges);
 
     const void *msgs[BISCUIT_MAX_BATCH];
     uint32_t times[BISCUIT_MAX_BATCH];
@@ -95,7 +108,13 @@ static __attribute__((noinline)) size_t encodeBiscuitBatch(meshtastic_MeshPacket
         for (size_t i = 0; i < take; i++) {
             const BufferedReading<T> &b = history.at(indices[i]);
             msgs[i] = &b.metrics;
-            times[i] = b.time;
+            const uint32_t age = nowUptime - b.uptimeSecs; // monotonic, exact across the wrap
+            if (sendAges)
+                times[i] = age;
+            else if (b.time)
+                times[i] = b.time;
+            else
+                times[i] = (age < nowEpoch) ? nowEpoch - age : 0; // back-date, or leave undated
         }
         biscuit::Result r = biscuit::encode(metricsDescriptor<T>(), msgs, (uint8_t)take, times, p.decoded.payload.bytes,
                                             sizeof(p.decoded.payload.bytes), opt);
@@ -108,6 +127,7 @@ static __attribute__((noinline)) size_t encodeBiscuitBatch(meshtastic_MeshPacket
     }
     return 0;
 }
+#endif // MESHTASTIC_BISCUIT_DIVERT
 
 /**
  * Publish every reading in history not yet marked for target's channel as a single
@@ -156,14 +176,16 @@ bool BaseTelemetryModule::publishBufferedTelemetry(TelemetryHistoryBuffer<T, N> 
     const size_t maxReadingsPerPacket = target == PublishTarget::Mesh ? kMaxReadingsPerMeshPacket : kMaxReadingsPerMqttPacket;
     const size_t want = min((size_t)unpublishedCount, maxReadingsPerPacket);
 
+    size_t take = 0;
+#if MESHTASTIC_BISCUIT_DIVERT
     // Biscuit first; it declines rather than emit a packet larger than the protobuf, and a
     // decline leaves the payload untouched for the fallback below.
-    size_t take = encodeBiscuitBatch(*p, history, indices, want);
-    if (take) {
+    take = encodeBiscuitBatch(*p, history, indices, want);
+    if (take)
         p->decoded.portnum = meshtastic_PortNum_BISCUIT_APP;
-    } else {
+#endif
+    if (!take)
         take = encodeHistoryBatch(*p, history, indices, want);
-    }
 
     if (take == 0) {
         packetPool.release(p);

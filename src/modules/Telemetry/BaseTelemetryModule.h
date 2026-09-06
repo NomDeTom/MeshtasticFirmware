@@ -6,9 +6,25 @@
 #include "configuration.h"
 #include "mesh/MeshService.h"
 #include "mesh/MeshTypes.h"
+#include "mesh/biscuit/Biscuit.h"
 #include "mesh/generated/meshtastic/telemetry.pb.h"
 #include "mqtt/MQTT.h"
 #include "sleep.h"
+
+// Divert buffered telemetry through Biscuit instead of sending a TelemetryRecordHistory.
+// Separate from MESHTASTIC_BISCUIT_ENABLED so the codec can be built and tested without any
+// node emitting a format the network cannot yet read. Off until a receiver is deployed.
+#ifndef MESHTASTIC_BISCUIT_DIVERT
+#ifdef USERPREFS_BISCUIT_DIVERT
+#define MESHTASTIC_BISCUIT_DIVERT USERPREFS_BISCUIT_DIVERT
+#else
+#define MESHTASTIC_BISCUIT_DIVERT 0
+#endif
+#endif
+
+#if MESHTASTIC_BISCUIT_DIVERT && !MESHTASTIC_BISCUIT_ENABLED
+#error "MESHTASTIC_BISCUIT_DIVERT needs MESHTASTIC_BISCUIT_ENABLED"
+#endif
 
 // Hold a batch until this many readings are pending, then flush. 0 publishes at every
 // opportunity, which is the pre-Biscuit behaviour. Six is the floor at which batching pays:

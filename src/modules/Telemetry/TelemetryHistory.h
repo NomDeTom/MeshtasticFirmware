@@ -2,6 +2,7 @@
 
 #if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR || !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
 
+#include "UptimeClock.h"
 #include "mesh/generated/meshtastic/telemetry.pb.h"
 
 enum TelemetryPublishChannel : uint8_t {
@@ -12,6 +13,11 @@ enum TelemetryPublishChannel : uint8_t {
 template <typename T> struct BufferedReading {
     T metrics;
     uint32_t time = 0;         // seconds since 1970 (or 0/unset)
+    uint32_t uptimeSecs = 0;   // Time::getUptimeSecs() at capture. Dates a reading taken before the
+                               // clock was trustworthy: age = now - this, which the receiver turns
+                               // back into an epoch against its own clock. Monotonic, so the
+                               // subtraction is exact across the millis() wrap. Valid only within
+                               // one boot - readings from before a reboot are not recoverable.
     uint32_t deltaSecs = 0;    // seconds since the previous reading was captured (monotonic-based);
                                // only meaningful when time is unset and hasDelta is true
     bool hasDelta = false;     // false for the very first reading ever pushed - no predecessor to diff against
@@ -34,6 +40,7 @@ template <typename T, uint8_t N> class TelemetryHistoryBuffer
         uint8_t writeIdx = (head + count) % N;
         readings[writeIdx].metrics = reading;
         readings[writeIdx].time = time;
+        readings[writeIdx].uptimeSecs = Time::getUptimeSecs();
 
         readings[writeIdx].deltaSecs = hasPrevious ? (nowMs - lastCaptureMs) / 1000 : 0;
         readings[writeIdx].hasDelta = hasPrevious;
@@ -81,6 +88,22 @@ template <> inline const pb_msgdesc_t *metricsDescriptor<meshtastic_PowerMetrics
 template <> inline const pb_msgdesc_t *metricsDescriptor<meshtastic_AirQualityMetrics>()
 {
     return &meshtastic_AirQualityMetrics_msg;
+}
+
+// The TelemetryRecord oneof tag for each buffered type, so a Biscuit batch records what it
+// holds and a receiver can rebuild the record the sender would otherwise have sent.
+template <typename T> constexpr uint8_t variantTagFor();
+template <> constexpr uint8_t variantTagFor<meshtastic_EnvironmentMetrics>()
+{
+    return meshtastic_TelemetryRecord_environment_metrics_tag;
+}
+template <> constexpr uint8_t variantTagFor<meshtastic_PowerMetrics>()
+{
+    return meshtastic_TelemetryRecord_power_metrics_tag;
+}
+template <> constexpr uint8_t variantTagFor<meshtastic_AirQualityMetrics>()
+{
+    return meshtastic_TelemetryRecord_air_quality_metrics_tag;
 }
 
 // time/deltaSecs are only meaningful together with the metrics they were captured with
