@@ -19,6 +19,16 @@
  *   4 + fixed-width bit packing        needs the bit codec
  */
 
+// Master gate. 0 compiles the codec out entirely - no encoder, no decoder, no module - so
+// the flash and RAM it costs can be measured against a build without it.
+#ifndef MESHTASTIC_BISCUIT_ENABLED
+#ifdef USERPREFS_BISCUIT_ENABLED
+#define MESHTASTIC_BISCUIT_ENABLED USERPREFS_BISCUIT_ENABLED
+#else
+#define MESHTASTIC_BISCUIT_ENABLED 0
+#endif
+#endif
+
 #ifndef BISCUIT_MAX_TIER
 #define BISCUIT_MAX_TIER 4
 #endif
@@ -65,6 +75,11 @@ struct Options {
     /// Multiplier used to make a float an integer when no per-tag hint overrides it.
     /// 10000 keeps four decimals, which is finer than any telemetry sensor resolves.
     uint16_t floatScale = 10000;
+    /// Opaque word carried verbatim in the payload and handed back by decode(). The codec
+    /// gives it no meaning; callers use it to record what the batch was, so a receiver can
+    /// rebuild the original packet. BaseTelemetryModule packs the source portnum and the
+    /// TelemetryRecord variant tag into it.
+    uint32_t context = 0;
 };
 
 struct Result {
@@ -73,6 +88,7 @@ struct Result {
     uint8_t tier = 0;      ///< tier actually used
     bool lossless = true;  ///< false if any column carried a resolution shift
     uint32_t worstErr = 0; ///< largest absolute error introduced, in scaled units
+    uint32_t context = 0;  ///< the caller's context word, echoed back by decode()
 };
 
 /**
@@ -87,7 +103,11 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
  * messages of the same type. Returns the number of messages written, 0 on failure.
  */
 uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *const *msgs, uint8_t maxN, uint32_t *times,
-               const Options &opt = Options());
+               const Options &opt = Options(), uint32_t *contextOut = nullptr);
+
+/// The context word without decoding the body, so a receiver can route on it first.
+/// Returns false if the header is not ours.
+bool peekContext(const uint8_t *in, size_t len, uint32_t *contextOut);
 
 /**
  * Readings to retire after publishing `take` of them, leaving up to `overlap` to ride again in

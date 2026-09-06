@@ -1,4 +1,7 @@
 #include "Biscuit.h"
+
+#if MESHTASTIC_BISCUIT_ENABLED
+
 #include "pb_common.h"
 #include "pb_encode.h"
 #include <string.h>
@@ -306,6 +309,9 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
         return r;
     out[at++] = (uint8_t)((VERSION << 4) | tier);
     out[at++] = n;
+    at = putVarint(out, cap, at, opt.context);
+    if (at == SIZE_MAX)
+        return r;
     at = putVarint(out, cap, at, times[0]);
     if (at == SIZE_MAX)
         return r;
@@ -420,13 +426,14 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
     }
     r.size = at;
     r.tier = tier;
+    r.context = opt.context;
     return r;
 }
 
 // ---------------------------------------------------------------- decode
 
 uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *const *msgs, uint8_t maxN, uint32_t *times,
-               const Options &opt)
+               const Options &opt, uint32_t *contextOut)
 {
     if (!desc || !in || !msgs || !times || len < 4)
         return 0;
@@ -438,6 +445,12 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
         return 0;
 
     size_t at = 2;
+    uint64_t ctx;
+    at = getVarint(in, len, at, &ctx);
+    if (at == SIZE_MAX)
+        return 0;
+    if (contextOut)
+        *contextOut = (uint32_t)ctx;
     uint64_t t0;
     at = getVarint(in, len, at, &t0);
     if (at == SIZE_MAX)
@@ -566,6 +579,18 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
     return n;
 }
 
+bool peekContext(const uint8_t *in, size_t len, uint32_t *contextOut)
+{
+    if (!in || len < 3 || (in[0] >> 4) != VERSION)
+        return false;
+    uint64_t ctx;
+    if (getVarint(in, len, 2, &ctx) == SIZE_MAX)
+        return false;
+    if (contextOut)
+        *contextOut = (uint32_t)ctx;
+    return true;
+}
+
 uint8_t peekCount(const uint8_t *in, size_t len)
 {
     return (in && len >= 2 && (in[0] >> 4) == VERSION) ? in[1] : 0;
@@ -576,3 +601,5 @@ uint8_t peekTier(const uint8_t *in, size_t len)
 }
 
 } // namespace biscuit
+
+#endif // MESHTASTIC_BISCUIT_ENABLED
