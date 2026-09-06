@@ -1,4 +1,6 @@
 #include "BaseTelemetryModule.h"
+#include "DeviceTelemetry.h"
+#include "EnvironmentTelemetry.h"
 #include "PowerTelemetry.h"
 #include "UptimeClock.h"
 #include "gps/RTC.h"
@@ -56,23 +58,33 @@ template <typename T, uint8_t N>
 static __attribute__((noinline)) size_t encodeHistoryBatch(meshtastic_MeshPacket &p, const TelemetryHistoryBuffer<T, N> &history,
                                                            const uint8_t *indices, size_t maxTake)
 {
-    size_t take = maxTake;
-    while (take > 0) {
-        meshtastic_TelemetryRecordHistory recordHistory = meshtastic_TelemetryRecordHistory_init_zero;
+    // Nothing to fall back to for a type the record cannot hold; the caller then keeps its
+    // single-reading path rather than publishing a batch it has no format for.
+    if constexpr (!recordCarries<T>()) {
+        (void)p;
+        (void)history;
+        (void)indices;
+        (void)maxTake;
+        return 0;
+    } else {
+        size_t take = maxTake;
+        while (take > 0) {
+            meshtastic_TelemetryRecordHistory recordHistory = meshtastic_TelemetryRecordHistory_init_zero;
 
-        recordHistory.readings_count = take;
+            recordHistory.readings_count = take;
 
-        for (size_t i = 0; i < take; i++) {
-            assignTelemetryRecord(recordHistory.readings[i], history.at(indices[i]));
+            for (size_t i = 0; i < take; i++) {
+                assignTelemetryRecord(recordHistory.readings[i], history.at(indices[i]));
+            }
+
+            p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes),
+                                                        &meshtastic_TelemetryRecordHistory_msg, &recordHistory);
+            if (p.decoded.payload.size > 0)
+                return take;
+            take--;
         }
-
-        p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes),
-                                                    &meshtastic_TelemetryRecordHistory_msg, &recordHistory);
-        if (p.decoded.payload.size > 0)
-            return take;
-        take--;
+        return 0;
     }
-    return 0;
 }
 
 #if MESHTASTIC_BISCUIT_DIVERT
@@ -101,11 +113,10 @@ static __attribute__((noinline)) size_t encodeBiscuitBatch(meshtastic_MeshPacket
 
     biscuit::Options opt;
     opt.fixed32IsFloat = true; // every fixed32 in a telemetry message is a float
-    // The stamp is only as good as the clock that made it, so say which one that was.
-    uint8_t timeQ = (uint8_t)(getRTCQuality() & BiscuitModule::TIMEQ_TIER_MASK);
-    if (sendAges)
-        timeQ |= BiscuitModule::TIMEQ_UPTIME_BASED;
-    opt.context = BiscuitModule::makeContext(meshtastic_PortNum_TELEMETRY_HISTORY_APP, variantTagFor<T>(), timeQ);
+    // The stamp is only as good as the clock that made it, so say which one that was, and
+    // declare the quantum so a receiver need not be configured to match us.
+    const uint32_t flags = sendAges ? (uint32_t)BiscuitModule::CTX_UPTIME_BASED : 0u;
+    opt.context = BiscuitModule::makeContext(variantTagFor<T>(), (uint8_t)getRTCQuality(), flags, opt.timeRes);
 
     const void *msgs[BISCUIT_MAX_BATCH];
     uint32_t times[BISCUIT_MAX_BATCH];
@@ -162,9 +173,13 @@ bool BaseTelemetryModule::publishBufferedTelemetry(TelemetryHistoryBuffer<T, N> 
         return false;
 
     // Hold the batch until enough readings accumulate. Below ~6 the column framing costs more
-    // than the tags it removes, so flushing early spends airtime to save nothing.
-    if (MESHTASTIC_BISCUIT_FLUSH_COUNT && unpublishedCount < MESHTASTIC_BISCUIT_FLUSH_COUNT &&
-        unpublishedCount < history.size()) {
+    // than the tags it removes, so flushing early spends airtime to save nothing. A full buffer
+    // publishes regardless, or the oldest reading is overwritten before it is ever sent.
+    //
+    // The second test was `unpublishedCount < history.size()`, which is false whenever every
+    // reading is unpublished - a fresh buffer, and every buffer just after a publish - so the
+    // hold was unreachable and the flush threshold never held anything.
+    if (MESHTASTIC_BISCUIT_FLUSH_COUNT && unpublishedCount < MESHTASTIC_BISCUIT_FLUSH_COUNT && !history.isFull()) {
         LOG_DEBUG("Holding %u/%u buffered readings until %u", (unsigned)unpublishedCount, (unsigned)history.size(),
                   (unsigned)MESHTASTIC_BISCUIT_FLUSH_COUNT);
         return false;
@@ -247,4 +262,12 @@ template bool BaseTelemetryModule::publishBufferedTelemetry<meshtastic_AirQualit
 #if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_POWER_TELEMETRY
 template bool BaseTelemetryModule::publishBufferedTelemetry<meshtastic_PowerMetrics, POWER_TELEMETRY_HISTORY_SIZE>(
     TelemetryHistoryBuffer<meshtastic_PowerMetrics, POWER_TELEMETRY_HISTORY_SIZE> &, PublishTarget);
+#endif
+#if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+template bool BaseTelemetryModule::publishBufferedTelemetry<meshtastic_EnvironmentMetrics, ENVIRONMENT_TELEMETRY_HISTORY_SIZE>(
+    TelemetryHistoryBuffer<meshtastic_EnvironmentMetrics, ENVIRONMENT_TELEMETRY_HISTORY_SIZE> &, PublishTarget);
+#endif
+#if HAS_TELEMETRY
+template bool BaseTelemetryModule::publishBufferedTelemetry<meshtastic_DeviceMetrics, DEVICE_TELEMETRY_HISTORY_SIZE>(
+    TelemetryHistoryBuffer<meshtastic_DeviceMetrics, DEVICE_TELEMETRY_HISTORY_SIZE> &, PublishTarget);
 #endif

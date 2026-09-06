@@ -1,6 +1,7 @@
 #pragma once
 
-#if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR || !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
+// No sensor gate: DeviceMetrics and PowerMetrics accumulate here too, and neither depends
+// on a sensor being compiled in.
 
 #include "UptimeClock.h"
 #include "mesh/biscuit/BiscuitVariants.h"
@@ -56,6 +57,9 @@ template <typename T, uint8_t N> class TelemetryHistoryBuffer
 
     uint8_t size() const { return count; }
     bool isEmpty() const { return count == 0; }
+    /// Full means the next push overwrites the oldest reading, which is the only reason to
+    /// publish before the flush threshold is reached.
+    bool isFull() const { return count >= N; }
 
     const BufferedReading<T> &at(uint8_t i) const { return readings[(head + i) % N]; } // oldest-first
 
@@ -75,6 +79,25 @@ template <typename T, uint8_t N> class TelemetryHistoryBuffer
     }
 };
 
+// Which types TelemetryRecord's oneof can actually carry. It holds three of the eight, so a
+// DeviceMetrics batch has no fallback format at all - it is Biscuit or the single-reading path.
+// Without this the fallback fails to compile for those types rather than declining at runtime.
+template <typename T> constexpr bool recordCarries()
+{
+    return false;
+}
+template <> constexpr bool recordCarries<meshtastic_EnvironmentMetrics>()
+{
+    return true;
+}
+template <> constexpr bool recordCarries<meshtastic_PowerMetrics>()
+{
+    return true;
+}
+template <> constexpr bool recordCarries<meshtastic_AirQualityMetrics>()
+{
+    return true;
+}
 // time/deltaSecs are only meaningful together with the metrics they were captured with
 template <typename T> inline void assignTelemetryRecordTimeInfo(meshtastic_TelemetryRecord &r, const BufferedReading<T> &reading)
 {
@@ -105,4 +128,3 @@ inline void assignTelemetryRecord(meshtastic_TelemetryRecord &r, const BufferedR
     r.telemetry_variant.air_quality_metrics = reading.metrics;
     assignTelemetryRecordTimeInfo(r, reading);
 }
-#endif

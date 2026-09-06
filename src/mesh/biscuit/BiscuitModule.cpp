@@ -28,22 +28,25 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
         return ProcessMessage::STOP;
     }
 
-    const uint8_t variantTag = context & 0xFF;
+    const uint8_t variantTag = variantOf(context);
     // A sender with no clock sends ages; date them against ours. Without a clock of our own we
     // cannot, so the readings go on undated rather than carrying a fabricated epoch.
-    const uint8_t senderQ = timeQualityOf(context);
-    const bool agesNotEpochs = (senderQ & TIMEQ_UPTIME_BASED) != 0;
+    const bool agesNotEpochs = (context & CTX_UPTIME_BASED) != 0;
     const uint32_t nowEpoch = agesNotEpochs ? getValidTime(RTCQualityFromNet) : 0;
-    // What the readings end up dated by: our clock and our tier where we applied it, the
-    // sender's where we did not. RECEIVER_APPLIED plus a GPS tier is a different and more
-    // useful statement than either half alone.
-    const uint8_t appliedQ =
-        (agesNotEpochs && nowEpoch) ? (uint8_t)((getRTCQuality() & TIMEQ_TIER_MASK) | TIMEQ_RECEIVER_APPLIED) : senderQ;
+    // What the readings end up dated by: our tier plus RECEIVER_APPLIED where we applied it,
+    // the sender's where we did not. That pairing says something neither half says alone.
+    const uint32_t appliedQ =
+        (agesNotEpochs && nowEpoch)
+            ? (uint32_t)(((uint32_t)(getRTCQuality() & CTX_TIER_MASK) << CTX_TIER_SHIFT) | CTX_RECEIVER_APPLIED)
+            : (context & ~(uint32_t)CTX_VARIANT_MASK);
     uint32_t times[BISCUIT_MAX_BATCH];
     uint8_t n = 0;
 
     biscuit::Options opt;
     opt.fixed32IsFloat = true;
+    // The quantum is the sender's, read off the wire - not ours. Deriving it from our own
+    // configuration would rebuild every stamp wrong by that factor, and silently.
+    opt.timeRes = quantumOf(context);
 
     // One stack buffer for the variant actually present, rather than a union of all of them.
     // Value-initialised rather than assigned TYPE##_init_zero, because HostMetrics ends in a
@@ -77,7 +80,7 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
     if (!n)
         LOG_WARN("Biscuit: 0x%08x decoded to nothing", mp.id);
     else
-        LOG_INFO("Biscuit: %u readings from 0x%08x delivered to phone, time quality 0x%02x", n, mp.id, appliedQ);
+        LOG_INFO("Biscuit: %u readings from 0x%08x delivered to phone, time quality 0x%04x", n, mp.id, (unsigned)appliedQ);
 
     return ProcessMessage::STOP;
 }
