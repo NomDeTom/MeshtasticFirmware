@@ -1,4 +1,5 @@
 #include "BaseTelemetryModule.h"
+#include "PowerTelemetry.h"
 #include "UptimeClock.h"
 #include "gps/RTC.h"
 #include "mesh/biscuit/Biscuit.h"
@@ -238,4 +239,8 @@ bool BaseTelemetryModule::publishBufferedTelemetry(TelemetryHistoryBuffer<T, N> 
 #if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_AIR_QUALITY_SENSOR
 template bool BaseTelemetryModule::publishBufferedTelemetry<meshtastic_AirQualityMetrics, AIR_QUALITY_TELEMETRY_HISTORY_SIZE>(
     TelemetryHistoryBuffer<meshtastic_AirQualityMetrics, AIR_QUALITY_TELEMETRY_HISTORY_SIZE> &, PublishTarget);
+#endif
+#if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_POWER_TELEMETRY
+template bool BaseTelemetryModule::publishBufferedTelemetry<meshtastic_PowerMetrics, POWER_TELEMETRY_HISTORY_SIZE>(
+    TelemetryHistoryBuffer<meshtastic_PowerMetrics, POWER_TELEMETRY_HISTORY_SIZE> &, PublishTarget);
 #endif

@@ -8,8 +8,14 @@
 #include "BaseTelemetryModule.h"
 #include "NodeDB.h"
 #include "ProtobufModule.h"
+#include "TelemetryHistory.h"
 #include <OLEDDisplay.h>
 #include <OLEDDisplayUi.h>
+
+// Readings held for batched publishing; a board with RAM to spare can raise it in variant.h.
+#ifndef POWER_TELEMETRY_HISTORY_SIZE
+#define POWER_TELEMETRY_HISTORY_SIZE 16
+#endif
 
 class PowerTelemetryModule : private concurrency::OSThread,
                              public BaseTelemetryModule,
@@ -56,6 +62,9 @@ class PowerTelemetryModule : private concurrency::OSThread,
     uint32_t sendToPhoneIntervalMs = SECONDS_IN_MINUTE * 1000; // Send to phone every minute
     uint32_t lastSentToPhone = 0;
     uint32_t sensor_read_error_count = 0;
+
+    // Telemetry record history, shared by the mesh and mqtt publish paths
+    TelemetryHistoryBuffer<meshtastic_PowerMetrics, POWER_TELEMETRY_HISTORY_SIZE> history;
 };
 
 #endif

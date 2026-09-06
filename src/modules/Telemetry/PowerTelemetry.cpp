@@ -97,8 +97,14 @@ int32_t PowerTelemetryModule::runOnce()
         uint32_t lastTelemetry = transmitHistory ? transmitHistory->getLastSentToMeshMillis(TX_HISTORY_KEY_POWER_TELEMETRY) : 0;
         if (((lastTelemetry == 0) || !Throttle::isWithinTimespanMs(lastTelemetry, sendToMeshIntervalMs)) &&
             airTime->isTxAllowedAirUtil()) {
-            sendTelemetry();
-            if (transmitHistory)
+            // A SENSOR node publishes the accumulated batch; every other role sends the latest
+            // reading as before. Mirrors AirQualityTelemetryModule.
+            bool sent;
+            if (config.device.role == meshtastic_Config_DeviceConfig_Role_SENSOR && !history.isEmpty())
+                sent = publishBufferedTelemetry(history, PublishTarget::Mesh);
+            else
+                sent = sendTelemetry();
+            if (transmitHistory && sent)
                 transmitHistory->setLastSentToMesh(TX_HISTORY_KEY_POWER_TELEMETRY);
         } else if (((lastSentToPhone == 0) || !Throttle::isWithinTimespanMs(lastSentToPhone, sendToPhoneIntervalMs)) &&
                    (service->isToPhoneQueueEmpty())) {
@@ -283,6 +289,10 @@ bool PowerTelemetryModule::sendTelemetry(NodeNum dest, bool phoneOnly)
         }
 
         sensor_read_error_count = 0;
+
+        // Accumulate for batched publishing. getValidTime() is 0 without a trustworthy clock, so
+        // push() stamps uptime alongside and the reading can still be dated.
+        history.push(m.variant.power_metrics, getValidTime(RTCQualityDevice));
 
         meshtastic_MeshPacket *p = allocDataProtobuf(m);
         if (!p) {
