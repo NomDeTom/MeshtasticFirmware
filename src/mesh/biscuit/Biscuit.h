@@ -62,6 +62,13 @@ struct FieldHint {
     uint16_t scale;  ///< float -> integer multiplier, e.g. 1000 for millivolts. 0 = 10000.
 };
 
+/// Tags that are parallel instances of one measurement - PowerMetrics' ch1/ch2/ch3 voltage.
+/// Stacked into one column so per-column framing is paid once, not once per channel.
+struct FieldFamily {
+    uint8_t tags[4];
+    uint8_t count;
+};
+
 struct Options {
     uint8_t maxTier = BISCUIT_MAX_TIER; ///< cap the tier below what is compiled in
     const FieldHint *hints = nullptr;
@@ -75,6 +82,10 @@ struct Options {
     /// Multiplier used to make a float an integer when no per-tag hint overrides it.
     /// 10000 keeps four decimals, which is finer than any telemetry sensor resolves.
     uint16_t floatScale = 10000;
+    /// Families to stack, laid out channel-major so each channel's samples stay contiguous
+    /// and delta encoding still sees a time series rather than channel-to-channel jumps.
+    const FieldFamily *families = nullptr;
+    uint8_t familyCount = 0;
     /// Opaque word carried verbatim in the payload and handed back by decode(). The codec
     /// gives it no meaning; callers use it to record what the batch was, so a receiver can
     /// rebuild the original packet. BaseTelemetryModule packs the source portnum and the
