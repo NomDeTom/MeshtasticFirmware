@@ -362,10 +362,11 @@ void test_realCorpusData_sizesAreStable(void)
     snprintf(msg, sizeof(msg), "sizes t1..t%u = %u %u %u %u (baseline %u)", BISCUIT_MAX_TIER, got[1], got[2], got[3],
              BISCUIT_MAX_TIER >= 4 ? got[4] : 0u, (unsigned)baseline);
     // Measured on the fixture above, not predicted. Update deliberately if the format changes -
-    // adding the context word moved every tier by exactly one byte, which this caught, and
-    // stacking the tier-4 bit area took it from 113 to 102. T3 equals T2 here because this test
-    // passes no resolution hints; test_realCorpusData_meetsTierModelSavings is the one that does.
-    static const uint32_t expect[] = {143, 128, 128, 102};
+    // adding the context word moved every tier by one byte, which this caught; stacking the
+    // tier-4 bit area took it from 113 to 102; the profile byte costs one at every tier and the
+    // tier-4 resolution mask one more. T3 equals T2 here because this test passes no resolution
+    // hints; test_realCorpusData_meetsTierModelSavings is the one that does.
+    static const uint32_t expect[] = {144, 129, 129, 104};
     for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++)
         TEST_ASSERT_EQUAL_UINT32_MESSAGE(expect[tier - 1], got[tier], msg);
 }
@@ -641,6 +642,171 @@ void test_families_missingChannelDoesNotCorruptTheBatch(void)
         TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch3_current, dst[i].ch3_current);
     }
 }
+
+// ---------------------------------------------------------------- self-describing wire
+
+// Nothing the receiver needs may be read from the receiver's own configuration. That invariant
+// was broken three times: the time quantum, the tier-4 resolution shift, and the family table.
+// Each failed the same way - both ends agreed in-process, so every existing test passed, and a
+// real pair of nodes configured differently would have swapped silently wrong numbers. These
+// tests encode with one Options and decode with a deliberately different one.
+
+/// A resolution shift is on the wire at every tier, so a receiver holding no hints at all still
+/// reconstructs what the sender sent. Tiers 1-3 carry it in the column code byte; tier 4 has no
+/// column header and used to derive it from the receiver's hints.
+void test_selfDescribing_resolutionSurvivesADifferentReceiver(void)
+{
+    static const FieldHint kCoarse[] = {
+        {2, true, 4, 1000}, // voltage, quantised to 16 mV
+        {3, true, 3, 100},  // channel_utilization
+    };
+
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        meshtastic_DeviceMetrics src[12], dst[12];
+        uint32_t ts[12], tsOut[12];
+        makeRealBatch(src, ts, 12);
+        const void *sp[12];
+        void *dp[12];
+        for (uint8_t i = 0; i < 12; i++) {
+            sp[i] = &src[i];
+            dst[i] = meshtastic_DeviceMetrics_init_zero;
+            dp[i] = &dst[i];
+        }
+
+        Options send;
+        send.maxTier = tier;
+        send.fixed32IsFloat = true;
+        send.hints = kCoarse;
+        send.hintCount = sizeof(kCoarse) / sizeof(kCoarse[0]);
+        send.neverInflate = false;
+
+        // The receiver agrees on how a float becomes an integer - the profile byte guarantees
+        // that or the batch is refused - but knows nothing of the sender's chosen resolution.
+        // That is the part which must come off the wire.
+        static const FieldHint kSameScalesNoShift[] = {
+            {2, true, 0, 1000},
+            {3, true, 0, 100},
+        };
+        Options recv;
+        recv.maxTier = tier;
+        recv.fixed32IsFloat = true;
+        recv.hints = kSameScalesNoShift;
+        recv.hintCount = sizeof(kSameScalesNoShift) / sizeof(kSameScalesNoShift[0]);
+
+        uint8_t buf[233];
+        Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), send);
+        char msg[64];
+        snprintf(msg, sizeof(msg), "tier %u", tier);
+        TEST_ASSERT_TRUE_MESSAGE(r.size > 0, msg);
+        TEST_ASSERT_EQUAL_MESSAGE(12, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 12, tsOut, recv), msg);
+
+        for (uint8_t i = 0; i < 12; i++) {
+            // Within the quantum the sender chose, not the receiver's idea of one. Tier 3 is
+            // where the shift starts applying; below it the values are exact.
+            const float tol = (tier >= TIER_RESOLUTION) ? 0.020f : 0.0002f;
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(tol, src[i].voltage, dst[i].voltage, msg);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(src[i].battery_level, dst[i].battery_level, msg);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(ts[i], tsOut[i], msg);
+        }
+    }
+}
+
+/// A family table cannot be sent cheaply, so the profile byte stands for it instead. A receiver
+/// with a different table - or none - must refuse rather than read one channel's samples as
+/// another's, which is the failure that produces plausible wrong numbers rather than an error.
+void test_selfDescribing_familyMismatchIsRefused(void)
+{
+    meshtastic_PowerMetrics src[12], dst[12];
+    uint32_t ts[12], tsOut[12];
+    makeParallelPowerBatch(src, ts, 12);
+    const void *sp[12];
+    void *dp[12];
+    for (uint8_t i = 0; i < 12; i++) {
+        sp[i] = &src[i];
+        dst[i] = meshtastic_PowerMetrics_init_zero;
+        dp[i] = &dst[i];
+    }
+
+    Options send;
+    send.fixed32IsFloat = true;
+    send.families = kPowerFamilies;
+    send.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
+    send.neverInflate = false;
+
+    uint8_t buf[233];
+    Result r = encode(&meshtastic_PowerMetrics_msg, sp, 12, ts, buf, sizeof(buf), send);
+    TEST_ASSERT_TRUE(r.size > 0);
+
+    // No families at all: refused.
+    Options none;
+    none.fixed32IsFloat = true;
+    TEST_ASSERT_EQUAL(0, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, none));
+
+    // A different grouping of the same tags: also refused, because the channel-major layout the
+    // sender wrote is not the one this receiver would read.
+    static const FieldFamily kOther[] = {
+        {{meshtastic_PowerMetrics_ch1_voltage_tag, meshtastic_PowerMetrics_ch2_voltage_tag, 0, 0}, 2},
+    };
+    Options other;
+    other.fixed32IsFloat = true;
+    other.families = kOther;
+    other.familyCount = 1;
+    TEST_ASSERT_EQUAL(0, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, other));
+
+    // The matching table decodes, so the refusal above is the signature and not a broken batch.
+    TEST_ASSERT_EQUAL(12, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, send));
+    for (uint8_t i = 0; i < 12; i++)
+        TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch2_voltage, dst[i].ch2_voltage);
+}
+
+// ---------------------------------------------------------------- declared repeats
+
+/// Overlap repeats the oldest readings of each batch by design. The count rides in the top
+/// three bits of the count byte, which cost nothing - n needs only five - so a receiver knows
+/// which readings are deliberate repeats without a dedup table or a clock.
+void test_repeats_areDeclaredInTheHeader(void)
+{
+    meshtastic_DeviceMetrics src[12];
+    uint32_t ts[12];
+    makeRealBatch(src, ts, 12);
+    const void *sp[12];
+    for (uint8_t i = 0; i < 12; i++)
+        sp[i] = &src[i];
+
+    for (uint8_t rep = 0; rep <= 7; rep++) {
+        Options opt;
+        opt.fixed32IsFloat = true;
+        opt.repeats = rep;
+        opt.neverInflate = false;
+        uint8_t buf[233];
+        Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt);
+        char msg[48];
+        snprintf(msg, sizeof(msg), "repeats %u", rep);
+        TEST_ASSERT_TRUE_MESSAGE(r.size > 0, msg);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(rep, peekRepeats(buf, r.size), msg);
+        // The count must not disturb the reading count sharing the byte.
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(12, peekCount(buf, r.size), msg);
+    }
+}
+
+/// The count byte holds n in five bits and the repeat count in three, so both caps must be
+/// enforced rather than silently truncating into each other.
+void test_repeats_beyondTheFieldAreRefused(void)
+{
+    meshtastic_DeviceMetrics src[8];
+    uint32_t ts[8];
+    makeRealBatch(src, ts, 8);
+    const void *sp[8];
+    for (uint8_t i = 0; i < 8; i++)
+        sp[i] = &src[i];
+
+    Options opt;
+    opt.fixed32IsFloat = true;
+    opt.repeats = 8; // one past what three bits can say
+    opt.neverInflate = false;
+    uint8_t buf[233];
+    TEST_ASSERT_EQUAL(0, encode(&meshtastic_DeviceMetrics_msg, sp, 8, ts, buf, sizeof(buf), opt).size);
+}
 // ---------------------------------------------------------------- RTC-less: ages, not epochs
 
 // A node that has never had a clock sends each reading's age in seconds instead of an epoch,
@@ -807,6 +973,10 @@ void setup()
     RUN_TEST(test_families_everyChannelRoundTripsToItsOwnTag);
     RUN_TEST(test_families_areSmallerThanSeparateColumns);
     RUN_TEST(test_families_missingChannelDoesNotCorruptTheBatch);
+    RUN_TEST(test_selfDescribing_resolutionSurvivesADifferentReceiver);
+    RUN_TEST(test_selfDescribing_familyMismatchIsRefused);
+    RUN_TEST(test_repeats_areDeclaredInTheHeader);
+    RUN_TEST(test_repeats_beyondTheFieldAreRefused);
     RUN_TEST(test_uptimeAges_decreasingTimestampsRoundTrip);
     RUN_TEST(test_uptimeAges_datedAgainstReceiverClockMatchOriginals);
     RUN_TEST(test_uptimeAges_allZeroGapsRoundTrip);

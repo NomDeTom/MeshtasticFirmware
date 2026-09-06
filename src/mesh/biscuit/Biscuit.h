@@ -76,6 +76,10 @@ struct Options {
     /// Refuse to emit when the result would be no smaller than the protobuf it replaces.
     /// A batch of one, or of very wide messages, can encode larger; the caller sends plain.
     bool neverInflate = true;
+    /// Leading readings that repeat the previous batch, when the caller keeps an overlap tail.
+    /// Declared on the wire so a receiver can recognise deliberate repeats without a clock or a
+    /// dedup table; it is the count, not a flag, because the repeats are always the oldest N.
+    uint8_t repeats = 0;
     /// Treat every PB_LTYPE_FIXED32 field as a float. True for all telemetry messages, where
     /// no fixed32 carries anything else - avoids a per-tag table for every metrics type.
     bool fixed32IsFloat = false;
@@ -141,5 +145,9 @@ uint8_t peekCount(const uint8_t *in, size_t len);
 
 /// Tier used, without decoding. 0 if the header is not ours.
 uint8_t peekTier(const uint8_t *in, size_t len);
+
+/// Leading readings this batch repeats from the sender's previous one. 0 if the header is not
+/// ours or the sender declared no overlap.
+uint8_t peekRepeats(const uint8_t *in, size_t len);
 
 } // namespace biscuit

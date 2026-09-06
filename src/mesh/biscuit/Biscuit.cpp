@@ -335,6 +335,35 @@ int64_t timeQuantum(const Options &opt, uint8_t tier)
 {
     return (tier >= TIER_RESOLUTION && opt.timeRes > 1) ? (int64_t)opt.timeRes : 1;
 }
+
+static_assert(BISCUIT_MAX_TIER <= 7, "the tier must fit in three bits of the header byte");
+static_assert(BISCUIT_MAX_BATCH <= 31, "n must fit in five bits, the top three holding repeats");
+
+/// One byte standing for everything the receiver must know that is NOT on the wire: the family
+/// table and how each field's float becomes an integer. Two ends that disagree then fail rather
+/// than swapping plausible wrong numbers - a scale mismatch silently moves a decimal point.
+///
+/// resLog2 is deliberately excluded. It is a user resolution choice that varies per batch and
+/// travels in the packet, so a receiver with different resolution settings must still decode.
+uint8_t profileSignature(const Options &opt)
+{
+    uint8_t sig = (uint8_t)(opt.fixed32IsFloat ? 0xA5 : 0x5A);
+    sig = (uint8_t)(sig * 31u + (opt.floatScale & 0xFF));
+    sig = (uint8_t)(sig * 31u + (opt.floatScale >> 8));
+    for (uint8_t i = 0; i < opt.hintCount; i++) {
+        sig = (uint8_t)(sig * 31u + opt.hints[i].tag);
+        sig = (uint8_t)(sig * 31u + (opt.hints[i].isFloat ? 1u : 0u));
+        sig = (uint8_t)(sig * 31u + (opt.hints[i].scale & 0xFF));
+        sig = (uint8_t)(sig * 31u + (opt.hints[i].scale >> 8));
+    }
+    sig = (uint8_t)(sig * 31u + opt.familyCount);
+    for (uint8_t i = 0; i < opt.familyCount; i++) {
+        sig = (uint8_t)(sig * 31u + opt.families[i].count);
+        for (uint8_t j = 0; j < opt.families[i].count; j++)
+            sig = (uint8_t)(sig * 31u + opt.families[i].tags[j]);
+    }
+    return sig;
+}
 } // namespace
 
 // ---------------------------------------------------------------- encode
@@ -396,8 +425,12 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
     size_t at = 0;
     if (cap < 4)
         return r;
-    out[at++] = (uint8_t)((VERSION << 4) | tier);
-    out[at++] = n;
+    // Byte 0: version, then the tier with bit 3 spare for the families flag. Byte 1: n, which
+    // needs five bits, with the declared repeat count in the top three.
+    out[at++] = (uint8_t)((VERSION << 4) | (tier & 0x07));
+    if (opt.repeats > 7 || n > 31)
+        return r; // caller asked for more than the header can declare
+    out[at++] = (uint8_t)(n | (opt.repeats << 5));
     at = putVarint(out, cap, at, opt.context);
     if (at == SIZE_MAX)
         return r;
@@ -423,6 +456,11 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
     if (at == SIZE_MAX)
         return r;
 
+    // Everything the receiver needs that is not on the wire, in one byte, so a mismatch fails
+    // instead of decoding into plausible wrong numbers.
+    if (at >= cap)
+        return r;
+    out[at++] = profileSignature(opt);
     // Time column: gaps, or second differences from tier 2.
     for (uint8_t i = 1; i < n && at != SIZE_MAX; i++) {
         int64_t g = (int64_t)times[i] / tq - (int64_t)times[i - 1] / tq;
@@ -440,7 +478,7 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
         // Tier 4 drops per-column framing entirely: a 5-bit width table, one divisor and seed
         // per column, then every column's deltas concatenated into a single unaligned bit area
         // with the escapes trailing it. Framing is what dominates a wide message at small n.
-        uint8_t widths[BISCUIT_MAX_COLUMNS];
+        uint8_t widths[BISCUIT_MAX_COLUMNS], resl[BISCUIT_MAX_COLUMNS];
         int64_t seeds[BISCUIT_MAX_COLUMNS], divs[BISCUIT_MAX_COLUMNS];
         size_t totalBits = 0;
         for (uint8_t c = 0; c < nCols; c++) {
@@ -459,9 +497,33 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
                 for (uint8_t i = 0; i < col.rows; i++)
                     col.v[i] /= divs[c];
             seeds[c] = col.v[0];
+            resl[c] = col.resLog2;
             size_t unused = 0;
             widths[c] = chooseWidth(col.v, col.rows, &unused);
             totalBits += (size_t)(col.rows - 1) * widths[c];
+        }
+
+        // Resolution shifts, so the receiver need not share our hints. Tiers 1-3 carry these in
+        // the column code byte; tier 4 has no column header, and reading them from the receiver's
+        // own hints is how a mismatch returns silently wrong numbers. A varint bitmap first,
+        // which is one zero byte whenever no column is coarsened - the default.
+        uint64_t resMask = 0;
+        for (uint8_t c = 0; c < nCols; c++)
+            if (resl[c])
+                resMask |= (uint64_t)1 << c;
+        at = putVarint(out, cap, at, resMask);
+        if (at == SIZE_MAX)
+            return r;
+        if (resMask) {
+            const size_t rtabBytes = ((size_t)nCols * 4 + 7) / 8;
+            if (at + rtabBytes > cap)
+                return r;
+            memset(out + at, 0, rtabBytes);
+            BitWriter rtab{out + at, rtabBytes, 0};
+            for (uint8_t c = 0; c < nCols; c++)
+                if (!rtab.put((uint64_t)(resl[c] & 0x0F), 4))
+                    return r;
+            at += rtabBytes;
         }
 
         // Width table: five bits per column, holding width - 1 so 1..32 fits.
@@ -567,8 +629,8 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
         return 0;
     if ((in[0] >> 4) != VERSION)
         return 0;
-    uint8_t tier = in[0] & 0x0F;
-    uint8_t n = in[1];
+    const uint8_t tier = in[0] & 0x07;
+    const uint8_t n = in[1] & 0x1F;
     if (n == 0 || n > maxN || n > BISCUIT_MAX_BATCH)
         return 0;
 
@@ -609,6 +671,10 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
         }
     }
 
+    // The sender must have interpreted values the way we will. Families, scales and float
+    // handling are all in here; a mismatch is refused rather than silently misread.
+    if (at >= len || in[at++] != profileSignature(opt))
+        return 0;
     // Gaps are in quanta, so each stamp is rebuilt from the running quantised count.
     const int64_t tq = timeQuantum(opt, tier);
     int64_t qt = (int64_t)t0;
@@ -647,7 +713,28 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
 
 #if BISCUIT_MAX_TIER >= 4
     if (tier >= TIER_PACKED) {
-        uint8_t widths[BISCUIT_MAX_COLUMNS];
+        uint8_t widths[BISCUIT_MAX_COLUMNS], resl[BISCUIT_MAX_COLUMNS];
+        // Resolution shifts come off the wire, not from our own hints, so a receiver configured
+        // differently from the sender rebuilds the same values instead of silently wrong ones.
+        uint64_t resMask = 0;
+        at = getVarint(in, len, at, &resMask);
+        if (at == SIZE_MAX)
+            return 0;
+        memset(resl, 0, sizeof(resl));
+        if (resMask) {
+            const size_t rtabBytes = ((size_t)nCols * 4 + 7) / 8;
+            if (at + rtabBytes > len)
+                return 0;
+            BitReader rtab{in + at, rtabBytes, 0};
+            for (uint8_t c = 0; c < nCols; c++) {
+                uint64_t v;
+                if (!rtab.get(4, &v))
+                    return 0;
+                resl[c] = (uint8_t)v;
+            }
+            at += rtabBytes;
+        }
+
         const size_t wtabBytes = ((size_t)nCols * 5 + 7) / 8;
         if (at + wtabBytes > len)
             return 0;
@@ -698,9 +785,7 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
                 acc += unzz(d);
                 v[i] = acc * divs[c];
             }
-            const FieldHint *h = findHint(opt, tags[c]);
-            const uint8_t resLog2 = (tier >= TIER_RESOLUTION && h) ? h->resLog2 : 0;
-            if (!scatter(tags[c], v, (uint8_t)(rows / n), resLog2))
+            if (!scatter(tags[c], v, (uint8_t)(rows / n), resl[c]))
                 return 0;
         }
         at = escAt;
@@ -761,11 +846,15 @@ bool peekContext(const uint8_t *in, size_t len, uint32_t *contextOut)
 
 uint8_t peekCount(const uint8_t *in, size_t len)
 {
-    return (in && len >= 2 && (in[0] >> 4) == VERSION) ? in[1] : 0;
+    return (in && len >= 2 && (in[0] >> 4) == VERSION) ? (uint8_t)(in[1] & 0x1F) : 0;
 }
 uint8_t peekTier(const uint8_t *in, size_t len)
 {
-    return (in && len >= 1 && (in[0] >> 4) == VERSION) ? (uint8_t)(in[0] & 0x0F) : 0;
+    return (in && len >= 1 && (in[0] >> 4) == VERSION) ? (uint8_t)(in[0] & 0x07) : 0;
+}
+uint8_t peekRepeats(const uint8_t *in, size_t len)
+{
+    return (in && len >= 2 && (in[0] >> 4) == VERSION) ? (uint8_t)(in[1] >> 5) : 0;
 }
 
 } // namespace biscuit

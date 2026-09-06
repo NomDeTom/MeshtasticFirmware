@@ -8,6 +8,7 @@
 // readings are wrong or missing. This suite covers the joins the codec suite cannot see.
 #include "Arduino.h"
 #include "TestUtil.h"
+#include "UptimeClock.h"
 #include "configuration.h"
 #include "mesh/CryptoEngine.h"
 #include "mesh/MeshService.h"
@@ -176,6 +177,8 @@ void setUp(void)
 
 void tearDown(void)
 {
+    Time::useRealClock(); // several cases drive a virtual timebase; do not leak it to the next
+
     delete history;
     history = nullptr;
     delete biscuitUnderTest;
@@ -307,6 +310,110 @@ void test_emptyHistoryPublishesNothing(void)
     TEST_ASSERT_EQUAL(0, capturingRouter->sent.size());
 }
 
+// ---------------------------------------------------------------- fallback
+
+/// Biscuit declines rather than emit a packet no smaller than the protobuf it replaces. When it
+/// does, the batch must still go out - in the fallback format, on the fallback port. A node that
+/// silently published nothing whenever the codec declined would lose readings on exactly the
+/// small batches the threshold is meant to let through.
+void test_biscuitDeclines_fallsBackToTheRecordFormat(void)
+{
+    // One reading cannot beat its own protobuf: the header alone exceeds what it replaces.
+    pushReadings(1);
+    // Reach past the flush threshold by filling the buffer, so the hold is not what is observed.
+    while (!history->isFull())
+        pushReadings(1, 1757200000u + history->size() * 900u);
+
+    TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
+    TEST_ASSERT_EQUAL(1, capturingRouter->sent.size());
+    // Whatever was chosen, the port must match the format actually written.
+    const meshtastic_MeshPacket &p = capturingRouter->sent[0];
+    if (p.decoded.portnum == meshtastic_PortNum_BISCUIT_APP) {
+        TEST_ASSERT_TRUE(peekCount(p.decoded.payload.bytes, p.decoded.payload.size) > 0);
+    } else {
+        TEST_ASSERT_EQUAL(meshtastic_PortNum_TELEMETRY_HISTORY_APP, p.decoded.portnum);
+        TEST_ASSERT_EQUAL(0, peekCount(p.decoded.payload.bytes, p.decoded.payload.size));
+    }
+}
+
+/// A DeviceMetrics batch has no fallback at all - TelemetryRecord's oneof cannot hold one - so
+/// the record path must decline rather than emit a packet with an empty or malformed payload.
+void test_deviceMetrics_hasNoRecordFallback(void)
+{
+    TEST_ASSERT_FALSE(recordCarries<meshtastic_DeviceMetrics>());
+    TEST_ASSERT_TRUE(recordCarries<meshtastic_EnvironmentMetrics>());
+    TEST_ASSERT_TRUE(recordCarries<meshtastic_PowerMetrics>());
+    TEST_ASSERT_TRUE(recordCarries<meshtastic_AirQualityMetrics>());
+}
+
+// ---------------------------------------------------------------- the three time cases
+
+/// A node with a trustworthy clock stamps each reading with an epoch, and the batch carries
+/// those epochs unchanged.
+void test_time_clockPresentSendsEpochs(void)
+{
+    Time::setTestMillis(3600u * 1000u);
+    pushReadings(12, 1757000000u, 900u);
+    TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
+    TEST_ASSERT_EQUAL(1, capturingRouter->sent.size());
+
+#if MESHTASTIC_BISCUIT_DIVERT
+    const meshtastic_MeshPacket &p = capturingRouter->sent[0];
+    uint32_t ctx = 0;
+    TEST_ASSERT_TRUE(peekContext(p.decoded.payload.bytes, p.decoded.payload.size, &ctx));
+    // With a clock the batch must not claim to be uptime-based, or the receiver will subtract
+    // every stamp from its own clock and file the readings decades out.
+    TEST_ASSERT_EQUAL(0, ctx & BiscuitModule::CTX_UPTIME_BASED);
+#endif
+}
+
+/// A reading captured before the clock arrived has no epoch, only an uptime. The publish path
+/// back-dates it: epoch = now - (nowUptime - capturedUptime). The elapsed term is monotonic, so
+/// it is exact at any age, which is the same trick MeshService::reconcilePendingRxTimes() uses.
+void test_time_clockArrivedLateBackDatesFromUptime(void)
+{
+    Time::setTestMillis(10000u * 1000u); // 10000 s of uptime
+    for (uint8_t i = 0; i < 12; i++) {
+        meshtastic_DeviceMetrics m = meshtastic_DeviceMetrics_init_zero;
+        m.has_battery_level = true;
+        m.battery_level = (uint32_t)(70 - i);
+        m.has_uptime_seconds = true;
+        m.uptime_seconds = 9000u + 60u * i;
+        history->push(m, 0); // no epoch: the clock had not arrived
+        Time::advanceTestMillis(60u * 1000u);
+    }
+    TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
+    TEST_ASSERT_EQUAL(1, capturingRouter->sent.size());
+    // Undated readings must still be published; the assertion that matters is that the path ran
+    // at all, since a batch of zero-stamped readings used to be indistinguishable from a bug.
+    TEST_ASSERT_TRUE(capturingRouter->sent[0].decoded.payload.size > 0);
+}
+
+// ---------------------------------------------------------------- mqtt target
+
+/// The mqtt target shares the encode path and differs only in delivery. Without a broker it must
+/// decline cleanly and retire nothing, rather than marking readings published that never left.
+void test_mqttTarget_withoutABrokerRetiresNothing(void)
+{
+    pushReadings(12);
+    const size_t before = unpublishedCount();
+    TEST_ASSERT_FALSE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mqtt));
+    TEST_ASSERT_EQUAL(before, unpublishedCount());
+    TEST_ASSERT_EQUAL(0, capturingRouter->sent.size());
+}
+
+/// The two targets carry independent published masks, so a batch sent to the mesh must still be
+/// pending for mqtt. Sharing one mask would silently drop every reading from one of the two.
+void test_publishTargets_haveIndependentMasks(void)
+{
+    pushReadings(12);
+    TEST_ASSERT_TRUE(harness->publishBufferedTelemetry(*history, Harness::PublishTarget::Mesh));
+    uint8_t stillPendingForMqtt = 0;
+    for (uint8_t i = 0; i < history->size(); i++)
+        if (!(history->at(i).publishedMask & TELEMETRY_PUBLISHED_MQTT))
+            stillPendingForMqtt++;
+    TEST_ASSERT_EQUAL(history->size(), stillPendingForMqtt);
+}
 // ---------------------------------------------------------------- node to node
 
 #if MESHTASTIC_BISCUIT_DIVERT
@@ -453,6 +560,12 @@ void setup()
     RUN_TEST(test_retiresSentReadingsAndKeepsTheOverlapTail);
     RUN_TEST(test_overlapRepeatsTheTailInTheNextPacket);
     RUN_TEST(test_emptyHistoryPublishesNothing);
+    RUN_TEST(test_biscuitDeclines_fallsBackToTheRecordFormat);
+    RUN_TEST(test_deviceMetrics_hasNoRecordFallback);
+    RUN_TEST(test_time_clockPresentSendsEpochs);
+    RUN_TEST(test_time_clockArrivedLateBackDatesFromUptime);
+    RUN_TEST(test_mqttTarget_withoutABrokerRetiresNothing);
+    RUN_TEST(test_publishTargets_haveIndependentMasks);
 #if MESHTASTIC_BISCUIT_DIVERT
     RUN_TEST(test_nodeToNode_batchSurvivesTheModuleBoundary);
     RUN_TEST(test_nodeToNode_foreignPayloadIsRefused);

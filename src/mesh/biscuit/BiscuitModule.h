@@ -82,6 +82,19 @@ class BiscuitModule : public SinglePortModule
 
   private:
     void deliverToPhone(const meshtastic_MeshPacket &src, const meshtastic_Telemetry &t);
+
+    /// Newest stamp already taken from a sender, so declared repeats can be dropped without a
+    /// dedup table. Four slots: this exists for a handful of accumulating nodes offloading to
+    /// one collector, and a sender that falls out gets duplicates rather than losing readings.
+    struct SeenSender {
+        NodeNum from = 0;
+        uint32_t newest = 0;
+    };
+    SeenSender lastSeen[4];
+    uint8_t nextSeenSlot = 0;
+
+    bool alreadySeen(NodeNum from, uint32_t t) const;
+    void noteDelivered(NodeNum from, uint32_t newest);
 };
 
 extern BiscuitModule *biscuitModule;

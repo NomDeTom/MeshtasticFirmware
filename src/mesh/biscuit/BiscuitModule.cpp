@@ -39,6 +39,15 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
         (agesNotEpochs && nowEpoch)
             ? (uint32_t)(((uint32_t)(getRTCQuality() & CTX_TIER_MASK) << CTX_TIER_SHIFT) | CTX_RECEIVER_APPLIED)
             : (context & ~(uint32_t)CTX_VARIANT_MASK);
+    // Overlap repeats the oldest readings of each batch on purpose, so a receiver that saw the
+    // previous packet would file them twice. The count is declared on the wire; all this needs
+    // is the newest stamp already taken from each sender. Four senders is enough for the case
+    // this exists for - a handful of accumulating nodes offloading to one collector - and a
+    // sender that falls out of the table gets duplicates rather than losing readings.
+    const uint8_t repeats = biscuit::peekRepeats(mp.decoded.payload.bytes, mp.decoded.payload.size);
+    uint32_t newest = 0;
+    uint8_t delivered = 0;
+
     uint32_t times[BISCUIT_MAX_BATCH];
     uint8_t n = 0;
 
@@ -62,6 +71,10 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
         for (uint8_t i = 0; i < n; i++) {                                                                                        \
             meshtastic_Telemetry t = meshtastic_Telemetry_init_zero;                                                             \
             t.time = agesNotEpochs ? ((times[i] < nowEpoch) ? nowEpoch - times[i] : 0) : times[i];                               \
+            if (i < repeats && alreadySeen(mp.from, t.time))                                                                     \
+                continue;                                                                                                        \
+            newest = (t.time > newest) ? t.time : newest;                                                                        \
+            delivered++;                                                                                                         \
             t.which_variant = meshtastic_Telemetry_##FIELD##_tag;                                                                \
             t.variant.FIELD = m[i];                                                                                              \
             deliverToPhone(mp, t);                                                                                               \
@@ -77,14 +90,41 @@ ProcessMessage BiscuitModule::handleReceived(const meshtastic_MeshPacket &mp)
     }
 #undef BISCUIT_DECODE_VARIANT
 
+    noteDelivered(mp.from, newest);
+
     if (!n)
         LOG_WARN("Biscuit: 0x%08x decoded to nothing", mp.id);
     else
-        LOG_INFO("Biscuit: %u readings from 0x%08x delivered to phone, time quality 0x%04x", n, mp.id, (unsigned)appliedQ);
+        LOG_INFO("Biscuit: %u of %u readings from 0x%08x delivered to phone (%u repeats declared), time quality 0x%04x",
+                 delivered, n, mp.id, repeats, (unsigned)appliedQ);
 
     return ProcessMessage::STOP;
 }
 
+/// True if this sender has already given us a reading at or after `t`, which makes `t` one of
+/// the deliberate repeats rather than something new.
+bool BiscuitModule::alreadySeen(NodeNum from, uint32_t t) const
+{
+    for (const auto &s : lastSeen)
+        if (s.from == from)
+            return t != 0 && t <= s.newest;
+    return false;
+}
+
+/// Record the newest stamp taken from this sender, evicting the oldest slot when full.
+void BiscuitModule::noteDelivered(NodeNum from, uint32_t newest)
+{
+    if (!newest)
+        return;
+    for (auto &s : lastSeen)
+        if (s.from == from) {
+            if (newest > s.newest)
+                s.newest = newest;
+            return;
+        }
+    lastSeen[nextSeenSlot] = {from, newest};
+    nextSeenSlot = (uint8_t)((nextSeenSlot + 1) % (sizeof(lastSeen) / sizeof(lastSeen[0])));
+}
 /// One decoded reading, sent on as if the sender had published it individually.
 void BiscuitModule::deliverToPhone(const meshtastic_MeshPacket &src, const meshtastic_Telemetry &t)
 {

@@ -117,6 +117,11 @@ static __attribute__((noinline)) size_t encodeBiscuitBatch(meshtastic_MeshPacket
     // declare the quantum so a receiver need not be configured to match us.
     const uint32_t flags = sendAges ? (uint32_t)BiscuitModule::CTX_UPTIME_BASED : 0u;
     opt.context = BiscuitModule::makeContext(variantTagFor<T>(), (uint8_t)getRTCQuality(), flags, opt.timeRes);
+    // Declare the overlap. The retained tail is always the oldest readings in the next batch,
+    // so the count alone tells a receiver which of them it has seen before - no dedup table and
+    // no clock. Only meaningful once a batch has actually been retired, but a receiver that has
+    // not seen the previous packet simply keeps them, which is the safe direction.
+    opt.repeats = (uint8_t)(MESHTASTIC_BISCUIT_OVERLAP_COUNT > 7 ? 7 : MESHTASTIC_BISCUIT_OVERLAP_COUNT);
 
     const void *msgs[BISCUIT_MAX_BATCH];
     uint32_t times[BISCUIT_MAX_BATCH];
