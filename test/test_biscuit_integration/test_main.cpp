@@ -7,6 +7,7 @@
 // recognise the payload. Every one of those is silent - the packet arrives intact and the
 // readings are wrong or missing. This suite covers the joins the codec suite cannot see.
 #include "Arduino.h"
+#include "BiscuitCompare.h"
 #include "TestUtil.h"
 #include "UptimeClock.h"
 #include "configuration.h"
@@ -625,12 +626,9 @@ void test_nodeToNode_batchSurvivesTheModuleBoundary(void)
             char msg[48];
             snprintf(msg, sizeof(msg), "tier %u reading %u", tier, got);
             TEST_ASSERT_EQUAL_UINT32_MESSAGE(expectTimes[got], t.time, msg);
-            TEST_ASSERT_EQUAL_UINT32_MESSAGE(expect[got].battery_level, t.variant.device_metrics.battery_level, msg);
-            TEST_ASSERT_EQUAL_UINT32_MESSAGE(expect[got].uptime_seconds, t.variant.device_metrics.uptime_seconds, msg);
-            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, expect[got].voltage, t.variant.device_metrics.voltage, msg);
-            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, expect[got].channel_utilization,
-                                             t.variant.device_metrics.channel_utilization, msg);
-            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, expect[got].air_util_tx, t.variant.device_metrics.air_util_tx, msg);
+            // Every field of the message, not the five this test happens to name: a reading that
+            // arrives carrying something the sender never set is a defect the named list misses.
+            biscuitcmp::assertSameReading(&meshtastic_DeviceMetrics_msg, &expect[got], &t.variant.device_metrics, msg);
 
             mockService->releaseToPool(out);
             got++;

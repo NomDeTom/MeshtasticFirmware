@@ -181,10 +181,25 @@ void writeScalar(pb_field_iter_t &it, const FieldHint *h, const Options &opt, in
 // ---------------------------------------------------------------- column encodings
 
 enum ColCode : uint8_t {
-    COL_RAW = 0,   ///< zigzag varints, absolute
-    COL_DELTA = 1, ///< zigzag varints, first absolute then differences
-    COL_CONST = 2, ///< one value, repeated
+    COL_RAW = 0,      ///< zigzag varints, absolute
+    COL_DELTA = 1,    ///< zigzag varints, first absolute then differences
+    COL_CONST = 2,    ///< one value, repeated
+    COL_RAGGED = 0x4, ///< flag, not a code: a presence varint follows. Bit 3 is still spare.
 };
+
+/// Every reading present. A column matching this carries no mask.
+inline uint32_t fullMask(uint8_t n)
+{
+    return n >= 32 ? 0xFFFFFFFFu : (uint32_t)(((uint32_t)1 << n) - 1);
+}
+
+inline uint8_t popcount32(uint32_t x)
+{
+    uint8_t c = 0;
+    for (; x; x >>= 1)
+        c = (uint8_t)(c + (x & 1u));
+    return c;
+}
 
 /// One column's working set. Gathered, encoded and discarded before the next, so peak
 /// scratch is a single column rather than the whole table - 194 B against 3.1 KB at the
@@ -192,9 +207,29 @@ enum ColCode : uint8_t {
 struct Column {
     uint8_t tag;
     uint8_t resLog2;
-    uint8_t rows;                     ///< values held: n, or n x family size when stacked
+    uint8_t rows;                     ///< values held: the popcounts of every channel, summed
+    uint8_t chans;                    ///< 1, or the family's channel count
+    uint32_t present[4];              ///< per channel, bit i set when reading i carries it
     int64_t v[BISCUIT_MAX_BATCH * 4]; ///< a family of up to 4 channels, channel-major
 };
+
+/// Values a column holds: every channel's present readings, summed.
+inline uint8_t rowsOfMasks(const uint32_t *present, uint8_t chans)
+{
+    uint8_t rows = 0;
+    for (uint8_t ch = 0; ch < chans; ch++)
+        rows = (uint8_t)(rows + popcount32(present[ch]));
+    return rows;
+}
+
+/// True when any channel is missing any reading, so masks must travel.
+inline bool isRagged(const uint32_t *present, uint8_t chans, uint8_t n)
+{
+    for (uint8_t ch = 0; ch < chans; ch++)
+        if (present[ch] != fullMask(n))
+            return true;
+    return false;
+}
 
 #if BISCUIT_MAX_TIER >= 4
 /// Largest divisor every value shares. Sensor readings are often integer multiples of a
@@ -292,8 +327,9 @@ struct BitReader {
 };
 #endif // BISCUIT_MAX_TIER >= 4
 
-/// Gather one column channel-major, applying the resolution shift. False if any reading is
-/// missing the field, which disqualifies the column.
+/// Gather one column channel-major, applying the resolution shift. Each channel keeps its own
+/// presence mask, so a family survives both a sensor that drops out mid-batch and a channel the
+/// node never populates - the 93% of PowerMetrics senders that report ch3 alone.
 bool gatherColumn(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, const Options &opt, uint8_t tier, uint8_t tag,
                   Column &col)
 {
@@ -304,29 +340,34 @@ bool gatherColumn(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, 
     // Channel-major: every sample of channel 1, then channel 2, and so on. Reading-major
     // would make each delta a channel-to-channel difference, which does not compress.
     const uint8_t chans = fam ? fam->count : 1;
+    col.chans = chans;
     col.rows = 0;
+    for (uint8_t ch = 0; ch < 4; ch++)
+        col.present[ch] = 0;
     for (uint8_t ch = 0; ch < chans; ch++) {
         const uint8_t tg = fam ? fam->tags[ch] : tag;
         const FieldHint *ch_h = fam ? findHint(opt, tg) : h;
         for (uint8_t i = 0; i < n; i++) {
             pb_field_iter_t jt;
             if (!pb_field_iter_begin_const(&jt, desc, msgs[i]) || !pb_field_iter_find(&jt, tg) || !fieldPresent(jt))
-                return false;
+                continue;
+            col.present[ch] |= (uint32_t)1 << i;
             col.v[col.rows] = readScalar(jt, ch_h, opt);
             if (col.resLog2)
                 col.v[col.rows] >>= col.resLog2;
             col.rows++;
         }
     }
-    return true;
+    return col.rows > 0;
 }
 
-/// Values a column holds once its family is stacked in. Both ends derive this from the
-/// shared family table, so the channel count needs no wire byte.
-uint8_t rowsOf(const Options &opt, uint8_t tag, uint8_t n)
+/// A column's channel count. Both ends read it from the shared family table, so it needs no
+/// wire byte; which readings each channel answered for does travel, because only the sender
+/// knows it.
+uint8_t chansOf(const Options &opt, uint8_t tag)
 {
     const FieldFamily *fam = familyLedBy(opt, tag);
-    return (uint8_t)(n * (fam ? fam->count : 1));
+    return fam ? fam->count : 1;
 }
 
 /// Quantised timestamp. opt.timeRes is 1 - exact - unless the user has chosen a coarser
@@ -368,14 +409,16 @@ uint8_t profileSignature(const Options &opt)
 
 // ---------------------------------------------------------------- encode
 
-Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, const uint32_t *times, uint8_t *out, size_t cap,
-              const Options &opt)
+/// One batch at one tier. encode() below drives this once per candidate tier and keeps the
+/// smallest, so this never chooses a tier itself.
+Result encodeAtTier(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, const uint32_t *times, uint8_t *out, size_t cap,
+                    const Options &opt, uint8_t tier)
 {
     Result r;
     if (!desc || !msgs || !times || !out || n == 0 || n > BISCUIT_MAX_BATCH)
         return r;
-
-    uint8_t tier = opt.maxTier < BISCUIT_MAX_TIER ? opt.maxTier : (uint8_t)BISCUIT_MAX_TIER;
+    if (tier > BISCUIT_MAX_TIER)
+        tier = BISCUIT_MAX_TIER;
     if (tier < TIER_COLUMNAR)
         return r;
 
@@ -386,8 +429,8 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
             r.baseline += one + 6; // Telemetry wrapper: time fixed32 plus the oneof tag and length
     }
 
-    // Pass 1: which tags qualify. A field must be encodable and present in every reading.
-    // Only the tag list is kept; values are gathered per column in pass 2.
+    // Pass 1: which tags qualify. A field must be encodable and carried by at least one
+    // reading; gaps travel as a presence mask. Only the tag list is kept here.
     uint8_t tags[BISCUIT_MAX_COLUMNS];
     uint8_t nCols = 0;
     pb_field_iter_t it;
@@ -401,21 +444,22 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
             continue;
         if (nCols >= BISCUIT_MAX_COLUMNS)
             break;
-        // A leader qualifies only if every channel of its family is present in every reading.
+        // One reading of one channel is enough. Every gap - a sensor that stopped answering, or
+        // a channel the node never wired up - travels as a mask rather than costing the column.
         const FieldFamily *fam1 = familyLedBy(opt, (uint8_t)it.tag);
         const uint8_t chans1 = fam1 ? fam1->count : 1;
-        bool ok = true;
-        for (uint8_t ch = 0; ch < chans1 && ok; ch++) {
+        bool seen = false;
+        for (uint8_t ch = 0; ch < chans1 && !seen; ch++) {
             const uint8_t tg = fam1 ? fam1->tags[ch] : (uint8_t)it.tag;
             for (uint8_t i = 0; i < n; i++) {
                 pb_field_iter_t jt;
-                if (!pb_field_iter_begin_const(&jt, desc, msgs[i]) || !pb_field_iter_find(&jt, tg) || !fieldPresent(jt)) {
-                    ok = false;
+                if (pb_field_iter_begin_const(&jt, desc, msgs[i]) && pb_field_iter_find(&jt, tg) && fieldPresent(jt)) {
+                    seen = true;
                     break;
                 }
             }
         }
-        if (ok)
+        if (seen)
             tags[nCols++] = (uint8_t)it.tag;
     } while (pb_field_iter_next(&it));
 
@@ -479,6 +523,8 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
         // per column, then every column's deltas concatenated into a single unaligned bit area
         // with the escapes trailing it. Framing is what dominates a wide message at small n.
         uint8_t widths[BISCUIT_MAX_COLUMNS], resl[BISCUIT_MAX_COLUMNS];
+        uint32_t pres[BISCUIT_MAX_COLUMNS][4];
+        uint8_t chn[BISCUIT_MAX_COLUMNS];
         int64_t seeds[BISCUIT_MAX_COLUMNS], divs[BISCUIT_MAX_COLUMNS];
         size_t totalBits = 0;
         for (uint8_t c = 0; c < nCols; c++) {
@@ -498,23 +544,37 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
                     col.v[i] /= divs[c];
             seeds[c] = col.v[0];
             resl[c] = col.resLog2;
+            chn[c] = col.chans;
+            for (uint8_t ch = 0; ch < 4; ch++)
+                pres[c][ch] = col.present[ch];
             size_t unused = 0;
             widths[c] = chooseWidth(col.v, col.rows, &unused);
             totalBits += (size_t)(col.rows - 1) * widths[c];
         }
 
-        // Resolution shifts, so the receiver need not share our hints. Tiers 1-3 carry these in
-        // the column code byte; tier 4 has no column header, and reading them from the receiver's
-        // own hints is how a mismatch returns silently wrong numbers. A varint bitmap first,
-        // which is one zero byte whenever no column is coarsened - the default.
-        uint64_t resMask = 0;
+        // Tier 4 has no column header, so the two things tiers 1-3 keep in the column code byte
+        // - the resolution shift and the presence mask - live here instead. Reading either from
+        // the receiver's own configuration is how a mismatch returns silently wrong numbers.
+        //
+        // One flags varint gates both, and is a single zero byte in the ordinary case. Bit 0
+        // means a 4-bit resolution table follows, covering every column; bit 1 means a ragged
+        // section follows, naming the ragged columns and then their masks.
+        uint64_t flags = 0;
         for (uint8_t c = 0; c < nCols; c++)
-            if (resl[c])
-                resMask |= (uint64_t)1 << c;
-        at = putVarint(out, cap, at, resMask);
+            if (resl[c]) {
+                flags |= 1;
+                break;
+            }
+        uint64_t ragMask = 0;
+        for (uint8_t c = 0; c < nCols; c++)
+            if (isRagged(pres[c], chn[c], n))
+                ragMask |= (uint64_t)1 << c;
+        if (ragMask)
+            flags |= 2;
+        at = putVarint(out, cap, at, flags);
         if (at == SIZE_MAX)
             return r;
-        if (resMask) {
+        if (flags & 1) {
             const size_t rtabBytes = ((size_t)nCols * 4 + 7) / 8;
             if (at + rtabBytes > cap)
                 return r;
@@ -524,6 +584,15 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
                 if (!rtab.put((uint64_t)(resl[c] & 0x0F), 4))
                     return r;
             at += rtabBytes;
+        }
+        if (flags & 2) {
+            at = putVarint(out, cap, at, ragMask);
+            for (uint8_t c = 0; c < nCols && at != SIZE_MAX; c++)
+                if (ragMask & ((uint64_t)1 << c))
+                    for (uint8_t ch = 0; ch < chn[c] && at != SIZE_MAX; ch++)
+                        at = putVarint(out, cap, at, pres[c][ch]);
+            if (at == SIZE_MAX)
+                return r;
         }
 
         // Width table: five bits per column, holding width - 1 so 1..32 fits.
@@ -590,9 +659,17 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
                     break;
                 }
             uint8_t code = isConst ? COL_CONST : (sd <= sr ? COL_DELTA : COL_RAW);
+            const bool ragged = isRagged(col.present, col.chans, n);
+            if (ragged)
+                code |= COL_RAGGED;
             if (at >= cap)
                 return r;
             out[at++] = (uint8_t)(code | (col.resLog2 << 4));
+            if (ragged)
+                for (uint8_t ch = 0; ch < col.chans && at != SIZE_MAX; ch++)
+                    at = putVarint(out, cap, at, col.present[ch]);
+            if (at == SIZE_MAX)
+                return r;
 
             if (code == COL_CONST) {
                 at = putVarint(out, cap, at, zz(col.v[0]));
@@ -620,6 +697,48 @@ Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, cons
     return r;
 }
 
+/**
+ * A higher tier is not always a smaller packet. Tier 4 spends a width table and a divisor and
+ * seed per column before it encodes anything, and on a short batch that fixed cost outweighs
+ * the framing it removes - measured on captured traffic, tier 4 is larger than tier 2 for 39%
+ * of two-reading batches, by about two bytes. Tier 2's column bitmap likewise loses to tier 1's
+ * explicit tag list when the only column has a high field number.
+ *
+ * So encode every tier up to the cap and keep the smallest. The tier travels in the header
+ * already, so this costs the receiver nothing and needs no wire change; it costs the sender a
+ * few passes over a short array before a transmission that is orders of magnitude dearer.
+ * `maxTier` is a ceiling, not an instruction.
+ */
+Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, const uint32_t *times, uint8_t *out, size_t cap,
+              const Options &opt)
+{
+    const uint8_t top = opt.maxTier < BISCUIT_MAX_TIER ? opt.maxTier : (uint8_t)BISCUIT_MAX_TIER;
+    Result best;
+    uint8_t bestTier = 0;
+    for (uint8_t t = TIER_COLUMNAR; t <= top; t++) {
+        const Result r = encodeAtTier(desc, msgs, n, times, out, cap, opt, t);
+        // baseline is a property of the batch, not the tier, so keep it even when nothing fits.
+        if (r.baseline > best.baseline)
+            best.baseline = r.baseline;
+        if (r.size && (!bestTier || r.size < best.size)) {
+            const size_t baseline = best.baseline;
+            best = r;
+            best.baseline = baseline;
+            bestTier = t;
+        }
+    }
+    if (!bestTier) {
+        best.size = 0;
+        best.tier = 0;
+        return best;
+    }
+    // The loop left the last candidate in the buffer, which is not necessarily the winner.
+    const size_t baseline = best.baseline;
+    best = encodeAtTier(desc, msgs, n, times, out, cap, opt, bestTier);
+    best.baseline = baseline;
+    return best;
+}
+
 // ---------------------------------------------------------------- decode
 
 uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *const *msgs, uint8_t maxN, uint32_t *times,
@@ -630,6 +749,12 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
     if ((in[0] >> 4) != VERSION)
         return 0;
     const uint8_t tier = in[0] & 0x07;
+    // A tier this build cannot decode must be refused, not reinterpreted. Below tier 4 the
+    // packed branch is compiled out entirely, so a tier-4 packet would fall into the tier 1-3
+    // column loop and read its bit area as column code bytes - three byte values in four are a
+    // valid code, so it would decode plausible rubbish and report success.
+    if (tier < TIER_COLUMNAR || tier > BISCUIT_MAX_TIER)
+        return 0;
     const uint8_t n = in[1] & 0x1F;
     if (n == 0 || n > maxN || n > BISCUIT_MAX_BATCH)
         return 0;
@@ -693,20 +818,27 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
         prevGap = g;
     }
 
-    // Scatter one column's values back. Channel ch owns rows [ch*n, ch*n + n), matching the
-    // encoder's channel-major layout; with no family that is just the plain case.
-    auto scatter = [&](uint8_t tag, const int64_t *v, uint8_t chans, uint8_t resLog2) -> bool {
+    // Scatter one column's values back, skipping the readings its presence mask says never
+    // carried it - those keep has_field false rather than being invented. Channel ch owns the
+    // block starting at ch * popcount(present), matching the encoder's channel-major layout;
+    // a full mask and one channel is the plain case.
+    auto scatter = [&](uint8_t tag, const int64_t *v, uint8_t chans, uint8_t resLog2, const uint32_t *present) -> bool {
         const FieldFamily *fam = familyLedBy(opt, tag);
+        uint16_t base = 0;
         for (uint8_t ch = 0; ch < chans; ch++) {
             const uint8_t tg = fam ? fam->tags[ch] : tag;
             const FieldHint *h = findHint(opt, tg);
+            uint8_t k = 0;
             for (uint8_t i = 0; i < n; i++) {
+                if (!((present[ch] >> i) & 1u))
+                    continue;
                 pb_field_iter_t jt;
                 if (!pb_field_iter_begin(&jt, desc, msgs[i]) || !pb_field_iter_find(&jt, tg))
                     return false;
-                const int64_t val = v[(uint16_t)ch * n + i];
-                writeScalar(jt, h, opt, resLog2 ? (val << resLog2) : val);
+                writeScalar(jt, h, opt, resLog2 ? (v[base + k] << resLog2) : v[base + k]);
+                k++;
             }
+            base = (uint16_t)(base + k); // channels are packed back to back, gaps removed
         }
         return true;
     };
@@ -714,14 +846,18 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
 #if BISCUIT_MAX_TIER >= 4
     if (tier >= TIER_PACKED) {
         uint8_t widths[BISCUIT_MAX_COLUMNS], resl[BISCUIT_MAX_COLUMNS];
-        // Resolution shifts come off the wire, not from our own hints, so a receiver configured
-        // differently from the sender rebuilds the same values instead of silently wrong ones.
-        uint64_t resMask = 0;
-        at = getVarint(in, len, at, &resMask);
+        uint32_t pres[BISCUIT_MAX_COLUMNS][4];
+        for (uint8_t c = 0; c < BISCUIT_MAX_COLUMNS; c++)
+            for (uint8_t ch = 0; ch < 4; ch++)
+                pres[c][ch] = fullMask(n);
+        // Resolution shifts and presence masks come off the wire, not from our own hints, so a
+        // receiver configured differently from the sender rebuilds the same values.
+        uint64_t flags = 0;
+        at = getVarint(in, len, at, &flags);
         if (at == SIZE_MAX)
             return 0;
         memset(resl, 0, sizeof(resl));
-        if (resMask) {
+        if (flags & 1) {
             const size_t rtabBytes = ((size_t)nCols * 4 + 7) / 8;
             if (at + rtabBytes > len)
                 return 0;
@@ -733,6 +869,27 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
                 resl[c] = (uint8_t)v;
             }
             at += rtabBytes;
+        }
+        if (flags & 2) {
+            uint64_t ragMask = 0;
+            at = getVarint(in, len, at, &ragMask);
+            if (at == SIZE_MAX)
+                return 0;
+            for (uint8_t c = 0; c < nCols; c++)
+                if (ragMask & ((uint64_t)1 << c)) {
+                    const uint8_t chans = chansOf(opt, tags[c]);
+                    uint32_t any = 0;
+                    for (uint8_t ch = 0; ch < chans; ch++) {
+                        uint64_t m;
+                        at = getVarint(in, len, at, &m);
+                        if (at == SIZE_MAX || (m & ~(uint64_t)fullMask(n)))
+                            return 0;
+                        pres[c][ch] = (uint32_t)m;
+                        any |= (uint32_t)m;
+                    }
+                    if (!any)
+                        return 0; // a column with no value anywhere is not a column
+                }
         }
 
         const size_t wtabBytes = ((size_t)nCols * 5 + 7) / 8;
@@ -759,7 +916,7 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
                 return 0;
             divs[c] = (int64_t)g;
             seeds[c] = unzz(s);
-            totalBits += (size_t)(rowsOf(opt, tags[c], n) - 1) * widths[c];
+            totalBits += (size_t)(rowsOfMasks(pres[c], chansOf(opt, tags[c])) - 1) * widths[c];
         }
 
         const size_t bitBytes = (totalBits + 7) / 8;
@@ -768,7 +925,10 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
         BitReader br{in + at, bitBytes, 0};
         size_t escAt = at + bitBytes;
         for (uint8_t c = 0; c < nCols; c++) {
-            const uint8_t rows = rowsOf(opt, tags[c], n);
+            const uint8_t chans = chansOf(opt, tags[c]);
+            const uint8_t rows = rowsOfMasks(pres[c], chans);
+            if (rows == 0)
+                return 0;
             const uint64_t esc = ((uint64_t)1 << widths[c]) - 1;
             int64_t v[BISCUIT_MAX_BATCH * 4];
             int64_t acc = seeds[c];
@@ -785,7 +945,7 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
                 acc += unzz(d);
                 v[i] = acc * divs[c];
             }
-            if (!scatter(tags[c], v, (uint8_t)(rows / n), resl[c]))
+            if (!scatter(tags[c], v, chans, resl[c], pres[c]))
                 return 0;
         }
         at = escAt;
@@ -795,8 +955,29 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
             if (at >= len)
                 return 0;
             const uint8_t codeByte = in[at++];
-            const uint8_t code = codeByte & 0x0F, resLog2 = codeByte >> 4;
-            const uint8_t rows = rowsOf(opt, tags[c], n);
+            // Bit 3 is reserved and must be zero, so a corrupted byte is refused rather than
+            // quietly reinterpreted as a code the sender did not write.
+            if (codeByte & 0x08)
+                return 0;
+            const uint8_t code = codeByte & 0x03, resLog2 = codeByte >> 4;
+            const uint8_t chans = chansOf(opt, tags[c]);
+            uint32_t present[4] = {fullMask(n), fullMask(n), fullMask(n), fullMask(n)};
+            if (codeByte & COL_RAGGED) {
+                uint32_t any = 0;
+                for (uint8_t ch = 0; ch < chans; ch++) {
+                    uint64_t m;
+                    at = getVarint(in, len, at, &m);
+                    if (at == SIZE_MAX || (m & ~(uint64_t)fullMask(n)))
+                        return 0;
+                    present[ch] = (uint32_t)m;
+                    any |= (uint32_t)m;
+                }
+                if (!any)
+                    return 0;
+            }
+            const uint8_t rows = rowsOfMasks(present, chans);
+            if (rows == 0)
+                return 0;
             int64_t v[BISCUIT_MAX_BATCH * 4];
             uint64_t z;
             if (code == COL_CONST) {
@@ -826,7 +1007,7 @@ uint8_t decode(const pb_msgdesc_t *desc, const uint8_t *in, size_t len, void *co
             } else {
                 return 0;
             }
-            if (!scatter(tags[c], v, (uint8_t)(rows / n), resLog2))
+            if (!scatter(tags[c], v, chans, resLog2, present))
                 return 0;
         }
     return n;

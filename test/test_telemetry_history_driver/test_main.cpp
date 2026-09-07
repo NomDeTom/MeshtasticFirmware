@@ -11,6 +11,7 @@
 // no direct tests: eviction when full, per-channel published masks, and the uptime stamp that
 // dates a reading taken before the clock was trustworthy.
 #include "Arduino.h"
+#include "BiscuitCompare.h"
 #include "NodeStatus.h"
 #include "PowerStatus.h"
 #include "TestUtil.h"
@@ -216,9 +217,19 @@ void test_buffer_evictsOldestWhenFull(void)
     }
     TEST_ASSERT_TRUE(buf.isFull());
     TEST_ASSERT_EQUAL(4, buf.size());
-    // The two oldest are gone; what remains is 2,3,4,5 oldest-first.
+    // The two oldest are gone; what remains is 2,3,4,5 oldest-first, and each record must be
+    // the reading that was pushed rather than merely carrying the right battery level.
     TEST_ASSERT_EQUAL_UINT32(2, buf.at(0).metrics.battery_level);
     TEST_ASSERT_EQUAL_UINT32(5, buf.at(3).metrics.battery_level);
+    for (uint8_t i = 0; i < 4; i++) {
+        meshtastic_DeviceMetrics want = meshtastic_DeviceMetrics_init_zero;
+        want.has_battery_level = true;
+        want.battery_level = (uint32_t)(i + 2);
+        char msg[48];
+        snprintf(msg, sizeof(msg), "buffer slot %u", i);
+        biscuitcmp::assertSameReading(&meshtastic_DeviceMetrics_msg, &want, &buf.at(i).metrics, msg);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(1757000000u + i + 2, buf.at(i).time, msg);
+    }
 }
 
 /// isFull is what the flush threshold consults, so it must mean capacity and not merely

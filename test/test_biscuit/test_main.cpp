@@ -5,6 +5,7 @@
 // value that does not survive the round trip is a defect that silently corrupts a reading,
 // and no CRC catches it because the packet arrives intact.
 #include "Arduino.h"
+#include "BiscuitCompare.h"
 #include "TestUtil.h"
 #include "mesh/biscuit/Biscuit.h"
 #include "mesh/generated/meshtastic/telemetry.pb.h"
@@ -67,6 +68,7 @@ static size_t roundTrip(uint8_t tier, uint8_t n, bool expectLossless = true)
     TEST_ASSERT_EQUAL(r.tier, peekTier(buf, r.size));
 
     uint8_t got = decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, BISCUIT_MAX_BATCH, tsOut, opt);
+    biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, ts, tsOut, n, "round trip");
     TEST_ASSERT_EQUAL_MESSAGE(n, got, "decode returned the wrong count");
 
     for (uint8_t i = 0; i < n; i++) {
@@ -108,18 +110,46 @@ void test_roundTrip_everyBatchSize(void)
             roundTrip(tier, n);
 }
 
-/// Higher tiers must not be larger than lower ones on the same batch.
-void test_higherTiersAreNotLarger(void)
+/// What encode() emits is never larger than any single tier would have produced.
+///
+/// This replaces an assertion that a higher tier is never larger than a lower one. That premise
+/// is false - tier 4 spends a width table and a per-column divisor before it encodes anything,
+/// and loses to tier 2 on 39% of two-reading batches in the captured corpus. It also became
+/// unfalsifiable once encode() started selecting: passing maxTier=t returns the best of tiers
+/// 1..t, which is monotonically non-increasing by construction, so the old assertion could not
+/// fail whatever the codec did. The real invariant is the one below, and it needs encodeAtTier
+/// to state, because encode() is the thing being checked.
+void test_selectedEncodingBeatsEveryTier(void)
 {
-    size_t sz[BISCUIT_MAX_TIER + 1] = {0};
-    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++)
-        sz[tier] = roundTrip(tier, 12);
-    for (uint8_t tier = TIER_COLUMNAR + 1; tier <= BISCUIT_MAX_TIER; tier++) {
-        char msg[80];
-        snprintf(msg, sizeof(msg), "tier %u grew to %u B from tier %u's %u B", tier, (unsigned)sz[tier], tier - 1,
-                 (unsigned)sz[tier - 1]);
-        TEST_ASSERT_TRUE_MESSAGE(sz[tier] <= sz[tier - 1], msg);
+    meshtastic_DeviceMetrics src[12];
+    uint32_t ts[12];
+    makeDeviceBatch(src, ts, 12);
+    const void *sp[12];
+    for (uint8_t i = 0; i < 12; i++)
+        sp[i] = &src[i];
+
+    Options opt;
+    opt.hints = kDeviceHints;
+    opt.hintCount = sizeof(kDeviceHints) / sizeof(kDeviceHints[0]);
+    opt.neverInflate = false;
+
+    uint8_t buf[512];
+    const Result chosen = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt);
+    TEST_ASSERT_GREATER_THAN(0, (int)chosen.size);
+
+    bool sawOne = false;
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        uint8_t one[512];
+        const Result r = encodeAtTier(&meshtastic_DeviceMetrics_msg, sp, 12, ts, one, sizeof(one), opt, tier);
+        if (!r.size)
+            continue;
+        sawOne = true;
+        char msg[96];
+        snprintf(msg, sizeof(msg), "tier %u alone is %u B, selection chose tier %u at %u B", tier, (unsigned)r.size, chosen.tier,
+                 (unsigned)chosen.size);
+        TEST_ASSERT_LESS_OR_EQUAL_MESSAGE(r.size, chosen.size, msg);
     }
+    TEST_ASSERT_TRUE_MESSAGE(sawOne, "no tier produced anything to compare against");
 }
 
 /// A resolution shift is lossy by exactly the margin it declares, and no more.
@@ -146,6 +176,8 @@ void test_resolutionShift_errorIsBounded(void)
     TEST_ASSERT_FALSE_MESSAGE(r.lossless, "a resolution shift must report itself lossy");
     TEST_ASSERT_EQUAL_UINT32(32u, r.worstErr); // 1 << (6-1) millivolts
     TEST_ASSERT_EQUAL(8, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 8, tsOut, opt));
+    // voltage was quantised to a 64 mV grid on purpose; allow exactly that.
+    biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, ts, tsOut, 8, "round trip", true, 0.064f);
     for (uint8_t i = 0; i < 8; i++)
         TEST_ASSERT_FLOAT_WITHIN(0.064f, src[i].voltage, dst[i].voltage);
 #endif
@@ -324,6 +356,7 @@ void test_realCorpusData_roundTripsExactly(void)
         TEST_ASSERT_TRUE(r.size > 0);
         TEST_ASSERT_TRUE(r.lossless);
         TEST_ASSERT_EQUAL(12, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 12, tsOut, opt));
+        biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, ts, tsOut, 12, "round trip");
         for (uint8_t i = 0; i < 12; i++) {
             TEST_ASSERT_EQUAL_UINT32(ts[i], tsOut[i]);
             TEST_ASSERT_EQUAL_UINT32(src[i].battery_level, dst[i].battery_level);
@@ -356,7 +389,7 @@ void test_realCorpusData_sizesAreStable(void)
     for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
         opt.maxTier = tier;
         uint8_t buf[233];
-        got[tier] = (uint32_t)encode(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt).size;
+        got[tier] = (uint32_t)encodeAtTier(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt, tier).size;
     }
     char msg[128];
     snprintf(msg, sizeof(msg), "sizes t1..t%u = %u %u %u %u (baseline %u)", BISCUIT_MAX_TIER, got[1], got[2], got[3],
@@ -407,7 +440,7 @@ void test_realCorpusData_meetsTierModelSavings(void)
     for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
         opt.maxTier = tier;
         uint8_t buf[233];
-        Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt);
+        Result r = encodeAtTier(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt, tier);
         TEST_ASSERT_TRUE(r.size > 0);
         const unsigned pct = (unsigned)(100u - (100u * r.size) / baseline);
         char msg[96];
@@ -466,6 +499,9 @@ void test_timeResolution_errorIsBoundedAndDeclared(void)
         Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ts, buf, sizeof(buf), opt);
         TEST_ASSERT_TRUE(r.size > 0);
         TEST_ASSERT_EQUAL(12, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 12, tsOut, opt));
+        // Stamps are deliberately quantised to 60 s and bounded below; the readings
+        // themselves must still be exact, so compare those and not the times.
+        biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, nullptr, nullptr, 12, "round trip");
         for (uint8_t i = 0; i < 12; i++) {
             if (tier < TIER_RESOLUTION) {
                 // Below tier 3 the quantum is ignored, so stamps stay exact.
@@ -545,6 +581,7 @@ void test_families_everyChannelRoundTripsToItsOwnTag(void)
         snprintf(msg, sizeof(msg), "tier %u", tier);
         TEST_ASSERT_TRUE_MESSAGE(r.size > 0, msg);
         TEST_ASSERT_EQUAL_MESSAGE(12, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, opt), msg);
+        biscuitcmp::assertSameBatch(&meshtastic_PowerMetrics_msg, src, dst, ts, tsOut, 12, "round trip");
 
         for (uint8_t i = 0; i < 12; i++) {
             TEST_ASSERT_EQUAL_UINT32_MESSAGE(ts[i], tsOut[i], msg);
@@ -636,6 +673,7 @@ void test_families_missingChannelDoesNotCorruptTheBatch(void)
         Result r = encode(&meshtastic_PowerMetrics_msg, sp, 8, ts, buf, sizeof(buf), opt);
         TEST_ASSERT_TRUE(r.size > 0);
         TEST_ASSERT_EQUAL(8, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 8, tsOut, opt));
+        biscuitcmp::assertSameBatch(&meshtastic_PowerMetrics_msg, src, dst, ts, tsOut, 8, "round trip");
 
         // The current family is untouched by the voltage hole and must survive intact.
         for (uint8_t i = 0; i < 8; i++) {
@@ -702,6 +740,8 @@ void test_selfDescribing_resolutionSurvivesADifferentReceiver(void)
         snprintf(msg, sizeof(msg), "tier %u", tier);
         TEST_ASSERT_TRUE_MESSAGE(r.size > 0, msg);
         TEST_ASSERT_EQUAL_MESSAGE(12, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 12, tsOut, recv), msg);
+        // The sender declared 16 mV and 1/8 % shifts, so allow the coarser of the two.
+        biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, ts, tsOut, 12, "round trip", true, 0.126f);
 
         for (uint8_t i = 0; i < 12; i++) {
             // Within the quantum the sender chose, not the receiver's idea of one. Tier 3 is
@@ -760,6 +800,7 @@ void test_selfDescribing_familyMismatchIsRefused(void)
 
         // The matching table decodes, so the refusal above is the signature and not a broken batch.
         TEST_ASSERT_EQUAL(12, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, 12, tsOut, send));
+        biscuitcmp::assertSameBatch(&meshtastic_PowerMetrics_msg, src, dst, ts, tsOut, 12, "round trip");
         for (uint8_t i = 0; i < 12; i++)
             TEST_ASSERT_FLOAT_WITHIN(0.0002f, src[i].ch2_voltage, dst[i].ch2_voltage);
     }
@@ -869,6 +910,7 @@ void test_uptimeAges_decreasingTimestampsRoundTrip(void)
         TEST_ASSERT_EQUAL_UINT32(kCtx, ctx); // survives whole, so the receiver knows how to read it
 
         TEST_ASSERT_EQUAL(12, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 12, agesOut, opt));
+        biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, nullptr, nullptr, 12, "round trip");
         for (uint8_t i = 0; i < 12; i++) {
             char msg[64];
             snprintf(msg, sizeof(msg), "tier %u reading %u", tier, i);
@@ -897,6 +939,7 @@ void test_uptimeAges_datedAgainstReceiverClockMatchOriginals(void)
     Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 12, ages, buf, sizeof(buf), opt);
     TEST_ASSERT_TRUE(r.size > 0);
     TEST_ASSERT_EQUAL(12, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 12, agesOut, opt));
+    biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, nullptr, nullptr, 12, "round trip");
 
     // The receiver's clock at the moment the batch lands - here, the newest reading's instant.
     const uint32_t nowEpoch = kRealTimes[11];
@@ -927,6 +970,7 @@ void test_uptimeAges_allZeroGapsRoundTrip(void)
         Result r = encode(&meshtastic_DeviceMetrics_msg, sp, 8, ages, buf, sizeof(buf), opt);
         TEST_ASSERT_TRUE(r.size > 0);
         TEST_ASSERT_EQUAL(8, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, 8, out, opt));
+        biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, nullptr, nullptr, 8, "round trip");
         for (uint8_t i = 0; i < 8; i++)
             TEST_ASSERT_EQUAL_UINT32(42, out[i]);
     }
@@ -954,6 +998,620 @@ void test_uptimeAges_areNoLargerThanEpochs(void)
     TEST_ASSERT_LESS_OR_EQUAL_MESSAGE(withEpochs, withAges, msg);
 }
 
+/// A field that some readings carry and others do not. Before per-reading presence this was
+/// either dropped from the batch entirely - silently, with encode reporting success - or, when
+/// no field spanned every reading, refused. Both are visible in captured traffic: a node whose
+/// BME280 stops answering keeps reporting the sensors that still work.
+static void makeRaggedBatch(meshtastic_DeviceMetrics *m, uint32_t *t, uint8_t n, uint32_t keep)
+{
+    for (uint8_t i = 0; i < n; i++) {
+        m[i] = meshtastic_DeviceMetrics_init_zero;
+        t[i] = 1757000000u + 1800u * i;
+        m[i].has_battery_level = true;
+        m[i].battery_level = (uint32_t)(90 - i / 3);
+        if ((keep >> i) & 1u) {
+            m[i].has_voltage = true;
+            m[i].voltage = 4.021f - 0.002f * i;
+            m[i].has_uptime_seconds = true;
+            m[i].uptime_seconds = 3600 + 1800 * i;
+        }
+    }
+}
+
+void test_ragged_absentReadingsStayAbsent(void)
+{
+    const uint8_t n = 12;
+    // A gap at the front, one in the middle, and a run at the tail - the shapes the capture has.
+    static const uint32_t kShapes[] = {0xFFEu, 0xDFFu, 0x0FFu, 0x001u, 0xFFFu};
+    for (size_t k = 0; k < sizeof(kShapes) / sizeof(kShapes[0]); k++) {
+        const uint32_t keep = kShapes[k];
+        meshtastic_DeviceMetrics src[BISCUIT_MAX_BATCH], dst[BISCUIT_MAX_BATCH];
+        uint32_t ts[BISCUIT_MAX_BATCH], tsOut[BISCUIT_MAX_BATCH];
+        makeRaggedBatch(src, ts, n, keep);
+        const void *sp[BISCUIT_MAX_BATCH];
+        void *dp[BISCUIT_MAX_BATCH];
+        for (uint8_t i = 0; i < n; i++)
+            sp[i] = &src[i], dp[i] = &dst[i];
+
+        Options opt;
+        opt.fixed32IsFloat = true;
+        opt.neverInflate = false;
+        for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+            opt.maxTier = tier;
+            char msg[64];
+            snprintf(msg, sizeof(msg), "keep 0x%03x tier %u", (unsigned)keep, tier);
+            uint8_t buf[512];
+            Result r = encode(&meshtastic_DeviceMetrics_msg, sp, n, ts, buf, sizeof(buf), opt);
+            TEST_ASSERT_GREATER_THAN_MESSAGE(0, (int)r.size, msg);
+            for (uint8_t i = 0; i < n; i++)
+                dst[i] = meshtastic_DeviceMetrics_init_zero;
+            TEST_ASSERT_EQUAL_MESSAGE(n, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, n, tsOut, opt), msg);
+            biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, ts, tsOut, n, "round trip");
+            for (uint8_t i = 0; i < n; i++) {
+                const bool want = ((keep >> i) & 1u) != 0;
+                TEST_ASSERT_EQUAL_UINT32_MESSAGE(ts[i], tsOut[i], msg);
+                TEST_ASSERT_TRUE_MESSAGE(dst[i].has_battery_level, msg);
+                TEST_ASSERT_EQUAL_UINT32_MESSAGE(src[i].battery_level, dst[i].battery_level, msg);
+                // The point of the test: an absent field must come back absent, never invented.
+                TEST_ASSERT_EQUAL_MESSAGE(want, dst[i].has_voltage, msg);
+                TEST_ASSERT_EQUAL_MESSAGE(want, dst[i].has_uptime_seconds, msg);
+                if (want) {
+                    TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].voltage, dst[i].voltage, msg);
+                    TEST_ASSERT_EQUAL_UINT32_MESSAGE(src[i].uptime_seconds, dst[i].uptime_seconds, msg);
+                }
+            }
+        }
+    }
+}
+
+/// No field spans the whole batch - every column is ragged. This is the case that returned
+/// size 0 at every tier, so the batch could not be sent at all.
+void test_ragged_noColumnSpansTheBatch(void)
+{
+    const uint8_t n = 6;
+    meshtastic_DeviceMetrics src[BISCUIT_MAX_BATCH], dst[BISCUIT_MAX_BATCH];
+    uint32_t ts[BISCUIT_MAX_BATCH], tsOut[BISCUIT_MAX_BATCH];
+    for (uint8_t i = 0; i < n; i++) {
+        src[i] = meshtastic_DeviceMetrics_init_zero;
+        ts[i] = 1757000000u + 600u * i;
+        if (i < 3) {
+            src[i].has_battery_level = true;
+            src[i].battery_level = (uint32_t)(80 + i);
+        } else {
+            src[i].has_uptime_seconds = true;
+            src[i].uptime_seconds = 900u * i;
+        }
+    }
+    const void *sp[BISCUIT_MAX_BATCH];
+    void *dp[BISCUIT_MAX_BATCH];
+    for (uint8_t i = 0; i < n; i++)
+        sp[i] = &src[i], dp[i] = &dst[i];
+
+    Options opt;
+    opt.fixed32IsFloat = true;
+    opt.neverInflate = false;
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        opt.maxTier = tier;
+        char msg[32];
+        snprintf(msg, sizeof(msg), "tier %u", tier);
+        uint8_t buf[512];
+        Result r = encode(&meshtastic_DeviceMetrics_msg, sp, n, ts, buf, sizeof(buf), opt);
+        TEST_ASSERT_GREATER_THAN_MESSAGE(0, (int)r.size, msg);
+        for (uint8_t i = 0; i < n; i++)
+            dst[i] = meshtastic_DeviceMetrics_init_zero;
+        TEST_ASSERT_EQUAL_MESSAGE(n, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, n, tsOut, opt), msg);
+        biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, ts, tsOut, n, "round trip");
+        for (uint8_t i = 0; i < n; i++) {
+            TEST_ASSERT_EQUAL_MESSAGE(i < 3, dst[i].has_battery_level, msg);
+            TEST_ASSERT_EQUAL_MESSAGE(i >= 3, dst[i].has_uptime_seconds, msg);
+            if (i < 3)
+                TEST_ASSERT_EQUAL_UINT32_MESSAGE(src[i].battery_level, dst[i].battery_level, msg);
+            else
+                TEST_ASSERT_EQUAL_UINT32_MESSAGE(src[i].uptime_seconds, dst[i].uptime_seconds, msg);
+        }
+    }
+}
+
+/// A mask costs bytes, so it must only be paid when a column has gaps. Asserted as a relation
+/// rather than a pinned byte count: the same batch, with and without one reading's fields, must
+/// differ by the mask and the values it drops - and the full batch must never be the larger.
+void test_ragged_fullColumnsPayNothing(void)
+{
+    const uint8_t n = 12;
+    meshtastic_DeviceMetrics full[BISCUIT_MAX_BATCH], gap[BISCUIT_MAX_BATCH];
+    uint32_t ts[BISCUIT_MAX_BATCH];
+    makeRaggedBatch(full, ts, n, 0xFFFu);
+    makeRaggedBatch(gap, ts, n, 0xFDFu); // reading 5 loses voltage and uptime
+    const void *fp[BISCUIT_MAX_BATCH], *gp[BISCUIT_MAX_BATCH];
+    for (uint8_t i = 0; i < n; i++)
+        fp[i] = &full[i], gp[i] = &gap[i];
+
+    Options opt;
+    opt.fixed32IsFloat = true;
+    opt.neverInflate = false;
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        opt.maxTier = tier;
+        uint8_t bf[512], bg[512];
+        Result rf = encodeAtTier(&meshtastic_DeviceMetrics_msg, fp, n, ts, bf, sizeof(bf), opt, tier);
+        Result rg = encodeAtTier(&meshtastic_DeviceMetrics_msg, gp, n, ts, bg, sizeof(bg), opt, tier);
+        char msg[80];
+        snprintf(msg, sizeof(msg), "tier %u: full %u, one gap %u", tier, (unsigned)rf.size, (unsigned)rg.size);
+        TEST_ASSERT_GREATER_THAN_MESSAGE(0, (int)rf.size, msg);
+        TEST_ASSERT_GREATER_THAN_MESSAGE(0, (int)rg.size, msg);
+        // Two masks bought at 2 B each against two values dropped: the ragged batch may land
+        // either side, but never more than a few bytes above the batch that carries more data.
+        TEST_ASSERT_LESS_OR_EQUAL_MESSAGE(rf.size + 6, rg.size, msg);
+    }
+}
+
+/// The common PowerMetrics node: 93% of senders in the capture populate ch3 alone. With the
+/// family table configured, requiring every channel in every reading disqualified the family
+/// leader - and its other channels are skipped as non-leaders - so ch3 was dropped too. The
+/// batch encoded and reported success carrying nothing.
+void test_families_channelNeverPopulatedKeepsTheRest(void)
+{
+    const uint8_t n = 8;
+    meshtastic_PowerMetrics src[8], dst[8];
+    uint32_t ts[8], tsOut[8];
+    for (uint8_t i = 0; i < n; i++) {
+        src[i] = meshtastic_PowerMetrics_init_zero;
+        ts[i] = 1757000000u + 900u * i;
+        src[i].has_ch3_voltage = true;
+        src[i].ch3_voltage = 12.01f + 0.02f * i;
+        src[i].has_ch3_current = true;
+        src[i].ch3_current = 240.0f + 4.0f * i;
+    }
+    const void *sp[8];
+    void *dp[8];
+    for (uint8_t i = 0; i < n; i++)
+        sp[i] = &src[i], dp[i] = &dst[i];
+
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        Options opt;
+        opt.maxTier = tier;
+        opt.fixed32IsFloat = true;
+        opt.families = kPowerFamilies;
+        opt.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
+        opt.neverInflate = false;
+        char msg[32];
+        snprintf(msg, sizeof(msg), "tier %u", tier);
+
+        uint8_t buf[233];
+        Result r = encode(&meshtastic_PowerMetrics_msg, sp, n, ts, buf, sizeof(buf), opt);
+        TEST_ASSERT_GREATER_THAN_MESSAGE(0, (int)r.size, msg);
+        for (uint8_t i = 0; i < n; i++)
+            dst[i] = meshtastic_PowerMetrics_init_zero;
+        TEST_ASSERT_EQUAL_MESSAGE(n, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, n, tsOut, opt), msg);
+        biscuitcmp::assertSameBatch(&meshtastic_PowerMetrics_msg, src, dst, ts, tsOut, n, "round trip");
+        for (uint8_t i = 0; i < n; i++) {
+            TEST_ASSERT_TRUE_MESSAGE(dst[i].has_ch3_voltage, msg);
+            TEST_ASSERT_TRUE_MESSAGE(dst[i].has_ch3_current, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch3_voltage, dst[i].ch3_voltage, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch3_current, dst[i].ch3_current, msg);
+            // The channels this node does not wire up must stay absent, not arrive as zero.
+            TEST_ASSERT_FALSE_MESSAGE(dst[i].has_ch1_voltage, msg);
+            TEST_ASSERT_FALSE_MESSAGE(dst[i].has_ch2_voltage, msg);
+        }
+    }
+}
+
+/// A family with a hole in one channel: the sensor answered for some readings and not others.
+void test_families_raggedChannelSurvives(void)
+{
+    const uint8_t n = 8;
+    meshtastic_PowerMetrics src[8], dst[8];
+    uint32_t ts[8], tsOut[8];
+    for (uint8_t i = 0; i < n; i++) {
+        src[i] = meshtastic_PowerMetrics_init_zero;
+        ts[i] = 1757000000u + 900u * i;
+        src[i].has_ch1_voltage = true;
+        src[i].ch1_voltage = 3.90f + 0.01f * i;
+        src[i].has_ch2_voltage = (i != 3 && i != 4); // ch2 drops out for two readings
+        if (src[i].has_ch2_voltage)
+            src[i].ch2_voltage = 4.10f + 0.01f * i;
+        src[i].has_ch3_voltage = true;
+        src[i].ch3_voltage = 12.0f + 0.05f * i;
+    }
+    const void *sp[8];
+    void *dp[8];
+    for (uint8_t i = 0; i < n; i++)
+        sp[i] = &src[i], dp[i] = &dst[i];
+
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        Options opt;
+        opt.maxTier = tier;
+        opt.fixed32IsFloat = true;
+        opt.families = kPowerFamilies;
+        opt.familyCount = sizeof(kPowerFamilies) / sizeof(kPowerFamilies[0]);
+        opt.neverInflate = false;
+        char msg[32];
+        snprintf(msg, sizeof(msg), "tier %u", tier);
+
+        uint8_t buf[233];
+        Result r = encode(&meshtastic_PowerMetrics_msg, sp, n, ts, buf, sizeof(buf), opt);
+        TEST_ASSERT_GREATER_THAN_MESSAGE(0, (int)r.size, msg);
+        for (uint8_t i = 0; i < n; i++)
+            dst[i] = meshtastic_PowerMetrics_init_zero;
+        TEST_ASSERT_EQUAL_MESSAGE(n, decode(&meshtastic_PowerMetrics_msg, buf, r.size, dp, n, tsOut, opt), msg);
+        biscuitcmp::assertSameBatch(&meshtastic_PowerMetrics_msg, src, dst, ts, tsOut, n, "round trip");
+        for (uint8_t i = 0; i < n; i++) {
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch1_voltage, dst[i].ch1_voltage, msg);
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch3_voltage, dst[i].ch3_voltage, msg);
+            TEST_ASSERT_EQUAL_MESSAGE(src[i].has_ch2_voltage, dst[i].has_ch2_voltage, msg);
+            if (src[i].has_ch2_voltage)
+                TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, src[i].ch2_voltage, dst[i].ch2_voltage, msg);
+        }
+    }
+}
+
+// ------------------------------------------------------- tier selection
+
+/// Batches built to make each tier the cheapest, so the selector has something to select.
+///
+/// The levers, in the order the format exposes them:
+///   T1 - a single column with a high field number. Tier 2 names columns with a varint bitmap
+///        over field numbers, so one column at tag 22 costs a 4-byte mask where tier 1's
+///        explicit "count, then tag" costs 2. At n=2 there is one gap, so tier 2's
+///        delta-of-delta time buys nothing back.
+///   T2 - note this one can only ever tie tier 3, never beat it: tier 3 is tier 2 plus opt-in
+///        transformations, so with no hint supplied the two are byte-identical and the selector
+///        breaks the tie toward the lower tier. What the fixture shows is tier 2 beating tier 4,
+///        which is the case that actually occurs - 39% of two-reading batches in the capture.
+///        Two columns at low field numbers, so the bitmap is one byte where tier 1's tag list
+///        is three, over two readings with steps large enough that bit packing cannot beat a
+///        varint. Few columns is the lever against tier 4, not many: its flags byte, width
+///        table and per-column divisor cost more than two code bytes, and with one delta per
+///        column there is nothing for the bit area to win back.
+///   T3 - as T2, plus values whose deltas straddle the varint byte boundary, so a declared
+///        resolution shift pulls them under it. Nothing else at T3 costs anything.
+///   T4 - enough readings and columns that dropping per-column framing wins outright.
+enum WhichTier { WANT_T1, WANT_T2, WANT_T3, WANT_T4 };
+
+static uint8_t makeTierBatch(WhichTier which, meshtastic_EnvironmentMetrics *m, uint32_t *t)
+{
+    uint8_t n = 0;
+    switch (which) {
+    case WANT_T1:
+        n = 2;
+        for (uint8_t i = 0; i < n; i++) {
+            m[i] = meshtastic_EnvironmentMetrics_init_zero;
+            t[i] = 1757000000u + 1801u * i;
+            m[i].has_soil_temperature = true; // tag 22: expensive to name in a bitmap
+            m[i].soil_temperature = 11.5f + 0.25f * i;
+        }
+        return n;
+    case WANT_T2:
+        n = 2;
+        for (uint8_t i = 0; i < n; i++) {
+            m[i] = meshtastic_EnvironmentMetrics_init_zero;
+            t[i] = 1757000000u + 900u * i;
+            // Odd scaled values, so no divisor divides them and tier 4's GCD byte is dead
+            // weight; steps near 1.0 scale to ~10000, which needs two varint bytes and about
+            // fifteen packed bits, so bit packing saves nothing either.
+            m[i].has_temperature = true;
+            m[i].temperature = 20.0001f + 1.0003f * i;
+            m[i].has_relative_humidity = true;
+            m[i].relative_humidity = 51.0007f + 1.0009f * i;
+        }
+        return n;
+    case WANT_T3:
+        n = 4;
+        for (uint8_t i = 0; i < n; i++) {
+            m[i] = meshtastic_EnvironmentMetrics_init_zero;
+            t[i] = 1757000000u + 600u * i;
+            m[i].has_temperature = true;
+            m[i].temperature = 20.0f + 1.7f * i; // 17000 per step scaled: two varint bytes
+            m[i].has_barometric_pressure = true;
+            m[i].barometric_pressure = 1000.0f + 3.3f * i;
+        }
+        return n;
+    case WANT_T4:
+    default:
+        n = 16;
+        for (uint8_t i = 0; i < n; i++) {
+            m[i] = meshtastic_EnvironmentMetrics_init_zero;
+            t[i] = 1757000000u + 1200u * i;
+            m[i].has_temperature = true;
+            m[i].temperature = 21.0f + 0.01f * (float)(i % 5);
+            m[i].has_relative_humidity = true;
+            m[i].relative_humidity = 48.0f + 0.02f * (float)(i % 7);
+            m[i].has_barometric_pressure = true;
+            m[i].barometric_pressure = 1013.0f + 0.01f * (float)(i % 3);
+            m[i].has_gas_resistance = true;
+            m[i].gas_resistance = 150.0f + 0.5f * (float)(i % 4);
+        }
+        return n;
+    }
+}
+
+static const FieldHint kT3Hints[] = {
+    {1, true, 5, 100}, // temperature to 1/32 of a centi-degree
+    {3, true, 5, 100}, // barometric pressure likewise
+};
+
+/// The selector must emit the smallest encoding available at or below the cap, and say which
+/// tier that was. Asserted against the argmin computed by encoding each tier explicitly, so it
+/// holds whichever tier happens to win rather than assuming the manufactured one does.
+void test_tierSelection_emitsTheSmallestAvailable(void)
+{
+    static const WhichTier kCases[] = {WANT_T1, WANT_T2, WANT_T3, WANT_T4};
+    bool tierWon[BISCUIT_MAX_TIER + 1] = {false};
+
+    for (size_t k = 0; k < sizeof(kCases) / sizeof(kCases[0]); k++) {
+        meshtastic_EnvironmentMetrics src[BISCUIT_MAX_BATCH];
+        uint32_t ts[BISCUIT_MAX_BATCH];
+        const uint8_t n = makeTierBatch(kCases[k], src, ts);
+        const void *sp[BISCUIT_MAX_BATCH];
+        for (uint8_t i = 0; i < n; i++)
+            sp[i] = &src[i];
+
+        Options opt;
+        opt.fixed32IsFloat = true;
+        opt.neverInflate = false;
+        if (kCases[k] == WANT_T3) {
+            opt.hints = kT3Hints;
+            opt.hintCount = sizeof(kT3Hints) / sizeof(kT3Hints[0]);
+        }
+
+        // What each tier costs on its own, by capping the selector at that tier.
+        size_t sz[BISCUIT_MAX_TIER + 1] = {0};
+        size_t least = SIZE_MAX;
+        uint8_t argmin = 0;
+        for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+            Options one = opt;
+            one.maxTier = tier;
+            uint8_t buf[512];
+            const Result r = encodeAtTier(&meshtastic_EnvironmentMetrics_msg, sp, n, ts, buf, sizeof(buf), one, tier);
+            sz[tier] = r.size;
+            if (r.size && r.size < least) {
+                least = r.size;
+                argmin = tier;
+            }
+        }
+
+        char msg[160];
+        snprintf(msg, sizeof(msg), "case %u: t1 %u t2 %u t3 %u t4 %u", (unsigned)k, (unsigned)sz[1], (unsigned)sz[2],
+                 (unsigned)sz[3], BISCUIT_MAX_TIER >= 4 ? (unsigned)sz[4] : 0u);
+        // Printed so a fixture that stops exercising its tier can be retuned from one run
+        // rather than guessed at.
+        printf("    %s -> tier %u\n", msg, argmin);
+        TEST_ASSERT_GREATER_THAN_MESSAGE(0, (int)argmin, msg);
+
+        // Uncapped, the selector must land on exactly that.
+        opt.maxTier = BISCUIT_MAX_TIER;
+        uint8_t buf[512];
+        const Result got = encode(&meshtastic_EnvironmentMetrics_msg, sp, n, ts, buf, sizeof(buf), opt);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(least, (uint32_t)got.size, msg);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(argmin, got.tier, msg);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(argmin, peekTier(buf, got.size), msg);
+        tierWon[argmin] = true;
+        // A tie broken toward the lower tier is correct behaviour but proves nothing about the
+        // fixture, so each case must beat the top tier outright - the tier the encoder would
+        // have used without selection. Not the adjacent tier: tier 3 is tier 2 exactly whenever
+        // no resolution hint is given, because everything tier 3 adds is opt-in, so a tier-2
+        // fixture ties with tier 3 by construction and that tie means nothing.
+        if (argmin < BISCUIT_MAX_TIER)
+            TEST_ASSERT_TRUE_MESSAGE(sz[BISCUIT_MAX_TIER] && sz[argmin] < sz[BISCUIT_MAX_TIER], msg);
+
+        // And the packet it chose must still decode, whichever tier that was.
+        meshtastic_EnvironmentMetrics dst[BISCUIT_MAX_BATCH];
+        uint32_t tsOut[BISCUIT_MAX_BATCH];
+        void *dp[BISCUIT_MAX_BATCH];
+        for (uint8_t i = 0; i < n; i++)
+            dst[i] = meshtastic_EnvironmentMetrics_init_zero, dp[i] = &dst[i];
+        TEST_ASSERT_EQUAL_MESSAGE(n, decode(&meshtastic_EnvironmentMetrics_msg, buf, got.size, dp, n, tsOut, opt), msg);
+        // Case 2 declares a 1/32-of-a-centi-degree grid; the others are exact.
+        biscuitcmp::assertSameBatch(&meshtastic_EnvironmentMetrics_msg, src, dst, ts, tsOut, n, "round trip", true,
+                                    kCases[k] == WANT_T3 ? 0.33f : 0.0f);
+        for (uint8_t i = 0; i < n; i++)
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(ts[i], tsOut[i], msg);
+    }
+
+    // The fixtures are only doing their job if every tier wins at least once. Without this the
+    // test above would still pass with a selector that always returned the same tier.
+    for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+        char msg[72];
+        snprintf(msg, sizeof(msg), "no manufactured batch was cheapest at tier %u", tier);
+        TEST_ASSERT_TRUE_MESSAGE(tierWon[tier], msg);
+    }
+}
+
+/// A cap below the winning tier must be honoured, not quietly exceeded.
+void test_tierSelection_respectsTheCap(void)
+{
+    meshtastic_EnvironmentMetrics src[BISCUIT_MAX_BATCH];
+    uint32_t ts[BISCUIT_MAX_BATCH];
+    const uint8_t n = makeTierBatch(WANT_T4, src, ts);
+    const void *sp[BISCUIT_MAX_BATCH];
+    for (uint8_t i = 0; i < n; i++)
+        sp[i] = &src[i];
+
+    for (uint8_t cap = TIER_COLUMNAR; cap <= BISCUIT_MAX_TIER; cap++) {
+        Options opt;
+        opt.fixed32IsFloat = true;
+        opt.neverInflate = false;
+        opt.maxTier = cap;
+        uint8_t buf[512];
+        const Result r = encode(&meshtastic_EnvironmentMetrics_msg, sp, n, ts, buf, sizeof(buf), opt);
+        char msg[64];
+        snprintf(msg, sizeof(msg), "cap %u produced tier %u", cap, r.tier);
+        TEST_ASSERT_GREATER_THAN_MESSAGE(0, (int)r.size, msg);
+        TEST_ASSERT_LESS_OR_EQUAL_MESSAGE(cap, r.tier, msg);
+    }
+}
+
+/// The decoder counterpart to test_tierAboveCompiledMax_clamps: a packet claiming a tier this
+/// build does not implement must be refused outright. Nothing on the wire distinguishes a
+/// tier-4 body from a tier 1-3 one except the header nibble, so a build compiled below tier 4
+/// that ignored it would parse a bit area as column code bytes and return wrong numbers.
+void test_tierAboveCompiledMax_isRejectedOnDecode(void)
+{
+    meshtastic_DeviceMetrics src[BISCUIT_MAX_BATCH], dst[BISCUIT_MAX_BATCH];
+    uint32_t ts[BISCUIT_MAX_BATCH], tsOut[BISCUIT_MAX_BATCH];
+    const uint8_t n = 8;
+    makeDeviceBatch(src, ts, n);
+    const void *sp[BISCUIT_MAX_BATCH];
+    void *dp[BISCUIT_MAX_BATCH];
+    for (uint8_t i = 0; i < n; i++)
+        sp[i] = &src[i], dp[i] = &dst[i];
+
+    Options opt;
+    opt.fixed32IsFloat = true;
+    opt.neverInflate = false;
+    uint8_t buf[512];
+    const Result r = encode(&meshtastic_DeviceMetrics_msg, sp, n, ts, buf, sizeof(buf), opt);
+    TEST_ASSERT_GREATER_THAN(0, (int)r.size);
+    // Unmolested, it decodes.
+    for (uint8_t i = 0; i < n; i++)
+        dst[i] = meshtastic_DeviceMetrics_init_zero;
+    TEST_ASSERT_EQUAL(n, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, n, tsOut, opt));
+    biscuitcmp::assertSameBatch(&meshtastic_DeviceMetrics_msg, src, dst, ts, tsOut, n, "round trip");
+
+    const uint8_t good = buf[0];
+    // Tier 0 is not a tier.
+    buf[0] = (uint8_t)(good & 0xF8);
+    for (uint8_t i = 0; i < n; i++)
+        dst[i] = meshtastic_DeviceMetrics_init_zero;
+    TEST_ASSERT_EQUAL(0, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, n, tsOut, opt));
+
+    // And any tier above what this build implements.
+    for (uint8_t bad = BISCUIT_MAX_TIER + 1; bad <= 7; bad++) {
+        buf[0] = (uint8_t)((good & 0xF8) | bad);
+        for (uint8_t i = 0; i < n; i++)
+            dst[i] = meshtastic_DeviceMetrics_init_zero;
+        char msg[48];
+        snprintf(msg, sizeof(msg), "tier %u accepted", bad);
+        TEST_ASSERT_EQUAL_MESSAGE(0, decode(&meshtastic_DeviceMetrics_msg, buf, r.size, dp, n, tsOut, opt), msg);
+    }
+    buf[0] = good;
+}
+
+/// Every field the manufactured batches populate, compared presence-and-value.
+static void assertEnvEqual(const meshtastic_EnvironmentMetrics &a, const meshtastic_EnvironmentMetrics &b, const char *msg)
+{
+    TEST_ASSERT_EQUAL_MESSAGE(a.has_temperature, b.has_temperature, msg);
+    TEST_ASSERT_EQUAL_MESSAGE(a.has_relative_humidity, b.has_relative_humidity, msg);
+    TEST_ASSERT_EQUAL_MESSAGE(a.has_barometric_pressure, b.has_barometric_pressure, msg);
+    TEST_ASSERT_EQUAL_MESSAGE(a.has_gas_resistance, b.has_gas_resistance, msg);
+    TEST_ASSERT_EQUAL_MESSAGE(a.has_soil_temperature, b.has_soil_temperature, msg);
+    if (a.has_temperature)
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, a.temperature, b.temperature, msg);
+    if (a.has_relative_humidity)
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, a.relative_humidity, b.relative_humidity, msg);
+    if (a.has_barometric_pressure)
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, a.barometric_pressure, b.barometric_pressure, msg);
+    if (a.has_gas_resistance)
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, a.gas_resistance, b.gas_resistance, msg);
+    if (a.has_soil_temperature)
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0002f, a.soil_temperature, b.soil_temperature, msg);
+}
+
+/// Encode pinned to each tier in turn, on data that suits that tier and on data that does not:
+/// the packet must declare the tier it was built at, and must decode back to what went in.
+///
+/// This is the other half of the validation. test_tierAboveCompiledMax_isRejectedOnDecode proves
+/// a tier this build cannot read is refused; this proves every tier it can read is honoured
+/// exactly, and that the header nibble the decoder now checks is the one the encoder wrote.
+void test_everyTier_declaresItselfAndRoundTrips(void)
+{
+    static const WhichTier kCases[] = {WANT_T1, WANT_T2, WANT_T3, WANT_T4};
+
+    for (size_t k = 0; k < sizeof(kCases) / sizeof(kCases[0]); k++) {
+        meshtastic_EnvironmentMetrics src[BISCUIT_MAX_BATCH], dst[BISCUIT_MAX_BATCH];
+        uint32_t ts[BISCUIT_MAX_BATCH], tsOut[BISCUIT_MAX_BATCH];
+        const uint8_t n = makeTierBatch(kCases[k], src, ts);
+        const void *sp[BISCUIT_MAX_BATCH];
+        void *dp[BISCUIT_MAX_BATCH];
+        for (uint8_t i = 0; i < n; i++)
+            sp[i] = &src[i], dp[i] = &dst[i];
+
+        for (uint8_t tier = TIER_COLUMNAR; tier <= BISCUIT_MAX_TIER; tier++) {
+            Options opt; // deliberately no hints, so every tier here is lossless
+            opt.fixed32IsFloat = true;
+            opt.neverInflate = false;
+            char msg[80];
+            snprintf(msg, sizeof(msg), "batch %u pinned to tier %u", (unsigned)k, tier);
+
+            uint8_t buf[512];
+            const Result r = encodeAtTier(&meshtastic_EnvironmentMetrics_msg, sp, n, ts, buf, sizeof(buf), opt, tier);
+            TEST_ASSERT_GREATER_THAN_MESSAGE(0, (int)r.size, msg);
+            TEST_ASSERT_TRUE_MESSAGE(r.lossless, msg);
+
+            // Marked as such: the Result and the header must agree, and both must say `tier`.
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(tier, r.tier, msg);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(tier, peekTier(buf, r.size), msg);
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(n, peekCount(buf, r.size), msg);
+
+            for (uint8_t i = 0; i < n; i++)
+                dst[i] = meshtastic_EnvironmentMetrics_init_zero;
+            TEST_ASSERT_EQUAL_MESSAGE(n, decode(&meshtastic_EnvironmentMetrics_msg, buf, r.size, dp, n, tsOut, opt), msg);
+            biscuitcmp::assertSameBatch(&meshtastic_EnvironmentMetrics_msg, src, dst, ts, tsOut, n, "round trip");
+            for (uint8_t i = 0; i < n; i++) {
+                TEST_ASSERT_EQUAL_UINT32_MESSAGE(ts[i], tsOut[i], msg);
+                assertEnvEqual(src[i], dst[i], msg);
+            }
+        }
+    }
+}
+
+/// The tier nibble must actually drive the parse. Tiers 1 and 2 name columns differently - an
+/// explicit tag list against a bitmap - and tier 4 replaces the per-column bytes with a bit
+/// area, so a packet relabelled across those boundaries must not decode to the same readings.
+///
+/// Tiers 2 and 3 are deliberately excluded from each other: with no resolution hint supplied
+/// they are byte-identical by design, so relabelling between them is a no-op and proves nothing.
+void test_tierNibbleDrivesTheParse(void)
+{
+    meshtastic_EnvironmentMetrics src[BISCUIT_MAX_BATCH], dst[BISCUIT_MAX_BATCH];
+    uint32_t ts[BISCUIT_MAX_BATCH], tsOut[BISCUIT_MAX_BATCH];
+    const uint8_t n = makeTierBatch(WANT_T4, src, ts);
+    const void *sp[BISCUIT_MAX_BATCH];
+    void *dp[BISCUIT_MAX_BATCH];
+    for (uint8_t i = 0; i < n; i++)
+        sp[i] = &src[i], dp[i] = &dst[i];
+
+    Options opt;
+    opt.fixed32IsFloat = true;
+    opt.neverInflate = false;
+
+    static const uint8_t kPairs[][2] = {{1, 2}, {2, 1}, {4, 2}, {2, 4}, {4, 1}};
+    unsigned exercised = 0;
+    for (size_t q = 0; q < sizeof(kPairs) / sizeof(kPairs[0]); q++) {
+        const uint8_t wrote = kPairs[q][0], claims = kPairs[q][1];
+        if (wrote > BISCUIT_MAX_TIER || claims > BISCUIT_MAX_TIER)
+            continue;
+        uint8_t buf[512];
+        const Result r = encodeAtTier(&meshtastic_EnvironmentMetrics_msg, sp, n, ts, buf, sizeof(buf), opt, wrote);
+        TEST_ASSERT_GREATER_THAN(0, (int)r.size);
+        buf[0] = (uint8_t)((buf[0] & 0xF8) | claims); // relabel, body untouched
+        exercised++;
+
+        for (uint8_t i = 0; i < n; i++)
+            dst[i] = meshtastic_EnvironmentMetrics_init_zero;
+        // No full-message check here: a relabelled packet decoding to something other than
+        // the original is exactly what this test requires, and is asserted below.
+        const uint8_t got = decode(&meshtastic_EnvironmentMetrics_msg, buf, r.size, dp, n, tsOut, opt);
+
+        char msg[80];
+        snprintf(msg, sizeof(msg), "tier %u body relabelled tier %u decoded clean", wrote, claims);
+        if (got == 0)
+            continue; // refused, which is the outcome we want
+        // If it did decode, it must not have produced the original readings.
+        bool identical = true;
+        for (uint8_t i = 0; i < n && identical; i++) {
+            if (ts[i] != tsOut[i] || src[i].has_temperature != dst[i].has_temperature ||
+                src[i].has_gas_resistance != dst[i].has_gas_resistance)
+                identical = false;
+            else if (src[i].has_temperature && fabsf(src[i].temperature - dst[i].temperature) > 0.0002f)
+                identical = false;
+        }
+        TEST_ASSERT_FALSE_MESSAGE(identical, msg);
+    }
+    // Every pair being refused is a legitimate outcome, but then nothing above ran.
+    // Without this the test passes while asserting nothing about the nibble at all.
+    TEST_ASSERT_GREATER_THAN_UINT32_MESSAGE(0, exercised, "no relabelled packet was built");
+}
+
 void setup()
 {
     initializeTestEnvironment();
@@ -965,7 +1623,7 @@ void setup()
     RUN_TEST(test_roundTrip_tier4_isExact);
 #endif
     RUN_TEST(test_roundTrip_everyBatchSize);
-    RUN_TEST(test_higherTiersAreNotLarger);
+    RUN_TEST(test_selectedEncodingBeatsEveryTier);
     RUN_TEST(test_resolutionShift_errorIsBounded);
     RUN_TEST(test_shortBuffer_failsWithoutOverrun);
     RUN_TEST(test_corruptHeader_isRejected);
@@ -989,6 +1647,16 @@ void setup()
     RUN_TEST(test_uptimeAges_datedAgainstReceiverClockMatchOriginals);
     RUN_TEST(test_uptimeAges_allZeroGapsRoundTrip);
     RUN_TEST(test_uptimeAges_areNoLargerThanEpochs);
+    RUN_TEST(test_ragged_absentReadingsStayAbsent);
+    RUN_TEST(test_ragged_noColumnSpansTheBatch);
+    RUN_TEST(test_ragged_fullColumnsPayNothing);
+    RUN_TEST(test_families_channelNeverPopulatedKeepsTheRest);
+    RUN_TEST(test_families_raggedChannelSurvives);
+    RUN_TEST(test_tierSelection_emitsTheSmallestAvailable);
+    RUN_TEST(test_tierSelection_respectsTheCap);
+    RUN_TEST(test_tierAboveCompiledMax_isRejectedOnDecode);
+    RUN_TEST(test_everyTier_declaresItselfAndRoundTrips);
+    RUN_TEST(test_tierNibbleDrivesTheParse);
     exit(UNITY_END());
 }
 

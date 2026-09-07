@@ -44,7 +44,9 @@
 namespace biscuit
 {
 
-/// Wire format version. Bumped only for an incompatible layout change.
+/// Wire format version. Bumped only for an incompatible layout change, and nothing has been
+/// released, so the format is still free to move under version 1. Decode rejects any other
+/// version outright, which is what makes a later bump a clean break rather than a misread.
 static constexpr uint8_t VERSION = 1;
 
 enum Tier : uint8_t {
@@ -115,6 +117,15 @@ struct Result {
  */
 Result encode(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, const uint32_t *times, uint8_t *out, size_t cap,
               const Options &opt = Options());
+
+/**
+ * Encode at exactly `tier`, skipping the selection encode() performs. For measurement and tests,
+ * where the question is "what does tier 2 cost on this batch" - a production caller wants
+ * encode(), which never emits a packet a lower tier would have made smaller. `tier` is clamped
+ * to the compiled maximum.
+ */
+Result encodeAtTier(const pb_msgdesc_t *desc, const void *const *msgs, uint8_t n, const uint32_t *times, uint8_t *out, size_t cap,
+                    const Options &opt, uint8_t tier);
 
 /**
  * Decode a batch previously produced by encode(). `msgs` must point at n zero-initialised
