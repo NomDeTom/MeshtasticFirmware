@@ -118,6 +118,6 @@ class BaseTelemetryModule
 
     virtual void onPublishedTelemetry(const meshtastic_MeshPacket &p) {}
 
-    bool publishTelemetry(meshtastic_Telemetry &m, NodeNum dest, bool phoneOnly);
+    bool publishTelemetry(const meshtastic_Telemetry &m, NodeNum dest, bool phoneOnly);
     template <typename T, uint8_t N> bool publishBufferedTelemetry(TelemetryHistoryBuffer<T, N> &history, PublishTarget target);
 };

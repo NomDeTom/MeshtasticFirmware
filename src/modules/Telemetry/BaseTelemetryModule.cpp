@@ -15,7 +15,7 @@
  * Build a packet from an already-populated reading and send it to the mesh or the phone.
  * @return true if the packet was built and handed off to send
  */
-bool BaseTelemetryModule::publishTelemetry(meshtastic_Telemetry &m, NodeNum dest, bool phoneOnly)
+bool BaseTelemetryModule::publishTelemetry(const meshtastic_Telemetry &m, NodeNum dest, bool phoneOnly)
 {
     meshtastic_MeshPacket *p = allocTelemetryPacket(m);
     if (!p)
