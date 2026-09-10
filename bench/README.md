@@ -13,12 +13,12 @@ It is Python, runs on the host, and is independent of the native C++ suite in
 ## Running
 
 ```bash
-python -m bench nodes                        # what is plugged in
-python -m bench nodes --write bench/nodes.json   # seed a node table from it
-python -m bench preflight                    # stage -1 only; prints the bus it found
+python -m bench nodes                               # what is plugged in
+python -m bench nodes --write bench/nodes.json      # seed a node table from it
+python -m bench preflight                           # stage -1 only; prints the bus it found
 python -m bench --run smoke run --scenarios smoke   # a full run
 python -m bench serve --port 8730 --host 0.0.0.0    # status daemon over every run
-python -m bench status                       # one line, for a terminal or a notification
+python -m bench status                              # one line, for a terminal or a notification
 ```
 
 `--scenarios` takes a bare table name from [`scenarios/`](scenarios/) (`smoke`, `lbt`) or a
