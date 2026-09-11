@@ -607,7 +607,7 @@ class AnalogBatteryLevel : public HasBatteryLevel
             // get current flow from INA sensor - negative value means power flowing
             // into the battery default assuming  BATTERY+  <--> INA_VIN+ <--> SHUNT
             // RESISTOR <--> INA_VIN- <--> LOAD
-            LOG_TRACE("Using INA on I2C addr 0x%x for charging detection", config.power.device_battery_ina_address);
+            LOG_TRACE("Using INA on I2C addr 0x%x for charging detection", inaBatteryAddress());
 #if defined(INA_CHARGING_DETECTION_INVERT)
             return getINACurrent() > 0;
 #else
@@ -668,16 +668,13 @@ class AnalogBatteryLevel : public HasBatteryLevel
 #if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
     uint16_t getINAVoltage()
     {
-        if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA219].first == config.power.device_battery_ina_address) {
+        if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA219].first == inaBatteryAddress()) {
             return ina219Sensor.getBusVoltageMv();
-        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA226].first ==
-                   config.power.device_battery_ina_address) {
+        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA226].first == inaBatteryAddress()) {
             return ina226Sensor.getBusVoltageMv();
-        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA260].first ==
-                   config.power.device_battery_ina_address) {
+        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA260].first == inaBatteryAddress()) {
             return ina260Sensor.getBusVoltageMv();
-        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA3221].first ==
-                   config.power.device_battery_ina_address) {
+        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA3221].first == inaBatteryAddress()) {
             return ina3221Sensor.getBusVoltageMv();
         }
         return 0;
@@ -685,16 +682,13 @@ class AnalogBatteryLevel : public HasBatteryLevel
 
     int16_t getINACurrent()
     {
-        if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA219].first == config.power.device_battery_ina_address) {
+        if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA219].first == inaBatteryAddress()) {
             return ina219Sensor.getCurrentMa();
-        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA226].first ==
-                   config.power.device_battery_ina_address) {
+        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA226].first == inaBatteryAddress()) {
             return ina226Sensor.getCurrentMa();
-        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA260].first ==
-                   config.power.device_battery_ina_address) {
+        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA260].first == inaBatteryAddress()) {
             return ina260Sensor.getCurrentMa();
-        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA3221].first ==
-                   config.power.device_battery_ina_address) {
+        } else if (nodeTelemetrySensorsMap[meshtastic_TelemetrySensorType_INA3221].first == inaBatteryAddress()) {
             return ina3221Sensor.getCurrentMa();
         }
         return 0;
@@ -709,15 +703,24 @@ class AnalogBatteryLevel : public HasBatteryLevel
         return sensor.isRunning();
     }
 
+    // The configured address wins; a board that hardwires an INA to the battery names it in the
+    // variant instead. Never written back to config, so what the user set stays what they set.
+    static uint8_t inaBatteryAddress()
+    {
+        if (config.power.device_battery_ina_address) {
+            return config.power.device_battery_ina_address;
+        }
+#ifdef BATTERY_INA_ADDRESS
+        return BATTERY_INA_ADDRESS;
+#else
+        return 0;
+#endif
+    }
+
+  public:
     bool hasINA()
     {
-        uint8_t inaAddress = config.power.device_battery_ina_address;
-#ifdef BATTERY_INA_ADDRESS
-        if (!inaAddress) {
-            inaAddress = BATTERY_INA_ADDRESS;
-            config.power.device_battery_ina_address = inaAddress;
-        }
-#endif
+        const uint8_t inaAddress = inaBatteryAddress();
         if (!inaAddress) {
             return false;
         }
@@ -875,23 +878,6 @@ Power::Power() : OSThread("Power")
 #endif
 }
 
-bool Power::inaInit()
-{
-#if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
-#ifdef BATTERY_INA_ADDRESS
-    if (!config.power.device_battery_ina_address) {
-        config.power.device_battery_ina_address = BATTERY_INA_ADDRESS;
-    }
-#endif
-    if (config.power.device_battery_ina_address) {
-        batteryLevel = &analogLevel;
-        LOG_INFO("Power: INA battery sensor at 0x%x", config.power.device_battery_ina_address);
-        return true;
-    }
-#endif
-    return false;
-}
-
 bool Power::analogInit()
 {
 #ifdef EXT_PWR_DETECT
@@ -949,6 +935,15 @@ bool Power::analogInit()
     batteryLevel = &analogLevel;
     return true;
 #else
+#if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+    // No ADC pin, but AnalogBatteryLevel already prefers a configured INA over one, so it can
+    // carry the battery on its own. hasINA() only agrees once the sensor has actually answered.
+    if (analogLevel.hasINA()) {
+        LOG_INFO("Use INA sensor for battery level");
+        batteryLevel = &analogLevel;
+        return true;
+    }
+#endif
     return false;
 #endif
 }
@@ -983,8 +978,6 @@ bool Power::setup()
     } else if (ads1115Init()) {
         found = true;
 #endif
-    } else if (inaInit()) {
-        found = true;
     } else if (analogInit()) {
         found = true;
     } else {
