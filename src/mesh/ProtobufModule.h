@@ -8,17 +8,34 @@
  * If you are using protobufs to encode your packets (recommended) you can use this as a baseclass for your module
  * and avoid a bunch of boilerplate code.
  */
-template <class T> class ProtobufModule : protected SinglePortModule
+/**
+ * The half of ProtobufModule<T> that does not depend on T. The decode differed only in sizeof(T),
+ * so it is shared here rather than instantiated once per message type.
+ */
+class ProtobufModuleBase : protected SinglePortModule
 {
+  protected:
     const pb_msgdesc_t *fields;
 
+    ProtobufModuleBase(const char *_name, meshtastic_PortNum _ourPortNum, const pb_msgdesc_t *_fields)
+        : SinglePortModule(_name, _ourPortNum), fields(_fields)
+    {
+    }
+
+    enum class ScratchDecode { NotOurs, Decoded, Failed };
+    /// Decode into `scratch` when the packet is ours to read. Defined in ProtobufModule.cpp.
+    ScratchDecode decodeScratch(const meshtastic_MeshPacket &mp, void *scratch, size_t size, bool logReceived);
+};
+
+template <class T> class ProtobufModule : protected ProtobufModuleBase
+{
   public:
     uint16_t numOnlineNodes = 0;
     /** Constructor
      * name is for debugging output
      */
     ProtobufModule(const char *_name, meshtastic_PortNum _ourPortNum, const pb_msgdesc_t *_fields)
-        : SinglePortModule(_name, _ourPortNum), fields(_fields)
+        : ProtobufModuleBase(_name, _ourPortNum, _fields)
     {
     }
 
@@ -83,21 +100,16 @@ template <class T> class ProtobufModule : protected SinglePortModule
         // FIXME - we currently update position data in the DB only if the message was a broadcast or destined to us
         // it would be better to update even if the message was destined to others.
 
-        auto &p = mp.decoded;
-
         T scratch;
         T *decoded = NULL;
-        if (mp.which_payload_variant == meshtastic_MeshPacket_decoded_tag && mp.decoded.portnum == ourPortNum) {
-            memset(&scratch, 0, sizeof(scratch));
-            if (pb_decode_from_bytes(p.payload.bytes, p.payload.size, fields, &scratch)) {
-                decoded = &scratch;
-                LOG_INFO("Received %s from=0x%08x, id=0x%08x, portnum=%d, payloadlen=%d", name, mp.from, mp.id, p.portnum,
-                         p.payload.size);
-            } else {
-                LOG_ERROR("Error decoding proto module");
-                // if we can't decode it, nobody can process it!
-                return ProcessMessage::STOP;
-            }
+        switch (decodeScratch(mp, &scratch, sizeof(scratch), /*logReceived=*/true)) {
+        case ScratchDecode::Failed:
+            return ProcessMessage::STOP; // if we can't decode it, nobody can process it!
+        case ScratchDecode::Decoded:
+            decoded = &scratch;
+            break;
+        case ScratchDecode::NotOurs:
+            break;
         }
 
         return handleReceivedProtobuf(mp, decoded) ? ProcessMessage::STOP : ProcessMessage::CONTINUE;
@@ -108,19 +120,7 @@ template <class T> class ProtobufModule : protected SinglePortModule
     virtual void alterReceived(meshtastic_MeshPacket &mp) override
     {
         T scratch;
-        T *decoded = NULL;
-        if (mp.which_payload_variant == meshtastic_MeshPacket_decoded_tag && mp.decoded.portnum == ourPortNum) {
-            memset(&scratch, 0, sizeof(scratch));
-            const meshtastic_Data &p = mp.decoded;
-            if (pb_decode_from_bytes(p.payload.bytes, p.payload.size, fields, &scratch)) {
-                decoded = &scratch;
-            } else {
-                LOG_ERROR("Error decoding proto module");
-                // if we can't decode it, nobody can process it!
-                return;
-            }
-
-            return alterReceivedProtobuf(mp, decoded);
-        }
+        if (decodeScratch(mp, &scratch, sizeof(scratch), /*logReceived=*/false) == ScratchDecode::Decoded)
+            alterReceivedProtobuf(mp, &scratch);
     }
 };
