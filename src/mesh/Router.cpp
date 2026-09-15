@@ -1641,14 +1641,8 @@ void Router::dispatchReceived(meshtastic_MeshPacket *p, RxSource src)
         if (p_encrypted == nullptr) {
             LOG_WARN("p_encrypted null, skip MQTT publish");
         } else {
-            // Mark as pki_encrypted if it is not yet decoded and MQTT encryption is also enabled, hash matches and it's a DM not
-            // to us (because we would be able to decrypt it)
-            if (decodedState == DecodeState::DECODE_OPAQUE && moduleConfig.mqtt.encryption_enabled && p->channel == 0x00 &&
-                !isBroadcast(p->to) && !isToUs(p))
-                p_encrypted->pki_encrypted = true;
-            // After potentially altering it, publish received message to MQTT if we're not the original transmitter of the packet
-            if ((decodedState == DecodeState::DECODE_SUCCESS || p_encrypted->pki_encrypted) && moduleConfig.mqtt.enabled &&
-                !isFromUs(p) && mqtt) {
+            // Opaque PKI DMs never reach here (uplinkOpaqueUnicast handles them); this path is decoded only.
+            if (decodedState == DecodeState::DECODE_SUCCESS && moduleConfig.mqtt.enabled && !isFromUs(p) && mqtt) {
                 if (decodedState == DecodeState::DECODE_SUCCESS && p->decoded.portnum == meshtastic_PortNum_TRACEROUTE_APP &&
                     moduleConfig.mqtt.encryption_enabled) {
                     // For TRACEROUTE_APP packets release the original encrypted packet and encrypt a new from the changed packet
@@ -1780,7 +1774,7 @@ void Router::handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable)
     if (isFromUs(p) || p->from == 0 || p->id == 0)
         return;
     // Straight to the phone queue: handleFromRadio() would updateFrom() NodeDB for an unverified sender.
-    // The relay mode gates this too; NONE is "do not relay", not "do not listen".
+    // The relay mode gates this too; NONE is "do not relay", not "do not listen". MQTT gates itself.
     const bool modeAllowsPhone =
         config.device.rebroadcast_mode == meshtastic_Config_DeviceConfig_RebroadcastMode_NONE || opaqueAllowedByMode(p);
     if (unreadable && modeAllowsPhone && (isToUs(p) || isBroadcast(p->to)) && service) {
@@ -1792,6 +1786,24 @@ void Router::handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable)
             service->sendToPhone(toPhone, /*alreadyClassified=*/true); // the gate already spent the fallback budget
         }
     }
+}
+
+/// A PKI DM between two other nodes, uplinked as ciphertext when encrypted uplink is on and marked
+/// pki_encrypted. MQTT gates itself, so rebroadcast_mode does not apply here.
+void Router::uplinkOpaqueUnicast(const meshtastic_MeshPacket *p, bool unreadable)
+{
+#if !MESHTASTIC_EXCLUDE_MQTT
+    // Only a frame we had no way to read: a failed decrypt on a channel we hold is not PKI ciphertext.
+    if (!unreadable || !mqtt || !moduleConfig.mqtt.enabled || !moduleConfig.mqtt.encryption_enabled || p->channel != 0 ||
+        p->id == 0 || isBroadcast(p->to) || isToUs(p) || isFromUs(p))
+        return;
+    meshtastic_MeshPacket copy = *p;
+    copy.pki_encrypted = true;
+    mqtt->onSend(copy, copy, p->channel);
+#else
+    (void)p;
+    (void)unreadable;
+#endif
 }
 
 void Router::perhapsHandleReceived(meshtastic_MeshPacket *p)
@@ -1856,7 +1868,9 @@ void Router::perhapsHandleReceived(meshtastic_MeshPacket *p)
         // generate it here from the still-encrypted packet before opaque relay.
         if (isFromUs(p))
             perhapsGenerateImplicitAckForOwnOverheard(p);
-        handleOpaqueForUs(p, gateState == DecodeState::DECODE_OPAQUE);
+        const bool unreadable = gateState == DecodeState::DECODE_OPAQUE;
+        handleOpaqueForUs(p, unreadable);
+        uplinkOpaqueUnicast(p, unreadable);
         relayOpaquePacket(p);
         packetPool.release(p);
         return;

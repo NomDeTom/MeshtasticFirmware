@@ -147,6 +147,9 @@ class Router : protected concurrency::OSThread, protected PacketHistory
     /** Phone delivery for an opaque packet addressed to us (or a broadcast we cannot read). Never a NAK. */
     void handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable);
 
+    /** MQTT uplink of an opaque PKI unicast between other nodes, when encrypted uplink is enabled. */
+    void uplinkOpaqueUnicast(const meshtastic_MeshPacket *p, bool unreadable);
+
     // Return true if we are a rebroadcaster. Reads config only, so every relay path can ask.
     bool isRebroadcaster();
 
@@ -299,8 +302,8 @@ enum class RoutingAuthVerdict { ACCEPT, OPAQUE_RELAY_ONLY, REJECT };
 DecodeState perhapsDecode(meshtastic_MeshPacket *p);
 
 /** Apply receive authentication before routing state mutation. A packet we cannot read is handled from its
- *  header alone - relayed, or shown to the phone per `rebroadcast_mode`, never answered - and never admitted
- *  to local state. `decodeState`, when given, receives the attempt's DecodeState. */
+ *  header alone - relayed, shown to the phone or uplinked per `rebroadcast_mode`, never answered - and never
+ *  admitted to local state. `decodeState`, when given, receives the attempt's DecodeState. */
 RoutingAuthVerdict passesRoutingAuthGate(meshtastic_MeshPacket *p, DecodeState *decodeState = nullptr);
 #ifdef PIO_UNIT_TESTING
 uint32_t routingAuthEvaluationCount();
