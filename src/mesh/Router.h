@@ -139,16 +139,10 @@ class Router : protected concurrency::OSThread, protected PacketHistory
     virtual bool shouldFilterReceived(const meshtastic_MeshPacket *p) { return false; }
 
     /** Relay an opaque packet without admitting it to local routing/history state. */
-    bool relayOpaquePacket(const meshtastic_MeshPacket *p);
+    bool relayOpaquePacket(const meshtastic_MeshPacket *p, bool seen);
 
     /** rebroadcast_mode for a packet we cannot read; the port list and sender are inside the ciphertext. */
     bool opaqueAllowedByMode(const meshtastic_MeshPacket *p);
-
-    /** Phone delivery for an opaque packet addressed to us (or a broadcast we cannot read). Never a NAK. */
-    void handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable);
-
-    /** MQTT uplink of an opaque PKI unicast between other nodes, when encrypted uplink is enabled. */
-    void uplinkOpaqueUnicast(const meshtastic_MeshPacket *p, bool unreadable);
 
     // Return true if we are a rebroadcaster. Reads config only, so every relay path can ask.
     bool isRebroadcaster();
@@ -157,6 +151,12 @@ class Router : protected concurrency::OSThread, protected PacketHistory
     /** Cap a relay copy's hop budget to the event-mode limit, keeping hop_start consistent. */
     static void capEventRelayHops(meshtastic_MeshPacket *packet);
 #endif
+
+    /** Phone delivery for an opaque packet addressed to us (or a broadcast we cannot read). Never a NAK. */
+    void handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable);
+
+    /** MQTT uplink of an opaque PKI unicast between other nodes, when encrypted uplink is enabled. */
+    void uplinkOpaqueUnicast(const meshtastic_MeshPacket *p, bool unreadable);
 
     /**
      * Generate the implicit ACK for our own transmission overheard being rebroadcast, using header
@@ -196,8 +196,8 @@ class Router : protected concurrency::OSThread, protected PacketHistory
      * Recently-seen opaque (undecryptable) frames, keyed on the outer (from,id) header. Deliberately
      * separate from PacketHistory: it bounds amplification of frames we cannot decrypt without ever
      * letting them influence routing / ACK / next-hop. Fixed-size RAM ring, FIFO eviction, no
-     * timestamps (ids are effectively random). A real entry never has id 0 - relayOpaquePacket drops
-     * id 0 before this - so an empty slot cannot false-match.
+     * timestamps (ids are effectively random). Records only frames some consumer can act on; id 0 is
+     * never recorded and never acted on, so an empty slot cannot false-match.
      */
     struct OpaqueSeen {
         NodeNum sender = 0;
