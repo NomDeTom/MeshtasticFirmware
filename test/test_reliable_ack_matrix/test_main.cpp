@@ -207,6 +207,33 @@ static MockRoutingModule *mockRoutingModule = nullptr;
 static std::unique_ptr<ScopedAirTimeFixture> airTimeFixture;
 static PacketId nextTestPacketId = 0x7A000000;
 
+/// Send `p` through the router for real - send() encodes it, records what a relay copy must carry, and
+/// starts the retransmission - and return the frame as it left the radio. The wire form, not a stand-in.
+static meshtastic_MeshPacket seedViaSend(const meshtastic_MeshPacket &p)
+{
+    auto *copy = packetPool.allocCopy(p);
+    TEST_ASSERT_NOT_NULL(copy);
+    const size_t before = radio->sentPackets.size();
+    TEST_ASSERT_EQUAL_INT(ERRNO_OK, reliableShim->send(copy));
+    TEST_ASSERT_EQUAL_MESSAGE(before + 1, radio->sentPackets.size(), "send() must hand exactly one frame to the radio");
+    TEST_ASSERT_EQUAL(meshtastic_MeshPacket_encrypted_tag, radio->sentPackets.back().which_payload_variant);
+    return radio->sentPackets.back();
+}
+
+/// The frame a neighbour repeats: our bytes, one hop spent, its own relay_node and link quality.
+static meshtastic_MeshPacket relayedCopyOf(const meshtastic_MeshPacket &wire, uint8_t relayNode,
+                                           meshtastic_MeshPacket_TransportMechanism transport)
+{
+    meshtastic_MeshPacket p = wire;
+    p.hop_limit = wire.hop_limit > 0 ? wire.hop_limit - 1 : 0;
+    p.relay_node = relayNode;
+    p.transport_mechanism = transport;
+    p.has_rx_rssi = true;
+    p.rx_rssi = -87;
+    p.rx_snr = 6.25f;
+    return p;
+}
+
 // ---------------------------------------------------------------------------
 // Packet builders
 // ---------------------------------------------------------------------------
@@ -463,6 +490,20 @@ void test_pki_known_key_sender_gets_no_channel_nak(void)
                        /*ackWantsAck=*/false);
 }
 
+void test_short_channel0_frame_from_unknown_sender_gets_no_channel_nak(void)
+{
+    // Channel 0 from an unknown sender, but too short to carry the PKI overhead: it was never a PKI
+    // frame, so no key was missing. NO_CHANNEL, the same verdict Router's opaque classification gives it.
+    auto p = makeEncryptedToUs(/*channel=*/0, /*wantAck=*/true);
+    p.encrypted.size = MESHTASTIC_PKC_OVERHEAD;
+    uint8_t expectedHop = mockRoutingModule->getHopLimitForResponse(p);
+
+    reliableShim->sniffForTest(&p, nullptr);
+
+    expectSingleAckNak(meshtastic_Routing_Error_NO_CHANNEL, kRemoteNode, p.id, channels.getPrimaryIndex(), expectedHop,
+                       /*ackWantsAck=*/false);
+}
+
 void test_unknown_channel_hash_gets_no_channel_nak(void)
 {
     // Nonzero channel hash we cannot decode -> NO_CHANNEL on the primary channel (not the hash).
@@ -637,25 +678,13 @@ void test_remote_ack_via_mqtt_still_stops_retransmissions(void)
 
 void test_overheard_own_dm_rebroadcast_mints_implicit_ack(void)
 {
-    // The implicit ACK is minted from the header alone (from/id), so this route must work on a
-    // still-encrypted packet, and the LoRa copy stops the retransmissions.
+    // A neighbour repeats the frame exactly as we sent it, still encrypted; the LoRa copy mints the
+    // ACK and stops the retransmissions.
     auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
-    reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
+    const auto wire = seedViaSend(original);
+    mockRoutingModule->ackNaks.clear();
 
-    meshtastic_MeshPacket overheard = meshtastic_MeshPacket_init_zero;
-    overheard.from = kLocalNode;
-    overheard.to = kRemoteNode;
-    overheard.id = original.id;
-    overheard.hop_start = 3;
-    overheard.hop_limit = 2;
-    overheard.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA;
-    overheard.which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
-    overheard.encrypted.size = 32;
-    overheard.relay_node = 0x99;
-    overheard.has_rx_rssi = true;
-    overheard.rx_rssi = -87;
-    overheard.rx_snr = 6.25f;
-
+    auto overheard = relayedCopyOf(wire, 0x99, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA);
     reliableShim->filterForTest(&overheard);
 
     // ACK is addressed to us (so it reaches the phone) on the pending copy's channel.
@@ -669,18 +698,10 @@ void test_overheard_own_dm_via_mqtt_acks_but_keeps_retransmissions(void)
 {
     // The MQTT copy still surfaces "Delivered to mesh" but must not cancel the LoRa retries.
     auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
-    reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
+    const auto wire = seedViaSend(original);
+    mockRoutingModule->ackNaks.clear();
 
-    meshtastic_MeshPacket overheard = meshtastic_MeshPacket_init_zero;
-    overheard.from = kLocalNode;
-    overheard.to = kRemoteNode;
-    overheard.id = original.id;
-    overheard.hop_start = 3;
-    overheard.hop_limit = 2;
-    overheard.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT;
-    overheard.which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
-    overheard.encrypted.size = 32;
-
+    auto overheard = relayedCopyOf(wire, 0x99, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT);
     reliableShim->filterForTest(&overheard);
 
     expectSingleAckNak(meshtastic_Routing_Error_NONE, kLocalNode, original.id, 1, /*hopLimit=*/0, /*ackWantsAck=*/false);
@@ -691,18 +712,12 @@ void test_overheard_foreign_packet_mints_no_implicit_ack(void)
 {
     // Someone else's traffic must never mint an ACK, even with a colliding packet id.
     auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
-    reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
+    const auto wire = seedViaSend(original);
+    mockRoutingModule->ackNaks.clear();
 
-    meshtastic_MeshPacket foreign = meshtastic_MeshPacket_init_zero;
+    auto foreign = relayedCopyOf(wire, 0x99, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA);
     foreign.from = kRemoteNode;
     foreign.to = kThirdNode;
-    foreign.id = original.id;
-    foreign.hop_start = 3;
-    foreign.hop_limit = 2;
-    foreign.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA;
-    foreign.which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
-    foreign.encrypted.size = 32;
-
     reliableShim->filterForTest(&foreign);
 
     TEST_ASSERT_EQUAL_UINT32(0, mockRoutingModule->ackNaks.size());
@@ -716,27 +731,14 @@ void test_overheard_foreign_packet_mints_no_implicit_ack(void)
 // queue (enqueueReceivedMessage + runOnce), so deleting that branch fails these tests.
 // ===========================================================================
 
-// An encrypted copy of our own DM under an unknown channel hash: not to us (no PKI attempt), no
-// hash match -> DECODE_OPAQUE -> OPAQUE_RELAY_ONLY. hop_limit > 0 so the opaque relay does not
-// short-circuit before the ACK branch.
-static meshtastic_MeshPacket makeOpaqueOwnOverheard(PacketId id, meshtastic_MeshPacket_TransportMechanism transport)
+/// Forget the channel a frame was sent on, so our own frame is as unreadable to us as a PKI DM we
+/// originated: the wire hash matches nothing we hold and ingress classifies it opaque.
+static void forgetChannelOf(const meshtastic_MeshPacket &wire)
 {
-    meshtastic_MeshPacket p = meshtastic_MeshPacket_init_zero;
-    p.from = kLocalNode;
-    p.to = kRemoteNode;
-    p.id = id;
-    p.channel = 0x5A;
-    p.hop_start = 3;
-    p.hop_limit = 2;
-    p.transport_mechanism = transport;
-    p.which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
-    p.encrypted.size = 32;
-    memset(p.encrypted.bytes, 0xC3, p.encrypted.size);
-    p.relay_node = 0x4D;
-    p.has_rx_rssi = true;
-    p.rx_rssi = -112;
-    p.rx_snr = -3.5f;
-    return p;
+    meshtastic_Channel &ch = channels.getByIndex(1);
+    ch.settings.psk.bytes[0] ^= 0xFF;
+    channels.onConfigChanged();
+    TEST_ASSERT_FALSE_MESSAGE(channels.hasHash(wire.channel), "fixture: the wire hash must no longer match a held channel");
 }
 
 static void ingressOverheard(const meshtastic_MeshPacket &p)
@@ -750,22 +752,26 @@ static void ingressOverheard(const meshtastic_MeshPacket &p)
 void test_ingress_opaque_own_dm_lora_mints_implicit_ack_and_stops_retries(void)
 {
     auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
-    reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
+    const auto wire = seedViaSend(original);
+    mockRoutingModule->ackNaks.clear();
+    forgetChannelOf(wire);
 
-    ingressOverheard(makeOpaqueOwnOverheard(original.id, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA));
+    ingressOverheard(relayedCopyOf(wire, 0x4D, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA));
 
     expectSingleAckNak(meshtastic_Routing_Error_NONE, kLocalNode, original.id, 1, /*hopLimit=*/0, /*ackWantsAck=*/false);
     // Relay attribution survives the opaque short-circuit too: the header fields are all it needs.
-    expectRelaySource(0x4D, -112, -3.5f);
+    expectRelaySource(0x4D, -87, 6.25f);
     TEST_ASSERT_EQUAL_UINT32(0, reliableShim->pendingCount());
 }
 
 void test_ingress_opaque_own_dm_mqtt_acks_but_keeps_retries(void)
 {
     auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
-    reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
+    const auto wire = seedViaSend(original);
+    mockRoutingModule->ackNaks.clear();
+    forgetChannelOf(wire);
 
-    ingressOverheard(makeOpaqueOwnOverheard(original.id, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT));
+    ingressOverheard(relayedCopyOf(wire, 0x4D, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT));
 
     expectSingleAckNak(meshtastic_Routing_Error_NONE, kLocalNode, original.id, 1, /*hopLimit=*/0, /*ackWantsAck=*/false);
     TEST_ASSERT_EQUAL_UINT32(1, reliableShim->pendingCount());
@@ -776,9 +782,11 @@ void test_ingress_opaque_foreign_packet_mints_no_implicit_ack(void)
     // The isFromUs guard on the opaque branch: someone else's opaque traffic with a colliding id
     // is relayed but never ACKed.
     auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
-    reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
+    const auto wire = seedViaSend(original);
+    mockRoutingModule->ackNaks.clear();
+    forgetChannelOf(wire);
 
-    auto foreign = makeOpaqueOwnOverheard(original.id, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA);
+    auto foreign = relayedCopyOf(wire, 0x4D, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA);
     foreign.from = kRemoteNode;
     foreign.to = kThirdNode;
     ingressOverheard(foreign);
@@ -869,6 +877,7 @@ void setup()
     RUN_TEST(test_pki_unknown_sender_gets_pki_unknown_pubkey_nak);
     RUN_TEST(test_pki_keyless_sender_record_gets_pki_unknown_pubkey_nak);
     RUN_TEST(test_pki_known_key_sender_gets_no_channel_nak);
+    RUN_TEST(test_short_channel0_frame_from_unknown_sender_gets_no_channel_nak);
     RUN_TEST(test_unknown_channel_hash_gets_no_channel_nak);
 
     printf("\n=== next-hop 0-hop ACK without want_ack ===\n");
