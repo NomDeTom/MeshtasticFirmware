@@ -921,6 +921,14 @@ static void adminKeyFallbackRefund()
 }
 #endif
 
+/// Hash 0 on a unicast is the PKI sentinel: every PKI DM carries it and fails any channel holding it,
+/// so only key material says whether we could have read one. perhapsDecode()'s candidate shape, minus our identity.
+static bool isPkiShapedUnicast(const meshtastic_MeshPacket *p)
+{
+    return p->which_payload_variant == meshtastic_MeshPacket_encrypted_tag && p->channel == 0 && p->to > 0 &&
+           !isBroadcast(p->to) && p->encrypted.size > MESHTASTIC_PKC_OVERHEAD;
+}
+
 DecodeState perhapsDecode(meshtastic_MeshPacket *p)
 {
     concurrency::LockGuard g(cryptLock);
@@ -928,6 +936,10 @@ DecodeState perhapsDecode(meshtastic_MeshPacket *p)
     if (config.device.rebroadcast_mode == meshtastic_Config_DeviceConfig_RebroadcastMode_KNOWN_ONLY &&
         !nodeInfoLiteHasUser(nodeDB->getMeshNode(p->from))) {
         LOG_DEBUG("Node 0x%08x not in nodeDB, Rebroadcast KNOWN_ONLY ignores packet", p->from);
+        // Declined before any attempt: a stranger's PKI DM has no key to try, a held channel does.
+        if (isPkiShapedUnicast(p) ||
+            (p->which_payload_variant == meshtastic_MeshPacket_encrypted_tag && !channels.hasHash(p->channel)))
+            return DecodeState::DECODE_OPAQUE;
         return DecodeState::DECODE_FAILURE;
     }
 
@@ -956,7 +968,6 @@ DecodeState perhapsDecode(meshtastic_MeshPacket *p)
     if (pkiCandidate && owner.is_licensed) {
         licensedPkiCandidate = true;
     } else if (pkiCandidate) {
-        pkiAttempted = true;
         LOG_TRACE("Attempt PKI decryption");
         // Resolve the sender's key only for actual PKI-decrypt candidates, not every encrypted channel
         // packet: copyPublicKeyForDecrypt() can fall through to a linear scan of TrafficManagement's large
@@ -976,6 +987,9 @@ DecodeState perhapsDecode(meshtastic_MeshPacket *p)
         // reach a node that has not yet learned their key. AES-CCM AEAD rejects wrong candidates.
         bool viaAdminKey = false;
         bool viaPendingKey = false;
+        // pkiAttempted means the sender's own key was tried. Without one the frame is opaque, not a failed
+        // decrypt; an admin key that fails says nothing about the sender, so it does not count.
+        pkiAttempted = haveRemoteKey;
         if (haveRemoteKey && crypto->decryptCurve25519(p->from, remotePublic, p->id, rawSize, p->encrypted.bytes, bytes)) {
             decrypted = true;
             viaPendingKey = havePendingKey;
@@ -1162,8 +1176,10 @@ DecodeState perhapsDecode(meshtastic_MeshPacket *p)
         return DecodeState::DECODE_SUCCESS;
     } else {
         LOG_WARN("No channel found for decoding, hash 0x%x", p->channel);
-        return (matchedChannel || pkiAttempted || licensedPkiCandidate) ? DecodeState::DECODE_FAILURE
-                                                                        : DecodeState::DECODE_OPAQUE;
+        // A channel hashing to 0 matches every PKI DM and fails every one, so it is not "we tried".
+        const bool channelEvidence = matchedChannel && !isPkiShapedUnicast(p);
+        return (channelEvidence || pkiAttempted || licensedPkiCandidate) ? DecodeState::DECODE_FAILURE
+                                                                         : DecodeState::DECODE_OPAQUE;
     }
 }
 
