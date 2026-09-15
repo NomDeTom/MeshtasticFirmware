@@ -144,6 +144,9 @@ class Router : protected concurrency::OSThread, protected PacketHistory
     /** rebroadcast_mode for a packet we cannot read; the port list and sender are inside the ciphertext. */
     bool opaqueAllowedByMode(const meshtastic_MeshPacket *p);
 
+    /** Phone delivery for an opaque packet addressed to us (or a broadcast we cannot read). Never a NAK. */
+    void handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable);
+
     // Return true if we are a rebroadcaster. Reads config only, so every relay path can ask.
     bool isRebroadcaster();
 
@@ -295,13 +298,16 @@ enum class RoutingAuthVerdict { ACCEPT, OPAQUE_RELAY_ONLY, REJECT };
  */
 DecodeState perhapsDecode(meshtastic_MeshPacket *p);
 
-/** Apply receive authentication before routing state mutation; unknown-channel packets may remain opaque relay-only. */
-RoutingAuthVerdict passesRoutingAuthGate(meshtastic_MeshPacket *p);
+/** Apply receive authentication before routing state mutation. A packet we cannot read is handled from its
+ *  header alone - relayed, or shown to the phone per `rebroadcast_mode`, never answered - and never admitted
+ *  to local state. `decodeState`, when given, receives the attempt's DecodeState. */
+RoutingAuthVerdict passesRoutingAuthGate(meshtastic_MeshPacket *p, DecodeState *decodeState = nullptr);
 #ifdef PIO_UNIT_TESTING
 uint32_t routingAuthEvaluationCount();
 void resetRoutingAuthEvaluationCount();
 /** Refill the admin-key fallback budget and re-stamp it against the clock in use right now. */
 void resetAdminKeyFallbackBudget();
+uint32_t adminKeyFallbackTokensRemaining();
 #endif
 
 /** Return 0 for success or a Routing_Error code for failure

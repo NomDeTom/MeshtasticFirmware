@@ -805,11 +805,13 @@ bool checkXeddsaReceivePolicy(meshtastic_MeshPacket *p)
 }
 #endif
 
-RoutingAuthVerdict passesRoutingAuthGate(meshtastic_MeshPacket *p)
+RoutingAuthVerdict passesRoutingAuthGate(meshtastic_MeshPacket *p, DecodeState *decodeState)
 {
     // Routing still needs the original encrypted representation for byte-for-byte relay and for
     // MQTT uplink. Authenticate a copy here; handleReceived() performs the normal in-place decode
     // only after stateful routing filters have completed.
+    if (decodeState)
+        *decodeState = DecodeState::DECODE_SUCCESS;
     if (routingAuthCacheMatches(*p))
         return RoutingAuthVerdict::ACCEPT;
 
@@ -834,6 +836,8 @@ RoutingAuthVerdict passesRoutingAuthGate(meshtastic_MeshPacket *p)
         return RoutingAuthVerdict::ACCEPT;
     }
     const DecodeState state = perhapsDecode(&authCandidate);
+    if (decodeState)
+        *decodeState = state;
     if (state == DecodeState::DECODE_POLICY_REJECT) {
         LOG_WARN("Packet rejected by signature policy");
         return RoutingAuthVerdict::REJECT;
@@ -843,10 +847,10 @@ RoutingAuthVerdict passesRoutingAuthGate(meshtastic_MeshPacket *p)
         return RoutingAuthVerdict::REJECT;
     }
     if (state == DecodeState::DECODE_FAILURE) {
-        // One-byte hash collisions are indistinguishable from tampering, so relay opaquely
-        // instead of blackholing; isFromUs stays REJECT to keep forged senders off the ACK path.
+        // A hash collision is indistinguishable from tampering, so treat it as opaque and relay it. To us
+        // or from us stays REJECT: we answer nothing we matched and failed on, and forgeries stay off the ACK path.
         if (!isToUs(p) && !isFromUs(p)) {
-            LOG_WARN("Decryptable packet failed decoding, relay opaquely");
+            LOG_WARN("Decryptable packet failed decoding, handle as opaque");
             return RoutingAuthVerdict::OPAQUE_RELAY_ONLY;
         }
         LOG_WARN("Decryptable packet failed decoding, drop");
@@ -878,6 +882,11 @@ void resetAdminKeyFallbackBudget()
 {
     adminKeyFallbackTokens = ADMIN_KEY_FALLBACK_BURST;
     adminKeyFallbackRefillMs = Time::getMillis();
+}
+
+uint32_t adminKeyFallbackTokensRemaining()
+{
+    return adminKeyFallbackTokens;
 }
 #endif
 
@@ -1762,6 +1771,26 @@ bool Router::opaqueWasSeenRecently(NodeNum from, PacketId id)
     return false;
 }
 
+/// Undecryptable and addressed to us (or broadcast): hand a frame we had no way to read to the phone.
+/// `unreadable` is the auth gate's DECODE_OPAQUE (no key, no channel) as opposed to a frame we matched
+/// and failed on. No NAK: a reply to an unauthenticated header is a reflector. Nothing enters NodeDB.
+void Router::handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable)
+{
+    // id 0 cannot be deduped; relayOpaquePacket() declines it too.
+    if (isFromUs(p) || p->from == 0 || p->id == 0)
+        return;
+    // Straight to the phone queue: handleFromRadio() would updateFrom() NodeDB for an unverified sender.
+    // The relay mode gates this too; NONE is "do not relay", not "do not listen".
+    const bool modeAllowsPhone =
+        config.device.rebroadcast_mode == meshtastic_Config_DeviceConfig_RebroadcastMode_NONE || opaqueAllowedByMode(p);
+    if (unreadable && modeAllowsPhone && (isToUs(p) || isBroadcast(p->to)) && service) {
+        if (meshtastic_MeshPacket *toPhone = packetPool.allocCopy(*p)) {
+            stampRxTime(toPhone);
+            service->sendToPhone(toPhone, /*alreadyClassified=*/true); // the gate already spent the fallback budget
+        }
+    }
+}
+
 void Router::perhapsHandleReceived(meshtastic_MeshPacket *p)
 {
 #if ARCH_PORTDUINO
@@ -1809,10 +1838,10 @@ void Router::perhapsHandleReceived(meshtastic_MeshPacket *p)
         return;
     }
 
-    // Decrypt and authenticate before Reliable/Flooding/NextHop filters can update retry
-    // timers, packet history, implicit ACK state, cancellation, or relay queues. A packet for
-    // an unknown channel passes as opaque traffic and retains the existing relay behavior.
-    const auto authVerdict = passesRoutingAuthGate(p);
+    // Decrypt and authenticate before Reliable/Flooding/NextHop filters can update retry timers,
+    // history, ACK state or relay queues. An unreadable packet touches no local state at all.
+    DecodeState gateState = DecodeState::DECODE_SUCCESS; // the gate sets this; do not rely on it having done so
+    const auto authVerdict = passesRoutingAuthGate(p, &gateState);
     if (authVerdict == RoutingAuthVerdict::REJECT) {
         packetPool.release(p);
         return;
@@ -1824,6 +1853,7 @@ void Router::perhapsHandleReceived(meshtastic_MeshPacket *p)
         // generate it here from the still-encrypted packet before opaque relay.
         if (isFromUs(p))
             perhapsGenerateImplicitAckForOwnOverheard(p);
+        handleOpaqueForUs(p, gateState == DecodeState::DECODE_OPAQUE);
         relayOpaquePacket(p);
         packetPool.release(p);
         return;
