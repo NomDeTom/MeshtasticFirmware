@@ -2392,6 +2392,28 @@ void test_C34_phone_delivery_does_not_spend_the_admin_key_budget_again(void)
                               "one fallback attempt per frame - the gate's; the phone path must not re-decode");
 }
 
+// C35: the offline MQTT queue evicts its oldest entry when full. A frame we cannot authenticate must
+// not displace one we could, so with no room the opaque uplink declines; with room it queues as before.
+void test_C35_opaque_uplink_never_evicts_a_queued_frame(void)
+{
+    const RelayIdentity admin = makeIdentity(ADMIN_NODE);
+    const RelayIdentity target = makeIdentity(TARGET_NODE);
+    channels.getByIndex(0).settings.uplink_enabled = true;
+    moduleConfig.mqtt.enabled = true;
+    moduleConfig.mqtt.encryption_enabled = true;
+
+    pipelineMqtt->fillQueue();
+    const int full = pipelineMqtt->queueSize();
+    runPipelineIngress(makePkiUnicastBetween(admin, target, meshtastic_PortNum_ADMIN_APP, 0xADBA001A));
+    TEST_ASSERT_EQUAL_MESSAGE(full, pipelineMqtt->queueSize(), "a full queue stays full");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("sentinel/0", pipelineMqtt->oldestTopic().c_str(),
+                                     "the oldest queued frame was not evicted for an opaque one");
+
+    // One slot free now: the next opaque DM takes it.
+    runPipelineIngress(makePkiUnicastBetween(admin, target, meshtastic_PortNum_ADMIN_APP, 0xADBA002A));
+    TEST_ASSERT_EQUAL_MESSAGE(full, pipelineMqtt->queueSize(), "with room, the uplink queues the frame");
+}
+
 void setup()
 {
     pipelineHarnessCreate();
@@ -2471,6 +2493,7 @@ void setup()
     RUN_TEST(test_C32_uplink_follows_mqtt_policy_not_rebroadcast_mode);
     RUN_TEST(test_C33_frames_no_consumer_acts_on_do_not_evict_the_ring);
     RUN_TEST(test_C34_phone_delivery_does_not_spend_the_admin_key_budget_again);
+    RUN_TEST(test_C35_opaque_uplink_never_evicts_a_queued_frame);
     printf("\n=== Group N: NodeInfoModule authentication ===\n");
     RUN_TEST(test_N1_unsigned_nodeinfo_from_signer_dropped);
     RUN_TEST(test_N2_signed_nodeinfo_from_signer_not_dropped);

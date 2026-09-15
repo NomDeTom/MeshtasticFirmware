@@ -285,6 +285,24 @@ class AuthPipelineMqtt : public MQTT
 {
   public:
     int queueSize() { return mqttQueue.numUsed(); }
+    /// Fill the offline queue with decoded-traffic stand-ins, oldest first, so an eviction is visible.
+    void fillQueue()
+    {
+        for (int i = 0; mqttQueue.numFree() > 0; i++) {
+            auto *entry = new QueueEntry;
+            entry->topic = "sentinel/" + std::to_string(i);
+            mqttQueue.enqueue(entry, 0);
+        }
+    }
+    std::string oldestTopic()
+    {
+        QueueEntry *entry = mqttQueue.dequeuePtr(0);
+        if (!entry)
+            return "";
+        std::string topic = entry->topic;
+        delete entry;
+        return topic;
+    }
     void clearQueue()
     {
         while (QueueEntry *entry = mqttQueue.dequeuePtr(0))

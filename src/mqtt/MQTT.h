@@ -56,6 +56,10 @@ class MQTT : private concurrency::OSThread
     void start() { setIntervalFromNow(0); };
 
     bool isUsingDefaultServer() { return isConfiguredForDefaultServer; }
+
+    /// False when the offline queue is full. onSend() then evicts the oldest entry; a caller carrying a
+    /// frame it cannot authenticate should decline rather than displace one it could.
+    bool queueHasRoom() { return mqttQueue.numFree() > 0; }
     bool isUsingDefaultRootTopic() { return isConfiguredForDefaultRootTopic; }
 
     /// Validate the meshtastic_ModuleConfig_MQTTConfig.

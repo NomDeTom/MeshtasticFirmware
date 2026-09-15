@@ -1803,6 +1803,8 @@ void Router::uplinkOpaqueUnicast(const meshtastic_MeshPacket *p, bool unreadable
     if (owner.is_licensed && (nodeDB->getLicenseStatus(p->from) == UserLicenseStatus::NotLicensed ||
                               nodeDB->getLicenseStatus(p->to) == UserLicenseStatus::NotLicensed))
         return;
+    if (!mqtt->queueHasRoom())
+        return; // never evict a frame we authenticated to carry one we cannot read
     meshtastic_MeshPacket copy = *p;
     copy.pki_encrypted = true;
     mqtt->onSend(copy, copy, p->channel);
