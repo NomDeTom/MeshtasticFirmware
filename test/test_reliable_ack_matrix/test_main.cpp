@@ -15,6 +15,7 @@
 #include "mesh/RadioInterface.h"
 #include "mesh/ReliableRouter.h"
 #include "mesh/Throttle.h"
+#include "modules/NodeInfoModule.h"
 #include "modules/RoutingModule.h"
 #include <cstdio>
 #include <cstring>
@@ -204,6 +205,21 @@ static MockNodeDB *mockNodeDB = nullptr;
 static ReliableRouterTestShim *reliableShim = nullptr;
 static TimedCaptureRadio *radio = nullptr;
 static MockRoutingModule *mockRoutingModule = nullptr;
+
+/// Counts NodeInfo sends instead of building one; the real module needs the whole service stack.
+class CountingNodeInfoModule : public NodeInfoModule
+{
+  public:
+    bool sendOurNodeInfo(NodeNum dest, bool, uint8_t, bool) override
+    {
+        sends++;
+        lastDest = dest;
+        return true;
+    }
+    uint32_t sends = 0;
+    NodeNum lastDest = 0;
+};
+static CountingNodeInfoModule *countingNodeInfo = nullptr;
 static std::unique_ptr<ScopedAirTimeFixture> airTimeFixture;
 static PacketId nextTestPacketId = 0x7A000000;
 
@@ -341,9 +357,12 @@ void setUp(void)
     config.lora.hop_limit = 3; // keep getHopLimitForResponse() deterministic across tests
     config.security.private_key.size = 0;
     owner.is_licensed = false;
-    // Keep our own key unset: the PKI_UNKNOWN_PUBKEY NAK handler dereferences nodeInfoModule (a null
-    // global here) only when owner.public_key.size == 32.
+    // No keypair of our own unless a test installs one: the NodeInfo reply to PKI_UNKNOWN_PUBKEY needs it.
     owner.public_key.size = 0;
+    if (countingNodeInfo) {
+        countingNodeInfo->sends = 0;
+        countingNodeInfo->lastDest = 0;
+    }
     mockNodeDB->clearTestNodes();
     reliableShim->clearPendingForTest();
     reliableShim->resetRouteHealthForTest();
@@ -607,8 +626,6 @@ void test_nak_stops_retransmissions_but_keeps_route_failures(void)
 void test_pki_unknown_pubkey_nak_stops_retransmissions(void)
 {
     // The remote lost our key: its PKI_UNKNOWN_PUBKEY NAK must still clear the pending record.
-    // owner.public_key.size == 0 (setUp) keeps the NodeInfo re-send branch (a nodeInfoModule
-    // dereference, null in this harness) out of the path.
     auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
     reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
 
@@ -795,6 +812,120 @@ void test_ingress_opaque_foreign_packet_mints_no_implicit_ack(void)
     TEST_ASSERT_EQUAL_UINT32(1, reliableShim->pendingCount());
 }
 
+// The header of our own DM is cleartext anyone can copy. A copy with our (from,id) but not our
+// ciphertext is a forgery: no ACK, and the retransmission it was trying to stop keeps going.
+void test_ingress_forged_copy_of_own_dm_mints_no_implicit_ack(void)
+{
+    auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
+    // A real-length text so the ciphertext is a wire-sized frame, not the fixture's two-byte Data.
+    static const char text[] = "meet at the north gate at six, bring the spare radio";
+    original.decoded.payload.size = sizeof(text) - 1;
+    memcpy(original.decoded.payload.bytes, text, original.decoded.payload.size);
+    const auto wire = seedViaSend(original);
+    TEST_ASSERT_TRUE(wire.encrypted.size >= sizeof(text) - 1);
+    mockRoutingModule->ackNaks.clear();
+    forgetChannelOf(wire);
+
+    auto forged = relayedCopyOf(wire, 0x4D, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA);
+    forged.encrypted.bytes[wire.encrypted.size / 2] ^= 0x01; // same length, one bit off, mid-frame
+    ingressOverheard(forged);
+    TEST_ASSERT_EQUAL_UINT32(0, mockRoutingModule->ackNaks.size());
+    TEST_ASSERT_EQUAL_UINT32(1, reliableShim->pendingCount());
+
+    auto shorter = relayedCopyOf(wire, 0x4D, meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA);
+    shorter.encrypted.size = wire.encrypted.size - 1;
+    ingressOverheard(shorter);
+    TEST_ASSERT_EQUAL_UINT32(0, mockRoutingModule->ackNaks.size());
+    TEST_ASSERT_EQUAL_UINT32(1, reliableShim->pendingCount());
+}
+
+// Portduino's SimRadio and the local send path hand the router copies that are already decoded, so
+// there is no ciphertext to check: a decoded overheard copy of our own DM is matched on the header
+// alone, as before. Without this the simulator never sees "Delivered to mesh".
+void test_ingress_decoded_copy_of_own_dm_mints_implicit_ack_on_header(void)
+{
+    auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
+    const auto wire = seedViaSend(original);
+    mockRoutingModule->ackNaks.clear();
+
+    meshtastic_MeshPacket decodedCopy = original; // as SimRadio delivers it: plaintext, our header
+    decodedCopy.hop_limit = wire.hop_limit - 1;
+    decodedCopy.relay_node = 0x4D;
+    decodedCopy.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA;
+    ingressOverheard(decodedCopy);
+
+    expectSingleAckNak(meshtastic_Routing_Error_NONE, kLocalNode, original.id, 1, /*hopLimit=*/0, /*ackWantsAck=*/false);
+    TEST_ASSERT_EQUAL_UINT32(0, reliableShim->pendingCount());
+}
+
+// A pending packet that never went out through send() has no wire form on record, so an encrypted
+// copy cannot be checked against anything and gets nothing. Seeded directly on purpose.
+void test_ingress_own_dm_without_a_recorded_wire_form_mints_no_implicit_ack(void)
+{
+    auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
+    reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
+
+    meshtastic_MeshPacket copy = meshtastic_MeshPacket_init_zero;
+    copy.from = kLocalNode;
+    copy.to = kRemoteNode;
+    copy.id = original.id;
+    copy.channel = 0x5A; // a hash we do not hold: opaque on ingress
+    copy.hop_start = 3;
+    copy.hop_limit = 2;
+    copy.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA;
+    copy.which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
+    copy.encrypted.size = 32;
+    memset(copy.encrypted.bytes, 0xC3, copy.encrypted.size);
+    ingressOverheard(copy);
+    TEST_ASSERT_EQUAL_UINT32(0, mockRoutingModule->ackNaks.size());
+    TEST_ASSERT_EQUAL_UINT32(1, reliableShim->pendingCount());
+}
+
+// ===========================================================================
+// PKI_UNKNOWN_PUBKEY -> NodeInfo: only for a DM of ours still pending to the node that sent the NAK
+// ===========================================================================
+
+static meshtastic_MeshPacket makePkiUnknownPubkeyNak(NodeNum from, PacketId requestId, meshtastic_Routing &routing)
+{
+    auto nak = makeDecodedPacket(meshtastic_PortNum_ROUTING_APP, from, kLocalNode, 1);
+    nak.decoded.request_id = requestId;
+    routing = meshtastic_Routing_init_zero;
+    routing.error_reason = meshtastic_Routing_Error_PKI_UNKNOWN_PUBKEY;
+    return nak;
+}
+
+void test_pki_unknown_pubkey_nak_for_our_pending_dm_sends_nodeinfo(void)
+{
+    owner.public_key.size = 32;
+    auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
+    reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
+
+    meshtastic_Routing routing;
+    auto nak = makePkiUnknownPubkeyNak(kRemoteNode, original.id, routing);
+    reliableShim->sniffForTest(&nak, &routing);
+
+    TEST_ASSERT_EQUAL_UINT32(1, countingNodeInfo->sends);
+    TEST_ASSERT_EQUAL_UINT32(kRemoteNode, countingNodeInfo->lastDest);
+    TEST_ASSERT_EQUAL_UINT32(0, reliableShim->pendingCount()); // the NAK still clears the record
+}
+
+void test_pki_unknown_pubkey_nak_without_our_pending_dm_sends_nothing(void)
+{
+    // A NAK for an id we never sent: the trigger a node holding the channel PSK can forge at will.
+    owner.public_key.size = 32;
+    meshtastic_Routing routing;
+    auto nak = makePkiUnknownPubkeyNak(kRemoteNode, 0x5EED0001, routing);
+    reliableShim->sniffForTest(&nak, &routing);
+    TEST_ASSERT_EQUAL_UINT32(0, countingNodeInfo->sends);
+
+    // A live id copied off the air, but the NAK comes from a node our DM was not addressed to.
+    auto original = makeDecodedPacket(meshtastic_PortNum_TEXT_MESSAGE_APP, kLocalNode, kRemoteNode, 1, /*wantAck=*/true);
+    reliableShim->seedRetry(original, NextHopRouter::NUM_RELIABLE_UNICAST_ATTEMPTS);
+    auto fromElsewhere = makePkiUnknownPubkeyNak(kThirdNode, original.id, routing);
+    reliableShim->sniffForTest(&fromElsewhere, &routing);
+    TEST_ASSERT_EQUAL_UINT32(0, countingNodeInfo->sends);
+}
+
 // ===========================================================================
 // Group 6 - pending-timer airtime extension in send() and shouldFilterReceived()
 // ===========================================================================
@@ -863,6 +994,8 @@ void setup()
 
     mockRoutingModule = new MockRoutingModule();
     routingModule = mockRoutingModule;
+    countingNodeInfo = new CountingNodeInfoModule();
+    nodeInfoModule = countingNodeInfo;
 
     printf("\n=== want_ack ACK variants ===\n");
     RUN_TEST(test_text_dm_want_ack_gets_want_ack_ack);
@@ -902,6 +1035,11 @@ void setup()
     RUN_TEST(test_ingress_opaque_own_dm_lora_mints_implicit_ack_and_stops_retries);
     RUN_TEST(test_ingress_opaque_own_dm_mqtt_acks_but_keeps_retries);
     RUN_TEST(test_ingress_opaque_foreign_packet_mints_no_implicit_ack);
+    RUN_TEST(test_ingress_forged_copy_of_own_dm_mints_no_implicit_ack);
+    RUN_TEST(test_ingress_own_dm_without_a_recorded_wire_form_mints_no_implicit_ack);
+    RUN_TEST(test_ingress_decoded_copy_of_own_dm_mints_implicit_ack_on_header);
+    RUN_TEST(test_pki_unknown_pubkey_nak_for_our_pending_dm_sends_nodeinfo);
+    RUN_TEST(test_pki_unknown_pubkey_nak_without_our_pending_dm_sends_nothing);
 
     printf("\n=== pending-timer airtime extension ===\n");
     RUN_TEST(test_send_extends_other_pending_deadlines_not_own);
