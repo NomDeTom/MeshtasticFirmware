@@ -1773,6 +1773,11 @@ void Router::handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable)
     // id 0 cannot be deduped; relayOpaquePacket() declines it too.
     if (isFromUs(p) || p->from == 0 || p->id == 0)
         return;
+    // A licensed station transmits in the clear and may not hand on traffic to or from a node it
+    // knows to be unlicensed. Same rule RoutingModule applies to the decoded path.
+    if (owner.is_licensed && (nodeDB->getLicenseStatus(p->from) == UserLicenseStatus::NotLicensed ||
+                              nodeDB->getLicenseStatus(p->to) == UserLicenseStatus::NotLicensed))
+        return;
     // Straight to the phone queue: handleFromRadio() would updateFrom() NodeDB for an unverified sender.
     // The relay mode gates this too; NONE is "do not relay", not "do not listen". MQTT gates itself.
     const bool modeAllowsPhone =
@@ -1789,13 +1794,16 @@ void Router::handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable)
 }
 
 /// A PKI DM between two other nodes, uplinked as ciphertext when encrypted uplink is on and marked
-/// pki_encrypted. MQTT gates itself, so rebroadcast_mode does not apply here.
+/// pki_encrypted. MQTT gates itself, so rebroadcast_mode does not apply here; the licensed rule does.
 void Router::uplinkOpaqueUnicast(const meshtastic_MeshPacket *p, bool unreadable)
 {
 #if !MESHTASTIC_EXCLUDE_MQTT
     // Only a frame we had no way to read: a failed decrypt on a channel we hold is not PKI ciphertext.
     if (!unreadable || !mqtt || !moduleConfig.mqtt.enabled || !moduleConfig.mqtt.encryption_enabled || p->channel != 0 ||
         p->id == 0 || isBroadcast(p->to) || isToUs(p) || isFromUs(p))
+        return;
+    if (owner.is_licensed && (nodeDB->getLicenseStatus(p->from) == UserLicenseStatus::NotLicensed ||
+                              nodeDB->getLicenseStatus(p->to) == UserLicenseStatus::NotLicensed))
         return;
     meshtastic_MeshPacket copy = *p;
     copy.pki_encrypted = true;
