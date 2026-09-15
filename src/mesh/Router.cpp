@@ -1786,6 +1786,9 @@ void Router::handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable)
     if (unreadable && modeAllowsPhone && (isToUs(p) || isBroadcast(p->to)) && service) {
         if (meshtastic_MeshPacket *toPhone = packetPool.allocCopy(*p)) {
             stampRxTime(toPhone);
+            // The wire hash is an attacker-chosen byte that no client can use as an index, and the phone holds
+            // no key the node lacks. An unreadable frame carries no channel information.
+            toPhone->channel = 0;
             service->sendToPhone(toPhone, /*alreadyClassified=*/true); // the gate already spent the fallback budget
         }
     }
