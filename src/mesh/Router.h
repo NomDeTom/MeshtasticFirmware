@@ -141,6 +141,9 @@ class Router : protected concurrency::OSThread, protected PacketHistory
     /** Relay an opaque packet without admitting it to local routing/history state. */
     bool relayOpaquePacket(const meshtastic_MeshPacket *p);
 
+    /** rebroadcast_mode for a packet we cannot read; the port list and sender are inside the ciphertext. */
+    bool opaqueAllowedByMode(const meshtastic_MeshPacket *p);
+
     // Return true if we are a rebroadcaster. Reads config only, so every relay path can ask.
     bool isRebroadcaster();
 
