@@ -139,7 +139,15 @@ class Router : protected concurrency::OSThread, protected PacketHistory
     virtual bool shouldFilterReceived(const meshtastic_MeshPacket *p) { return false; }
 
     /** Relay an opaque packet without admitting it to local routing/history state. */
-    virtual bool relayOpaquePacket(const meshtastic_MeshPacket *) { return false; }
+    bool relayOpaquePacket(const meshtastic_MeshPacket *p);
+
+    // Return true if we are a rebroadcaster. Reads config only, so every relay path can ask.
+    bool isRebroadcaster();
+
+#if USERPREFS_EVENT_MODE
+    /** Cap a relay copy's hop budget to the event-mode limit, keeping hop_start consistent. */
+    static void capEventRelayHops(meshtastic_MeshPacket *packet);
+#endif
 
     /**
      * Generate the implicit ACK for our own transmission overheard being rebroadcast, using header
@@ -172,6 +180,26 @@ class Router : protected concurrency::OSThread, protected PacketHistory
      */
     void sendAckNak(meshtastic_Routing_Error err, NodeNum to, PacketId idFrom, ChannelIndex chIndex, uint8_t hopLimit = 0,
                     bool ackWantsAck = false, const meshtastic_MeshPacket *relaySource = nullptr);
+
+    static constexpr uint8_t OPAQUE_SEEN_MAX = 32; // opaque dedup slots (see relayOpaquePacket); ~8B/slot -> ~256B
+
+    /**
+     * Recently-seen opaque (undecryptable) frames, keyed on the outer (from,id) header. Deliberately
+     * separate from PacketHistory: it bounds amplification of frames we cannot decrypt without ever
+     * letting them influence routing / ACK / next-hop. Fixed-size RAM ring, FIFO eviction, no
+     * timestamps (ids are effectively random). A real entry never has id 0 - relayOpaquePacket drops
+     * id 0 before this - so an empty slot cannot false-match.
+     */
+    struct OpaqueSeen {
+        NodeNum sender = 0;
+        PacketId id = 0; // 0 == empty/unused slot
+    };
+    OpaqueSeen opaqueSeen[OPAQUE_SEEN_MAX] = {};
+    uint8_t opaqueSeenNext = 0; // ring write cursor (round-robin eviction)
+
+    // Dedup helper for relayOpaquePacket: true if (from,id) is already recorded; otherwise records it
+    // (round-robin eviction) and returns false. Pure function of the table - no clock.
+    bool opaqueWasSeenRecently(NodeNum from, PacketId id);
 
   private:
     /**
