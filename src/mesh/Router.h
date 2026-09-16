@@ -314,6 +314,9 @@ DecodeState perhapsDecode(meshtastic_MeshPacket *p);
  *  header alone - relayed, shown to the phone or uplinked per `rebroadcast_mode`, never answered - and never
  *  admitted to local state. `decodeState`, when given, receives the attempt's DecodeState. */
 RoutingAuthVerdict passesRoutingAuthGate(meshtastic_MeshPacket *p, DecodeState *decodeState = nullptr);
+
+/// A licensed station transmits in the clear and may not carry traffic to or from a node it knows to be unlicensed.
+bool licensedPeerBlocksPacket(const meshtastic_MeshPacket *p);
 #ifdef PIO_UNIT_TESTING
 uint32_t routingAuthEvaluationCount();
 void resetRoutingAuthEvaluationCount();

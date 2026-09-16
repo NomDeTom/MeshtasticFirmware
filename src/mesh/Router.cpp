@@ -1699,6 +1699,12 @@ bool Router::isRebroadcaster()
 /// rebroadcast_mode for a packet we cannot read. The port list and sender identity are inside the
 /// ciphertext, so CORE_PORTNUMS_ONLY relays; KNOWN/LOCAL relay a PKI-shaped unicast with one known party
 /// (`to` is us for a DM to us).
+bool licensedPeerBlocksPacket(const meshtastic_MeshPacket *p)
+{
+    return owner.is_licensed && (nodeDB->getLicenseStatus(p->from) == UserLicenseStatus::NotLicensed ||
+                                 nodeDB->getLicenseStatus(p->to) == UserLicenseStatus::NotLicensed);
+}
+
 bool Router::opaqueAllowedByMode(const meshtastic_MeshPacket *p)
 {
     switch (config.device.rebroadcast_mode) {
@@ -1771,10 +1777,7 @@ void Router::handleOpaqueForUs(const meshtastic_MeshPacket *p, bool unreadable)
     // id 0 cannot be deduped; relayOpaquePacket() declines it too.
     if (isFromUs(p) || p->from == 0 || p->id == 0)
         return;
-    // A licensed station transmits in the clear and may not hand on traffic to or from a node it
-    // knows to be unlicensed. Same rule RoutingModule applies to the decoded path.
-    if (owner.is_licensed && (nodeDB->getLicenseStatus(p->from) == UserLicenseStatus::NotLicensed ||
-                              nodeDB->getLicenseStatus(p->to) == UserLicenseStatus::NotLicensed))
+    if (licensedPeerBlocksPacket(p))
         return;
     // Straight to the phone queue: handleFromRadio() would updateFrom() NodeDB for an unverified sender.
     // The relay mode gates this too; NONE is "do not relay", not "do not listen". MQTT gates itself.
@@ -1800,8 +1803,7 @@ void Router::uplinkOpaqueUnicast(const meshtastic_MeshPacket *p, bool unreadable
     if (!unreadable || !mqtt || !moduleConfig.mqtt.enabled || !moduleConfig.mqtt.encryption_enabled || p->channel != 0 ||
         p->id == 0 || isBroadcast(p->to) || isToUs(p) || isFromUs(p))
         return;
-    if (owner.is_licensed && (nodeDB->getLicenseStatus(p->from) == UserLicenseStatus::NotLicensed ||
-                              nodeDB->getLicenseStatus(p->to) == UserLicenseStatus::NotLicensed))
+    if (licensedPeerBlocksPacket(p))
         return;
     if (!mqtt->queueHasRoom())
         return; // never evict a frame we authenticated to carry one we cannot read

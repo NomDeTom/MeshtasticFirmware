@@ -12,8 +12,7 @@ bool RoutingModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, mesh
 {
     // Packets we cannot decrypt never reach a module; their rebroadcast_mode rule lives in
     // Router::relayOpaquePacket().
-    if (owner.is_licensed && ((nodeDB->getLicenseStatus(mp.from) == UserLicenseStatus::NotLicensed) ||
-                              (nodeDB->getLicenseStatus(mp.to) == UserLicenseStatus::NotLicensed))) {
+    if (licensedPeerBlocksPacket(&mp)) {
         // Don't let licensed users to rebroadcast packets to or from unlicensed users
         // If we know they are in-fact unlicensed
         LOG_DEBUG("Packet to or from unlicensed user, ignoring packet");
