@@ -1,4 +1,5 @@
 #include "RadioInterface.h"
+#include "BenchKnobs.h"
 #include "Channels.h"
 #include "DisplayFormatters.h"
 #include "LLCC68Interface.h"
@@ -819,9 +820,18 @@ uint32_t RadioInterface::getTxDelayMsec()
     The pool to take a random multiple from is the contention window (CW), which size depends on the
     current channel utilization. */
     float channelUtil = airTime->channelUtilizationPercent();
+#ifdef BENCH_KNOBS
+    const uint8_t cwMin = benchKnobs.cwMin >= 0 ? benchKnobs.cwMin : CWmin;
+    const uint8_t cwMax = benchKnobs.cwMax >= 0 ? benchKnobs.cwMax : CWmax;
+    const uint32_t slot = benchKnobs.slotMs >= 0 ? (uint32_t)benchKnobs.slotMs : slotTimeMsec;
+    uint8_t CWsize = map(channelUtil, 0, 100, cwMin, cwMax);
+    const uint32_t draw = benchKnobs.noBackoff ? 0 : random(0, pow_of_2(CWsize)) * slot;
+    return draw + benchKnobs.fixedMs;
+#else
     uint8_t CWsize = map(channelUtil, 0, 100, CWmin, CWmax);
     // LOG_DEBUG("Current channel utilization is %f so setting CWsize to %d", channelUtil, CWsize);
     return random(0, pow_of_2(CWsize)) * slotTimeMsec;
+#endif
 }
 
 /** The CW size to use when calculating SNR_based delays */

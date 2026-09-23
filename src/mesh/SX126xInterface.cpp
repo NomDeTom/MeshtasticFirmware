@@ -1,5 +1,6 @@
 #if RADIOLIB_EXCLUDE_SX126X != 1
 #include "SX126xInterface.h"
+#include "BenchKnobs.h"
 #include "configuration.h"
 #include "error.h"
 #include "mesh/NodeDB.h"
@@ -257,11 +258,20 @@ template <typename T> int16_t SX126xInterface<T>::programModemParams()
         return err;
     }
 
+#ifdef BENCH_KNOBS
+    err = lora.setSyncWord(benchKnobs.syncWordOr(syncWord));
+#else
     err = lora.setSyncWord(syncWord);
+#endif
     if (err != RADIOLIB_ERR_NONE) {
         LOG_ERROR("SX126X setSyncWord %s%d", radioLibErr, err);
         return err;
     }
+#ifdef BENCH_KNOBS
+    err = lora.invertIQ(benchKnobs.iqInverted());
+    if (err != RADIOLIB_ERR_NONE)
+        LOG_ERROR("SX126X invertIQ %s%d", radioLibErr, err);
+#endif
 
     err = lora.setCurrentLimit(currentLimit);
     if (err != RADIOLIB_ERR_NONE) {
@@ -281,6 +291,10 @@ template <typename T> int16_t SX126xInterface<T>::programModemParams()
         return err;
     }
 
+#ifdef BENCH_KNOBS
+    if (benchKnobs.txPower != -128)
+        power = benchKnobs.txPower;
+#endif
     limitPower(SX126X_MAX_POWER);
     // Make sure we reach the minimum power supported to turn the chip on (-9dBm)
     if (power < -9)
@@ -519,10 +533,43 @@ template <typename T> bool SX126xInterface<T>::isChannelActive()
     // detection that delivers nothing then expires to standby and raises TIMEOUT, which re-arms us.
     const RadioLibTime_t cadRxTimeoutUsec =
         (RadioLibTime_t)getPacketTime(meshtastic_Constants_DATA_PAYLOAD_LEN + sizeof(PacketHeader), false) * 1000;
-    ChannelScanConfig_t cfg = {.cad = {.symNum = RADIOLIB_SX126X_CAD_ON_4_SYMB,
+    uint8_t cadSymNum = RADIOLIB_SX126X_CAD_ON_4_SYMB;
+    uint8_t cadExitMode = RADIOLIB_SX126X_CAD_GOTO_RX;
+#ifdef BENCH_KNOBS
+    switch (benchKnobs.cadSymbols) {
+    case 1:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_1_SYMB;
+        break;
+    case 2:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_2_SYMB;
+        break;
+    case 4:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_4_SYMB;
+        break;
+    case 8:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_8_SYMB;
+        break;
+    case 16:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_16_SYMB;
+        break;
+    default:
+        break;
+    }
+    // Plain CAD and CAD-then-TX both leave the chip in standby; only CAD->RX hands off to the receiver.
+    if (benchKnobs.lbt == BenchKnobs::LBT_CAD || benchKnobs.lbt == BenchKnobs::LBT_CADTX)
+        cadExitMode = RADIOLIB_SX126X_CAD_GOTO_STDBY;
+#endif
+    ChannelScanConfig_t cfg = {.cad = {.symNum = cadSymNum,
+#ifdef BENCH_KNOBS
+                                       .detPeak = benchKnobs.detPeak >= 0 ? (uint8_t)benchKnobs.detPeak
+                                                                          : (uint8_t)RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
+                                       .detMin = benchKnobs.detMin >= 0 ? (uint8_t)benchKnobs.detMin
+                                                                        : (uint8_t)RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
+#else
                                        .detPeak = RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
                                        .detMin = RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
-                                       .exitMode = RADIOLIB_SX126X_CAD_GOTO_RX,
+#endif
+                                       .exitMode = cadExitMode,
                                        .timeout = cadRxTimeoutUsec,
                                        .irqFlags = cadIrqFlags,
                                        .irqMask = cadIrqMask}};
@@ -534,7 +581,8 @@ template <typename T> bool SX126xInterface<T>::isChannelActive()
             // The chip auto-entered RX (GOTO_RX). Drop the latched CAD verdict so the pin releases and the
             // coming RX_DONE is a clean edge.
             lora.clearIrqFlags(RADIOLIB_SX126X_IRQ_CAD_DONE | RADIOLIB_SX126X_IRQ_CAD_DETECTED);
-            noteCadHandoffToRx(); // nothing below arms the radio; the caller's rearmReceive() adopts it
+            if (cadExitMode == RADIOLIB_SX126X_CAD_GOTO_RX)
+                noteCadHandoffToRx(); // nothing below arms the radio; the caller's rearmReceive() adopts it
             return true;
         }
         if (result != RADIOLIB_CHANNEL_FREE)

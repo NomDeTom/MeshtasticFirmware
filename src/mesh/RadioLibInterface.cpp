@@ -1,4 +1,5 @@
 #include "RadioLibInterface.h"
+#include "BenchKnobs.h"
 #include "MeshTypes.h"
 #include "NodeDB.h"
 #include "PowerMon.h"
@@ -97,7 +98,11 @@ bool RadioLibInterface::canSendImmediately()
     // To do otherwise would be doubly bad because not only would we drop the packet that was on the way in,
     // we almost certainly guarantee no one outside will like the packet we are sending.
     bool busyTx = sendingPacket != NULL;
+#ifdef BENCH_KNOBS
+    bool busyRx = isReceiving && benchKnobs.checksRx() && isActivelyReceiving();
+#else
     bool busyRx = isReceiving && isActivelyReceiving();
+#endif
 
     if (busyTx || busyRx) {
         if (busyTx) {
@@ -140,8 +145,14 @@ void RadioLibInterface::holdOnPreamble()
 
 bool RadioLibInterface::receiveDetected(uint16_t irq, unsigned long syncWordHeaderValidFlag, unsigned long preambleDetectedFlag)
 {
+#ifdef BENCH_KNOBS
+    const bool holdMode = benchKnobs.pre == BenchKnobs::PRE_DEFAULT || benchKnobs.pre == BenchKnobs::PRE_HOLD;
+    if (holdMode && preambleHoldActive())
+        return true;
+#else
     if (preambleHoldActive())
         return true;
+#endif
 
     if (irq & syncWordHeaderValidFlag) {
         if (!activeReceiveStart) {
@@ -157,6 +168,12 @@ bool RadioLibInterface::receiveDetected(uint16_t irq, unsigned long syncWordHead
     }
 
     if (irq & preambleDetectedFlag) {
+#ifdef BENCH_KNOBS
+        if (benchKnobs.pre == BenchKnobs::PRE_IGNORE)
+            return false;
+        if (benchKnobs.pre == BenchKnobs::PRE_BUSY)
+            return true;
+#endif
         // Looks come once per CSMA backoff, too rarely to judge a preamble by symbol-time deadline (#11933).
         // Clear it so the next look sees only a fresh one, and hold TX meanwhile; a clear never aborts RX.
         holdOnPreamble();
@@ -472,8 +489,17 @@ void RadioLibInterface::onNotify(uint32_t notification)
                     setTransmitDelay(); // the radio config moved, so re-run the delay and scan on it
                 } else {
                     // Listen-before-talk: a CAD preamble scan immediately before we key up.
+#ifdef BENCH_KNOBS
+                    const bool scan = benchKnobs.usesCad();
+                    if (scan)
+                        LOG_DEBUG("CAD arm");
+                    else
+                        LOG_DEBUG("CAD skipped (bench lbt)");
+                    if (scan && isChannelActive()) {
+#else
                     LOG_DEBUG("CAD arm");
                     if (isChannelActive()) { // currently traffic on the channel?
+#endif
                         LOG_DEBUG("CAD busy");
                         // Beacon target or not: reconfigureForBeaconTX() already left RX running on that
                         // config, so skipping this only ever left the node deaf in standby.
