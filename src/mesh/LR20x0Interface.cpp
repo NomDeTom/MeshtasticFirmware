@@ -3,6 +3,7 @@
 #if (defined(USE_LR2021) || defined(ARCH_PORTDUINO)) && RADIOLIB_EXCLUDE_LR2021 != 1
 #include "LR20x0Band.h"
 #include "LR20x0Interface.h"
+#include "BenchKnobs.h"
 #include "error.h"
 #include "mesh/NodeDB.h"
 
@@ -325,12 +326,21 @@ template <typename T> bool LR20x0Interface<T>::reconfigure()
             standbySuccess = false;
         }
 
+#ifdef BENCH_KNOBS
+        err = lora.setSyncWord(benchKnobs.syncWordOr(syncWord));
+#else
         err = lora.setSyncWord(syncWord);
+#endif
         if (err != RADIOLIB_ERR_NONE) {
             LOG_ERROR("LR20x0 setSyncWord %s%d", radioLibErr, err);
             RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
             standbySuccess = false;
         }
+#ifdef BENCH_KNOBS
+        err = lora.invertIQ(benchKnobs.iqInverted());
+        if (err != RADIOLIB_ERR_NONE)
+            LOG_ERROR("LR20x0 invertIQ %s%d", radioLibErr, err);
+#endif
 
         err = lora.setPreambleLength(preambleLength);
         if (err != RADIOLIB_ERR_NONE) {
