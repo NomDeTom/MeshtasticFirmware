@@ -45,6 +45,7 @@
 #include "detect/einkScan.h"
 #include "graphics/Screen.h"
 #include "main.h"
+#include "mesh/BenchKnobs.h"
 #include "memory/MemAudit.h"
 #include "mesh/generated/meshtastic/config.pb.h"
 #include "meshUtils.h"
@@ -1501,7 +1502,12 @@ void loop()
 
         // Periodic radio upkeep - re-arms RX if it was left off, else AGC reset (stuck-gain prevention)
         static uint32_t lastAgcReset;
-        if (!Throttle::isWithinTimespanMs(lastAgcReset, AGC_RESET_INTERVAL_MS)) {
+#ifdef BENCH_KNOBS
+        const uint32_t agcInterval = benchKnobs.agcMs > 0 ? (uint32_t)benchKnobs.agcMs : AGC_RESET_INTERVAL_MS;
+#else
+        const uint32_t agcInterval = AGC_RESET_INTERVAL_MS;
+#endif
+        if (!Throttle::isWithinTimespanMs(lastAgcReset, agcInterval)) {
             lastAgcReset = millis();
             // Sample before resetAGC(): recalibrating the frontend biases an RSSI read taken right after it.
             RadioLibInterface::instance->updateNoiseFloor();
