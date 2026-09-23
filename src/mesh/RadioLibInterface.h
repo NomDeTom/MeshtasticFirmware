@@ -140,6 +140,14 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
      */
     static RadioLibInterface *instance;
 
+#ifdef BENCH_KNOBS
+    /** RSSI sample for the bench noise monitor, taken only while idling in RX. Deliberately skips
+     *  isActivelyReceiving(), which clears latched preamble flags. False if the radio is busy. */
+    bool benchSampleRssi(int16_t &rssi);
+    /** Key an unmodulated carrier for ms on the current frequency, then return to RX. */
+    virtual void benchJam(uint32_t ms);
+#endif
+
     /** Clear instance on destruction so stale pointer checks in loop() are safe */
     virtual ~RadioLibInterface()
     {
