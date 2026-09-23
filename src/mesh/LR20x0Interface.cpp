@@ -3,6 +3,7 @@
 #if (defined(USE_LR2021) || defined(ARCH_PORTDUINO)) && RADIOLIB_EXCLUDE_LR2021 != 1
 #include "LR20x0Band.h"
 #include "LR20x0Interface.h"
+#include "BenchKnobs.h"
 #include "error.h"
 #include "mesh/NodeDB.h"
 
@@ -269,6 +270,10 @@ template <typename T> bool LR20x0Interface<T>::reconfigure()
     // base-class failure isn't masked as success.
     const bool reconfigureSuccess = RadioLibInterface::reconfigure();
 
+#ifdef BENCH_KNOBS
+    if (benchKnobs.txPower != -128)
+        power = benchKnobs.txPower;
+#endif
     if (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_LORA_24) {
         limitPower(LR2021_MAX_POWER_HF);
     } else {
@@ -325,12 +330,24 @@ template <typename T> bool LR20x0Interface<T>::reconfigure()
             standbySuccess = false;
         }
 
+#ifdef BENCH_KNOBS
+        err = lora.setSyncWord(benchKnobs.syncWordOr(syncWord));
+#else
         err = lora.setSyncWord(syncWord);
+#endif
         if (err != RADIOLIB_ERR_NONE) {
             LOG_ERROR("LR20x0 setSyncWord %s%d", radioLibErr, err);
             RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
             standbySuccess = false;
         }
+#ifdef BENCH_KNOBS
+        // Only when asked: re-sending the packet params with IQ standard left the LR2021 deaf to long frames.
+        if (benchKnobs.iqInvert >= 0) {
+            err = lora.invertIQ(benchKnobs.iqInverted());
+            if (err != RADIOLIB_ERR_NONE)
+                LOG_ERROR("LR20x0 invertIQ %s%d", radioLibErr, err);
+        }
+#endif
 
         err = lora.setPreambleLength(preambleLength);
         if (err != RADIOLIB_ERR_NONE) {
