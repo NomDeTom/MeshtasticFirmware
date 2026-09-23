@@ -1,4 +1,5 @@
 #include "RadioLibInterface.h"
+#include "BenchKnobs.h"
 #include "MeshTypes.h"
 #include "NodeDB.h"
 #include "PowerMon.h"
@@ -97,7 +98,11 @@ bool RadioLibInterface::canSendImmediately()
     // To do otherwise would be doubly bad because not only would we drop the packet that was on the way in,
     // we almost certainly guarantee no one outside will like the packet we are sending.
     bool busyTx = sendingPacket != NULL;
+#ifdef BENCH_KNOBS
+    bool busyRx = isReceiving && benchKnobs.checksRx() && isActivelyReceiving();
+#else
     bool busyRx = isReceiving && isActivelyReceiving();
+#endif
 
     if (busyTx || busyRx) {
         if (busyTx) {
@@ -140,8 +145,14 @@ void RadioLibInterface::holdOnPreamble()
 
 bool RadioLibInterface::receiveDetected(uint16_t irq, unsigned long syncWordHeaderValidFlag, unsigned long preambleDetectedFlag)
 {
+#ifdef BENCH_KNOBS
+    const bool holdMode = benchKnobs.pre == BenchKnobs::PRE_DEFAULT || benchKnobs.pre == BenchKnobs::PRE_HOLD;
+    if (holdMode && preambleHoldActive())
+        return true;
+#else
     if (preambleHoldActive())
         return true;
+#endif
 
     if (irq & syncWordHeaderValidFlag) {
         if (!activeReceiveStart) {
@@ -157,6 +168,12 @@ bool RadioLibInterface::receiveDetected(uint16_t irq, unsigned long syncWordHead
     }
 
     if (irq & preambleDetectedFlag) {
+#ifdef BENCH_KNOBS
+        if (benchKnobs.pre == BenchKnobs::PRE_IGNORE)
+            return false;
+        if (benchKnobs.pre == BenchKnobs::PRE_BUSY)
+            return true;
+#endif
         // Looks come once per CSMA backoff, too rarely to judge a preamble by symbol-time deadline (#11933).
         // Clear it so the next look sees only a fresh one, and hold TX meanwhile; a clear never aborts RX.
         holdOnPreamble();
@@ -280,6 +297,32 @@ bool RadioLibInterface::findInTxQueue(NodeNum from, PacketId id)
 {
     return txQueue.find(from, id);
 }
+
+#ifdef BENCH_KNOBS
+bool RadioLibInterface::benchSampleRssi(int16_t &rssi)
+{
+    if (!isReceiving || sendingPacket != NULL || isIRQPending())
+        return false;
+    rssi = getCurrentRSSI();
+    return rssi != NOISE_FLOOR_INVALID && rssi < 0 && rssi >= NOISE_FLOOR_VALID_MIN;
+}
+
+void RadioLibInterface::benchJam(uint32_t ms)
+{
+    LOG_WARN("BENCH jam unsupported on this radio (%u ms)", ms);
+}
+
+void RadioLibInterface::benchDeaf(uint32_t ms, bool quiet)
+{
+    benchDeafQuiet = quiet;
+    benchDeafUntil = Time::skipZero(Time::getMillis() + ms);
+    setStandby();
+    // Wakes the TX path at the deadline even with nothing queued, so RX always comes back.
+    notifyLater(ms, TRANSMIT_DELAY_COMPLETED, true);
+    if (!quiet)
+        LOG_INFO("BENCH deaf %u ms", ms);
+}
+#endif
 
 void RadioLibInterface::updateNoiseFloor()
 {
@@ -444,6 +487,19 @@ void RadioLibInterface::onNotify(uint32_t notification)
         handleSoftwareLoraIrqPoll();
         break;
     case TRANSMIT_DELAY_COMPLETED:
+#ifdef BENCH_KNOBS
+        if (benchDeafUntil) {
+            const uint32_t now = Time::getMillis();
+            if (!Throttle::deadlinePassedAt(now, benchDeafUntil)) {
+                notifyLater(benchDeafUntil - now, TRANSMIT_DELAY_COMPLETED, true); // still deaf: hold TX
+                break;
+            }
+            benchDeafUntil = 0;
+            startReceive();
+            if (!benchDeafQuiet || !txQueue.empty())
+                LOG_INFO("BENCH undeaf"); // the host dates the join point from this line
+        }
+#endif
 
         // If we are not currently in receive mode, then restart the random delay (this can happen if the main thread
         // has placed the unit into standby)  FIXME, how will this work if the chipset is in sleep mode?
@@ -472,8 +528,25 @@ void RadioLibInterface::onNotify(uint32_t notification)
                     setTransmitDelay(); // the radio config moved, so re-run the delay and scan on it
                 } else {
                     // Listen-before-talk: a CAD preamble scan immediately before we key up.
+#ifdef BENCH_KNOBS
+                    bool energyBusy = false;
+                    if (benchKnobs.usesRssi()) {
+                        int16_t rssi = 0;
+                        const int32_t floor = benchKnobs.floorDbm > -128 ? benchKnobs.floorDbm : getNoiseFloor();
+                        energyBusy = benchSampleRssi(rssi) && rssi > floor + benchKnobs.rssiMargin;
+                        LOG_DEBUG("RSSI look %d dBm, floor %ld + %d: %s", rssi, (long)floor, benchKnobs.rssiMargin,
+                                  energyBusy ? "busy" : "free");
+                    }
+                    const bool scan = benchKnobs.usesCad();
+                    if (scan)
+                        LOG_DEBUG("CAD arm");
+                    else
+                        LOG_DEBUG("CAD skipped (bench lbt)");
+                    if (energyBusy || (scan && isChannelActive())) {
+#else
                     LOG_DEBUG("CAD arm");
                     if (isChannelActive()) { // currently traffic on the channel?
+#endif
                         LOG_DEBUG("CAD busy");
                         // Beacon target or not: reconfigureForBeaconTX() already left RX running on that
                         // config, so skipping this only ever left the node deaf in standby.
@@ -869,6 +942,10 @@ void RadioLibInterface::periodicRadioMaintenance()
         return; // a chip just re-inited (or still dead) has no use for an AGC reset this tick
     }
 
+#ifdef BENCH_KNOBS
+    if (benchKnobs.agcMs < 0)
+        return; // bench: AGC resets disabled, RX-offline recovery above still runs
+#endif
     resetAGC();
 }
 
