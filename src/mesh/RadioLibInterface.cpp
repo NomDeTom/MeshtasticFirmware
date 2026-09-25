@@ -124,62 +124,48 @@ bool RadioLibInterface::canSendImmediately()
         return true;
 }
 
-bool RadioLibInterface::preambleHoldActive()
+uint32_t RadioLibInterface::maxRxFrameMsec()
 {
-    // Whatever sent the cleared preamble is off the air one max packet later.
-    if (preambleHoldStart && !Throttle::isWithinTimespanMs(
-                                 preambleHoldStart, getPacketTime(meshtastic_Constants_DATA_PAYLOAD_LEN + sizeof(PacketHeader))))
-        preambleHoldStart = 0;
-    return preambleHoldStart != 0;
-}
-
-void RadioLibInterface::holdOnPreamble()
-{
-    // During a hold a refire stays latched, so the first look after it sees an external source and holds again.
-    if (preambleHoldActive())
-        return;
-    iface->clearIrq(1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED);
-    preambleHoldStart = Time::skipZero(Time::getMillis());
-    LOG_TRACE("Preamble seen, cleared, holding TX");
+    // A sender's header can carry any CR up to 4/8, and the hold starts before that header can be read.
+    DataRate_t dr = getDataRate();
+    dr.lora.codingRate = 8;
+    PacketConfig_t pc = getPacketConfig();
+    pc.lora.crcEnabled = true;
+    const RadioLibTime_t usec = iface->calculateTimeOnAir(modemType, dr, pc, MAX_LORA_PAYLOAD_LEN);
+    return isRadioLibTimeError(usec) ? getPacketTime(MAX_LORA_PAYLOAD_LEN) : (usec + 999) / 1000;
 }
 
 bool RadioLibInterface::receiveDetected(uint16_t irq, unsigned long syncWordHeaderValidFlag, unsigned long preambleDetectedFlag)
 {
+    const uint32_t nowMsec = Time::getMillis();
+    const uint32_t prevPeek = rxSighting.lastPeek();
+    const uint32_t preambleWas = rxSighting.preambleSeen();
+    bool preamble = irq & preambleDetectedFlag;
+    const bool header = irq & syncWordHeaderValidFlag;
 #ifdef BENCH_KNOBS
-    const bool holdMode = benchKnobs.pre == BenchKnobs::PRE_DEFAULT || benchKnobs.pre == BenchKnobs::PRE_HOLD;
-    if (holdMode && preambleHoldActive())
-        return true;
-#else
-    if (preambleHoldActive())
-        return true;
+    // ignore: a bare preamble is not busy; busy: a latched one is busy and never cleared, so it holds while latched.
+    const bool preambleLatched = preamble;
+    if (benchKnobs.pre == BenchKnobs::PRE_IGNORE || benchKnobs.pre == BenchKnobs::PRE_BUSY)
+        preamble = false;
 #endif
+    // Cleared so that the next look finding it means a new detection. This only touches the IRQ register, never the RX.
+    if (preamble)
+        iface->clearIrqFlags(preambleDetectedFlag);
 
-    if (irq & syncWordHeaderValidFlag) {
-        if (!activeReceiveStart) {
-            activeReceiveStart = Time::skipZero(Time::getMillis());
-        } else if (!Throttle::isWithinTimespanMs(activeReceiveStart,
-                                                 getPacketTime(meshtastic_Constants_DATA_PAYLOAD_LEN + sizeof(PacketHeader)))) {
-            // We should have gotten an RX_DONE IRQ by now if it was really a packet, so ignore HEADER_VALID flag
-            activeReceiveStart = 0;
-            LOG_TRACE("Ignore false header detection");
-            return false;
-        }
-        return true;
-    }
-
-    if (irq & preambleDetectedFlag) {
+    const uint32_t maxPacketMsec = maxRxFrameMsec();
+    bool busy = rxSighting.observe(nowMsec, preamble, header, maxPacketMsec);
 #ifdef BENCH_KNOBS
-        if (benchKnobs.pre == BenchKnobs::PRE_IGNORE)
-            return false;
-        if (benchKnobs.pre == BenchKnobs::PRE_BUSY)
-            return true;
+    busy |= benchKnobs.pre == BenchKnobs::PRE_BUSY && preambleLatched;
 #endif
-        // Looks come once per CSMA backoff, too rarely to judge a preamble by symbol-time deadline (#11933).
-        // Clear it so the next look sees only a fresh one, and hold TX meanwhile; a clear never aborts RX.
-        holdOnPreamble();
-        return true;
-    }
-    return false;
+    if (preamble && prevPeek)
+        LOG_TRACE("Preamble seen, detected in the last %ums, hold TX %ums", nowMsec - prevPeek, maxPacketMsec);
+    else if (preamble)
+        LOG_TRACE("Preamble seen, first look since RX start, hold TX %ums", maxPacketMsec);
+    else if (preambleWas && !rxSighting.preambleSeen())
+        LOG_TRACE("Preamble hold ended after %ums without a completed RX", nowMsec - preambleWas);
+    else if (header && !busy)
+        LOG_TRACE("Ignore false header detection, latched %ums", nowMsec - rxSighting.headerSeen());
+    return busy;
 }
 
 /// Send a packet (possibly by enquing in a private fifo).  This routine will
@@ -833,7 +819,7 @@ void RadioLibInterface::handleReceiveInterrupt()
 #endif
     const bool wasCadHandoff = cadHandoffRxStart != 0;
     cadHandoffRxStart = 0; // this RX ends the wait either way; the outcome is logged below
-    preambleHoldStart = 0; // likewise the reception a held preamble announced
+    rxSighting.reset();    // likewise the reception a held preamble announced
 
     if (!isReceiving) {
         LOG_ERROR("handleReceiveInterrupt called while not in rx mode");

@@ -395,10 +395,10 @@ template <typename T> void SX126xInterface<T>::handleSoftwareLoraIrqPoll()
     const uint16_t noisyRxMask = RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED | RADIOLIB_SX126X_IRQ_HEADER_VALID;
 
     // A bare PREAMBLE is mid-reception, not an RX event: readData() here would run on nothing. With a TX
-    // queued it goes through the same hold as the TX-path look; HEADER_VALID stays latched for readData().
+    // queued the look is recorded like the TX path's, which clears it; HEADER_VALID stays latched for readData().
     const bool preambleOnly = (irq & RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED) && !(irq & RADIOLIB_SX126X_IRQ_HEADER_VALID);
     if (!pollTxMode && hasQueuedTx() && preambleOnly && ((irq & ~noisyRxMask) == 0U)) {
-        holdOnPreamble();
+        receiveDetected(irq, RADIOLIB_SX126X_IRQ_HEADER_VALID, RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED);
         scheduleIrqPollTick();
         return;
     }
@@ -430,7 +430,7 @@ template <typename T> int16_t SX126xInterface<T>::trySetStandby()
         portduino_status.LoRa_in_error = true;
 #endif
     isReceiving = false; // If we were receiving, not any more
-    activeReceiveStart = 0;
+    rxSighting.reset();
     disableInterrupt();
     completeSending(); // If we were sending, not anymore
     RadioLibInterface::setStandby();
