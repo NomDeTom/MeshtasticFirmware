@@ -1,0 +1,83 @@
+[
+ {
+  "label": "I0s",
+  "knobs": "",
+  "size": null,
+  "skew": 4,
+  "pairs": 20,
+  "interval": 2.5
+ },
+ {
+  "label": "I0M",
+  "knobs": "",
+  "size": 100,
+  "skew": 4,
+  "pairs": 20,
+  "interval": 2.5
+ },
+ {
+  "label": "I0L",
+  "knobs": "",
+  "size": 249,
+  "skew": 4,
+  "pairs": 20,
+  "interval": 2.5
+ },
+ {
+  "label": "Ilr1s",
+  "knobs": "",
+  "node_knobs": {
+   "lr": "iq=1"
+  },
+  "size": null,
+  "skew": 4,
+  "pairs": 20,
+  "interval": 2.5
+ },
+ {
+  "label": "Ilr1L",
+  "knobs": "",
+  "node_knobs": {
+   "lr": "iq=1"
+  },
+  "size": 249,
+  "skew": 4,
+  "pairs": 20,
+  "interval": 2.5
+ },
+ {
+  "label": "Ialls",
+  "knobs": "iq=1",
+  "size": null,
+  "skew": 4,
+  "pairs": 20,
+  "interval": 2.5
+ },
+ {
+  "label": "IallM",
+  "knobs": "iq=1",
+  "size": 100,
+  "skew": 4,
+  "pairs": 20,
+  "interval": 2.5
+ },
+ {
+  "label": "IallL",
+  "knobs": "iq=1",
+  "size": 249,
+  "skew": 4,
+  "pairs": 20,
+  "interval": 2.5
+ },
+ {
+  "label": "ImixL",
+  "knobs": "iq=1",
+  "node_knobs": {
+   "lr": "iq=0"
+  },
+  "size": 249,
+  "skew": 4,
+  "pairs": 20,
+  "interval": 2.5
+ }
+]

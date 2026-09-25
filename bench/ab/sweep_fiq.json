@@ -1,0 +1,26 @@
+[
+ {
+  "label": "Fiqbase",
+  "knobs": "",
+  "size": 100,
+  "interferers": [
+   "lr"
+  ],
+  "node_knobs": {
+   "lr": "iq=1 nobackoff=1"
+  },
+  "interval": 4.0
+ },
+ {
+  "label": "Fiqoff",
+  "knobs": "lbt=off",
+  "size": 100,
+  "interferers": [
+   "lr"
+  ],
+  "node_knobs": {
+   "lr": "iq=1 nobackoff=1"
+  },
+  "interval": 4.0
+ }
+]

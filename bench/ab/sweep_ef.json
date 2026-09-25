@@ -1,0 +1,62 @@
+[
+ {
+  "label": "Esyncbase",
+  "knobs": "",
+  "size": 100,
+  "interferers": [
+   "lr"
+  ],
+  "node_knobs": {
+   "lr": "sync=0x12 nobackoff=1"
+  },
+  "interval": 4.0
+ },
+ {
+  "label": "Esyncoff",
+  "knobs": "lbt=off",
+  "size": 100,
+  "interferers": [
+   "lr"
+  ],
+  "node_knobs": {
+   "lr": "sync=0x12 nobackoff=1"
+  },
+  "interval": 4.0
+ },
+ {
+  "label": "Esynccad4",
+  "knobs": "lbt=cad sym=4",
+  "size": 100,
+  "interferers": [
+   "lr"
+  ],
+  "node_knobs": {
+   "lr": "sync=0x12 nobackoff=1"
+  },
+  "interval": 4.0
+ },
+ {
+  "label": "Fiqbase",
+  "knobs": "",
+  "size": 100,
+  "interferers": [
+   "lr"
+  ],
+  "node_knobs": {
+   "lr": "iq=1 nobackoff=1"
+  },
+  "interval": 4.0
+ },
+ {
+  "label": "Fiqoff",
+  "knobs": "lbt=off",
+  "size": 100,
+  "interferers": [
+   "lr"
+  ],
+  "node_knobs": {
+   "lr": "iq=1 nobackoff=1"
+  },
+  "interval": 4.0
+ }
+]

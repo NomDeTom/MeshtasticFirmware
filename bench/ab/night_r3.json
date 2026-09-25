@@ -1,0 +1,513 @@
+[
+ {
+  "label": "A_base_R30",
+  "knobs": "",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_base_dpw",
+  "knobs": "",
+  "senders": [
+   "dut",
+   "peer",
+   "witness"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rx_dpw",
+  "knobs": "lbt=rx",
+  "senders": [
+   "dut",
+   "peer",
+   "witness"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_cadrx4_dpw",
+  "knobs": "lbt=cadrx sym=4",
+  "senders": [
+   "dut",
+   "peer",
+   "witness"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rssi6_dpw",
+  "knobs": "lbt=rssi rssim=6",
+  "senders": [
+   "dut",
+   "peer",
+   "witness"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_off_dpw",
+  "knobs": "lbt=off",
+  "senders": [
+   "dut",
+   "peer",
+   "witness"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rssi6_pwl",
+  "knobs": "lbt=rssi rssim=6",
+  "senders": [
+   "peer",
+   "witness",
+   "lr"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_cadrx4_pwl",
+  "knobs": "lbt=cadrx sym=4",
+  "senders": [
+   "peer",
+   "witness",
+   "lr"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_off_pwl",
+  "knobs": "lbt=off",
+  "senders": [
+   "peer",
+   "witness",
+   "lr"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rx_pwl",
+  "knobs": "lbt=rx",
+  "senders": [
+   "peer",
+   "witness",
+   "lr"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_base_pwl",
+  "knobs": "",
+  "senders": [
+   "peer",
+   "witness",
+   "lr"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_base_wl2",
+  "knobs": "",
+  "senders": [
+   "witness",
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_cadrx4_wl2",
+  "knobs": "lbt=cadrx sym=4",
+  "senders": [
+   "witness",
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rx_wl2",
+  "knobs": "lbt=rx",
+  "senders": [
+   "witness",
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rssi6_wl2",
+  "knobs": "lbt=rssi rssim=6",
+  "senders": [
+   "witness",
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_off_wl2",
+  "knobs": "lbt=off",
+  "senders": [
+   "witness",
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rx_l2d",
+  "knobs": "lbt=rx",
+  "senders": [
+   "lr",
+   "w2",
+   "dut"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_cadrx4_l2d",
+  "knobs": "lbt=cadrx sym=4",
+  "senders": [
+   "lr",
+   "w2",
+   "dut"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rssi6_l2d",
+  "knobs": "lbt=rssi rssim=6",
+  "senders": [
+   "lr",
+   "w2",
+   "dut"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_base_l2d",
+  "knobs": "",
+  "senders": [
+   "lr",
+   "w2",
+   "dut"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_off_l2d",
+  "knobs": "lbt=off",
+  "senders": [
+   "lr",
+   "w2",
+   "dut"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rssi6_2dp",
+  "knobs": "lbt=rssi rssim=6",
+  "senders": [
+   "w2",
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_rx_2dp",
+  "knobs": "lbt=rx",
+  "senders": [
+   "w2",
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_cadrx4_2dp",
+  "knobs": "lbt=cadrx sym=4",
+  "senders": [
+   "w2",
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_off_2dp",
+  "knobs": "lbt=off",
+  "senders": [
+   "w2",
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "R3_base_2dp",
+  "knobs": "",
+  "senders": [
+   "w2",
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ },
+ {
+  "label": "A_base_R31",
+  "knobs": "",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 16,
+  "interval": 2.5
+ }
+]

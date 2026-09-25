@@ -1,0 +1,11 @@
+[
+  ["base", ""],
+  ["offNB", "lbt=off nobackoff=1"],
+  ["rxNB", "lbt=rx nobackoff=1"],
+  ["cad2NB", "lbt=cad sym=2 pre=ignore nobackoff=1"],
+  ["cad4NB", "lbt=cad sym=4 nobackoff=1"],
+  ["cadrx4NB", "lbt=cadrx sym=4 nobackoff=1"],
+  ["cadrx8NB", "lbt=cadrx sym=8 nobackoff=1"],
+  ["cadrx4S", "lbt=cadrx sym=4 cwmin=2 cwmax=2 slot=10"],
+  ["offS", "lbt=off cwmin=2 cwmax=2 slot=10"]
+]

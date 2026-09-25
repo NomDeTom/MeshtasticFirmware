@@ -1,0 +1,254 @@
+[
+ {
+  "label": "A_base_MS0",
+  "knobs": "",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_off_l2",
+  "knobs": "lbt=off",
+  "senders": [
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_rx_l2",
+  "knobs": "lbt=rx",
+  "senders": [
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_base_l2",
+  "knobs": "",
+  "senders": [
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_cad4_l2",
+  "knobs": "lbt=cad sym=4",
+  "senders": [
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_rssi6_l2",
+  "knobs": "lbt=rssi rssim=6",
+  "senders": [
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_cadrx4_l2",
+  "knobs": "lbt=cadrx sym=4",
+  "senders": [
+   "lr",
+   "w2"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_cadrx4_dp",
+  "knobs": "lbt=cadrx sym=4",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_cad4_dp",
+  "knobs": "lbt=cad sym=4",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_off_dp",
+  "knobs": "lbt=off",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_rssi6_dp",
+  "knobs": "lbt=rssi rssim=6",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_base_dp",
+  "knobs": "",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "MS_rx_dp",
+  "knobs": "lbt=rx",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ },
+ {
+  "label": "A_base_MS1",
+  "knobs": "",
+  "senders": [
+   "dut",
+   "peer"
+  ],
+  "size": 100,
+  "skews": [
+   0,
+   0.25,
+   0.5,
+   0.75
+  ],
+  "rotate": true,
+  "pairs": 12,
+  "interval": 3.1
+ }
+]

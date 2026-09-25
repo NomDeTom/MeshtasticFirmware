@@ -1,0 +1,121 @@
+[
+ {
+  "label": "Bbaseq",
+  "knobs": "nobackoff=1",
+  "size": 249,
+  "skew": 0.25,
+  "interval": 3.0
+ },
+ {
+  "label": "Bbaseh",
+  "knobs": "nobackoff=1",
+  "size": 249,
+  "skew": 0.5,
+  "interval": 3.0
+ },
+ {
+  "label": "Bbaseone",
+  "knobs": "nobackoff=1",
+  "size": 249,
+  "skew": 1.0,
+  "interval": 3.0
+ },
+ {
+  "label": "C3base",
+  "knobs": "",
+  "size": 100,
+  "senders": [
+   "dut",
+   "peer",
+   "w2"
+  ],
+  "interval": 4.0
+ },
+ {
+  "label": "C3off",
+  "knobs": "lbt=off",
+  "size": 100,
+  "senders": [
+   "dut",
+   "peer",
+   "w2"
+  ],
+  "interval": 4.0
+ },
+ {
+  "label": "C3cad4",
+  "knobs": "lbt=cad sym=4",
+  "size": 100,
+  "senders": [
+   "dut",
+   "peer",
+   "w2"
+  ],
+  "interval": 4.0
+ },
+ {
+  "label": "C3cadrx4",
+  "knobs": "lbt=cadrx sym=4",
+  "size": 100,
+  "senders": [
+   "dut",
+   "peer",
+   "w2"
+  ],
+  "interval": 4.0
+ },
+ {
+  "label": "Dburstbase",
+  "knobs": "",
+  "size": 100,
+  "burst": 3,
+  "interval": 6.0,
+  "pairs": 20
+ },
+ {
+  "label": "Dburstoff",
+  "knobs": "lbt=off",
+  "size": 100,
+  "burst": 3,
+  "interval": 6.0,
+  "pairs": 20
+ },
+ {
+  "label": "Dburstcadrx4",
+  "knobs": "lbt=cadrx sym=4",
+  "size": 100,
+  "burst": 3,
+  "interval": 6.0,
+  "pairs": 20
+ },
+ {
+  "label": "Gs12base",
+  "knobs": "sync=0x12",
+  "size": 100,
+  "interval": 3.0
+ },
+ {
+  "label": "Gs12offL",
+  "knobs": "sync=0x12 lbt=off nobackoff=1",
+  "size": 249,
+  "interval": 3.0
+ },
+ {
+  "label": "Gs12cad4L",
+  "knobs": "sync=0x12 lbt=cad sym=4 nobackoff=1",
+  "size": 249,
+  "interval": 3.0
+ },
+ {
+  "label": "Gs12cadrx4L",
+  "knobs": "sync=0x12 lbt=cadrx sym=4 nobackoff=1",
+  "size": 249,
+  "interval": 3.0
+ },
+ {
+  "label": "Gs12baseL",
+  "knobs": "sync=0x12 nobackoff=1",
+  "size": 249,
+  "interval": 3.0
+ }
+]

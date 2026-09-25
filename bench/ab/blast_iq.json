@@ -1,0 +1,40 @@
+[
+ {
+  "label": "Nquiet0",
+  "dur_s": 30,
+  "mesh_knobs": "probe=250 lbt=cad sym=4 rssim=6"
+ },
+ {
+  "label": "Nnormal",
+  "dur_s": 30,
+  "blaster": "lr",
+  "blaster_knobs": "lbt=off nobackoff=1",
+  "mesh_knobs": "probe=250 lbt=cad sym=4 rssim=6"
+ },
+ {
+  "label": "Ninv4",
+  "dur_s": 30,
+  "blaster": "lr",
+  "blaster_knobs": "iq=1 lbt=off nobackoff=1",
+  "mesh_knobs": "probe=250 lbt=cad sym=4 rssim=6"
+ },
+ {
+  "label": "Ninv2",
+  "dur_s": 30,
+  "blaster": "lr",
+  "blaster_knobs": "iq=1 lbt=off nobackoff=1",
+  "mesh_knobs": "probe=250 lbt=cad sym=2 rssim=6"
+ },
+ {
+  "label": "Ninv8",
+  "dur_s": 30,
+  "blaster": "lr",
+  "blaster_knobs": "iq=1 lbt=off nobackoff=1",
+  "mesh_knobs": "probe=250 lbt=cad sym=8 rssim=6"
+ },
+ {
+  "label": "Nquiet1",
+  "dur_s": 30,
+  "mesh_knobs": "probe=250 lbt=cad sym=4 rssim=6"
+ }
+]

@@ -1,0 +1,38 @@
+[
+ {
+  "label": "D2burstbase",
+  "knobs": "",
+  "size": 100,
+  "burst": 3,
+  "interval": 6.0,
+  "pairs": 20,
+  "port": "private"
+ },
+ {
+  "label": "D2burstoff",
+  "knobs": "lbt=off",
+  "size": 100,
+  "burst": 3,
+  "interval": 6.0,
+  "pairs": 20,
+  "port": "private"
+ },
+ {
+  "label": "D2burstcadrx4",
+  "knobs": "lbt=cadrx sym=4",
+  "size": 100,
+  "burst": 3,
+  "interval": 6.0,
+  "pairs": 20,
+  "port": "private"
+ },
+ {
+  "label": "D2burstcad4",
+  "knobs": "lbt=cad sym=4",
+  "size": 100,
+  "burst": 3,
+  "interval": 6.0,
+  "pairs": 20,
+  "port": "private"
+ }
+]
