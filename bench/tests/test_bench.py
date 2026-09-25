@@ -612,6 +612,48 @@ class TestReleaseOwnership(unittest.TestCase):
         self.assertIsNone(owner.iface, "the opener may always close its own")
 
 
+class TestOverrunOpen(unittest.TestCase):
+    def test_an_open_that_overruns_is_adopted_not_orphaned(self):
+        """A node slow to answer after a factory reset overran the connect timeout.
+
+        The orphaned open then connected on its own thread and kept the port, so every
+        later open failed with Access is denied until the row gave up at 180 s. Measured:
+        smoke-0923 and all six lbt-real rows. The next open must adopt it instead.
+        """
+        import sys
+        from bench import ports
+
+        gate = threading.Event()
+        opened = []
+
+        class SlowInterface:
+            def __init__(self, devPath):
+                opened.append(devPath)
+                gate.wait(5)
+
+        fake = types.ModuleType("meshtastic.serial_interface")
+        fake.SerialInterface = SlowInterface
+        saved = sys.modules.get("meshtastic.serial_interface")
+        sys.modules["meshtastic.serial_interface"] = fake
+        try:
+            owner = ports.PortOwner(BenchNode("dut", "SER", "dut"), connect_timeout=0.05)
+            iface, err = owner._open("COM9", 1.0)
+            self.assertIsNone(iface)
+            iface, err = owner._open("COM9", 1.0)
+            self.assertEqual(err, "previous open still in progress")
+            self.assertEqual(len(opened), 1, "a second open while the first holds the port")
+            gate.set()
+            iface, err = owner._open("COM9", 1.0)
+            self.assertIsInstance(iface, SlowInterface, "the overrun open must be adopted")
+            self.assertEqual(len(opened), 1)
+        finally:
+            gate.set()
+            if saved is not None:
+                sys.modules["meshtastic.serial_interface"] = saved
+            else:
+                sys.modules.pop("meshtastic.serial_interface", None)
+
+
 class TestSchedulePhases(unittest.TestCase):
     def test_the_plan_and_the_work_use_the_same_phase_names(self):
         """A plan that names work differently from the thing doing it can never mark it.
@@ -1277,6 +1319,408 @@ class TestLbtScenarioTable(unittest.TestCase):
 
         row = next(s for s in SCENARIOS if s.id.startswith("L5"))
         self.assertIn("log.TRACE", row.required_capabilities()["dut"])
+
+
+class TestReaderIsTheOnlyCloser(unittest.TestCase):
+    def test_a_live_reader_closes_its_own_stream(self):
+        """The bench must never close a stream the library's reader thread is using.
+
+        pyserial's close() cancels a pending overlapped read without waiting for it and
+        drops the OVERLAPPED structure, so the kernel completes the read into freed
+        memory; the reader's own close then runs concurrently and closes the same handle
+        values a second time. smoke.log carries the reader's half of that race. The
+        reader is told to stop, and closes the stream itself once its read has returned.
+        """
+        from bench import ports
+
+        closers = []
+
+        class Handle:
+            def close(self):
+                closers.append(threading.current_thread().name)
+
+        class Iface:
+            def __init__(self):
+                self.stream = Handle()
+                self._wantExit = False
+                self._rxThread = threading.Thread(
+                    target=self._reader, name="stream reader", daemon=True)
+                self._rxThread.start()
+
+            def _reader(self):
+                while not self._wantExit:
+                    time.sleep(0.02)  # a read with a timeout
+                self.stream.close()  # what StreamInterface._disconnected does
+                self.stream = None
+
+        iface = Iface()
+        ports._let_go(iface, abandon=True)
+        self.assertFalse(iface._rxThread.is_alive(), "released means the port is free")
+        self.assertEqual(closers, ["stream reader"], "exactly one close, by the reader")
+
+
+class TestSilentNode(unittest.TestCase):
+    def owner(self):
+        from bench import ports
+
+        return ports.PortOwner(BenchNode("dut", "SER", "dut"))
+
+    def test_enumerated_but_silent_is_a_named_failure(self):
+        """A node wedged after a config reboot enumerates, opens, and never says a word.
+
+        Measured on dut after a region write: COM3 present, 0 bytes in 12 s, no reply to
+        want_config from a fresh process. Waiting longer is not a remedy, so the owner
+        says which it is rather than reporting a slow reboot.
+        """
+        from bench import ports
+
+        o = self.owner()
+        o.hold = lambda budget_s=60.0, by="capture": ports.Result(ports.TIMED_OUT, "open timed out")
+        result = o.wait_answering(budget_s=0.3, spacing=0.05)
+        self.assertEqual(result.outcome, ports.FAILED)
+        self.assertIn("enumerated, not answering", result.detail)
+        self.assertEqual(o.state, ports.ST_GAVE_UP)
+
+    def test_a_node_that_never_enumerated_is_still_a_timeout(self):
+        from bench import ports
+
+        o = self.owner()
+        o.hold = lambda budget_s=60.0, by="capture": ports.Result(ports.ABSENT, "not enumerated")
+        result = o.wait_answering(budget_s=0.3, spacing=0.05)
+        self.assertEqual(result.outcome, ports.TIMED_OUT)
+
+
+class TestLendToAChild(unittest.TestCase):
+    def test_a_lent_port_is_closed_first_and_refused_to_everyone_here(self):
+        """While a child process owns the device, this process holds nothing and opens nothing.
+
+        Two openers on one device inside one process - capture's health loop and the
+        provisioner's wait - is what turned a silent node into minutes of alternating
+        "Access is denied" and 25 s timeouts in smoke-0923.
+        """
+        from bench import ports
+
+        closes = []
+
+        class Iface:
+            def close(self):
+                closes.append(True)
+
+        o = ports.PortOwner(BenchNode("dut", "SER", "dut"))
+        o.resolve = lambda: "COM9"
+        o.iface = Iface()
+        o._opened_by = "capture"
+        ports._LIVE.add(o)
+        o._to(ports.ST_HELD, "capture open")
+
+        with o.lend("provision:provision", budget_s=5.0) as port:
+            self.assertEqual(port, "COM9")
+            self.assertEqual(closes, [True], "a node staying put is closed, not abandoned")
+            self.assertIsNone(o.iface)
+            self.assertNotIn("dut", [p["node"] for p in ports.open_ports()])
+            self.assertEqual(o.state, ports.ST_LEASED)
+            self.assertEqual(o.hold(1.0).outcome, ports.BUSY)
+            with self.assertRaises(ports.PortBusy):
+                with o.lease("nosy", budget_s=1.0):
+                    pass
+        self.assertEqual(o.state, ports.ST_IDLE, "free to be taken back once the child is gone")
+
+
+class _StubOwner:
+    def __init__(self, calls, marker):
+        self.calls = calls
+        self.marker = marker
+
+    def lend(self, reason, budget_s):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _cm():
+            self.calls.append(("lend", reason))
+            try:
+                yield "COM9"
+            finally:
+                # By the time the port comes back the child must have EXITED, not merely
+                # finished talking: its handles are only freed when the process is gone.
+                self.calls.append(("returned", self.marker.exists()))
+
+        return _cm()
+
+
+class _StubObserver:
+    def __init__(self, marker, resume_outcome=None):
+        from bench import ports
+
+        self.calls = []
+        self.logs = []
+        self.owner = _StubOwner(self.calls, marker)
+        self.resume_outcome = resume_outcome or ports.OK
+
+    def suspend(self, name, reason):
+        self.calls.append(("suspend", name))
+
+    def owner_for(self, name):
+        return self.owner
+
+    def resume(self, name, budget_s=None):
+        from bench import ports
+
+        self.calls.append(("resume", budget_s))
+        return ports.Result(self.resume_outcome, "", 0.0, budget_s or 0.0)
+
+    def record_log(self, name, line):
+        self.logs.append((name, line))
+
+
+class TestIsolatedProvisioning(unittest.TestCase):
+    """Everything that reboots a node runs in a child process; the parent keeps no handle.
+
+    These start real child processes - small scripts speaking the child protocol - so the
+    pipe, the ceiling and the exit handling are exercised for real. None touches a device.
+    """
+
+    STATE = {
+        "node": "dut", "serial_number": "SER", "port": "COM9", "node_id": "!a",
+        "node_num": 1, "firmware_version": "2.7.26", "build_tag": None,
+        "region": "EU_868", "modem_preset": "LONG_SLOW", "role": "CLIENT",
+        "channels": [], "tx_enabled": True, "extra_config": {}, "errors": [],
+    }
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.marker = self.dir / "exited"
+
+    def child(self, body: str) -> list[str]:
+        import sys
+
+        script = self.dir / "child.py"
+        script.write_text(
+            "import json, os, sys, time\n"
+            "from pathlib import Path\n"
+            f"TAG = {'@@bench '!r}\n"
+            f"MARKER = Path({str(self.marker)!r})\n"
+            "job = json.loads(sys.stdin.read())\n"
+            "def say(msg):\n"
+            "    sys.stdout.write(TAG + json.dumps(msg) + '\\n'); sys.stdout.flush()\n"
+            + body,
+            encoding="utf-8",
+        )
+        return [sys.executable, str(script)]
+
+    def provisioner(self, observer, command, events, **kw):
+        from bench import provision
+
+        return provision.IsolatedProvisioner(
+            observer, on_event=lambda kind, data: events.append((kind, data)),
+            command=command, **kw)
+
+    def test_the_child_owns_the_port_and_the_parent_takes_it_back_after(self):
+        from bench import provision
+
+        body = (
+            "assert job['port'] == 'COM9' and job['spec']['channel_url'] == 'https://x/#k'\n"
+            "say({'t': 'event', 'kind': 'provision_phase',\n"
+            "     'data': {'node': 'dut', 'phase': 'factory reset', 'status': 'running'}})\n"
+            "say({'t': 'log', 'line': 'INFO  | 12:00:00 5 BENCH: tag=abc'})\n"
+            f"say({{'t': 'result', 'answered': True, 'state': {self.STATE!r}, 'problems': []}})\n"
+            "sys.stdout.close()\n"
+            "time.sleep(0.5)\n"
+            "MARKER.write_text('x')\n"
+        )
+        obs = _StubObserver(self.marker)
+        events = []
+        p = self.provisioner(obs, self.child(body), events)
+        node = BenchNode("dut", "SER", "dut")
+        state = p.provision(node, provision.NodeSpec(region="EU_868", channel_url="https://x/#k"))
+
+        self.assertEqual(state.region, "EU_868")
+        self.assertEqual(
+            [c[0] for c in obs.calls], ["suspend", "lend", "returned", "resume"],
+            "suspend capture, lend the port, get it back, then resume capture")
+        self.assertEqual(obs.calls[2], ("returned", True), "the port came back before the child exited")
+        self.assertEqual(obs.calls[3], ("resume", provision.READY_TIMEOUT_S))
+        kinds = [k for k, _ in events]
+        # The dashboard and the schedule read the same event kinds they always did.
+        self.assertIn("provision_phase", kinds)
+        phase = next(d for k, d in events if k == "provision_phase")
+        self.assertEqual((phase["phase"], phase["status"]), ("factory reset", "running"))
+        end = next(d for k, d in events if k == "provision_child_end")
+        self.assertEqual(end["outcome"], "ok")
+        self.assertEqual(obs.logs, [("dut", "INFO  | 12:00:00 5 BENCH: tag=abc")])
+
+    def test_verify_returns_the_problems_rather_than_raising(self):
+        from bench import provision
+
+        body = (
+            f"say({{'t': 'result', 'answered': True, 'state': {self.STATE!r},\n"
+            "     'problems': ['role is None, expected CLIENT']})\n"
+        )
+        obs = _StubObserver(self.marker)
+        p = self.provisioner(obs, self.child(body), [])
+        state, problems = p.verify(BenchNode("dut", "SER", "dut"), provision.NodeSpec(role="CLIENT"))
+        self.assertEqual(problems, ["role is None, expected CLIENT"])
+        self.assertEqual(state.node, "dut")
+
+    def test_an_error_in_the_child_is_the_same_provision_error_here(self):
+        from bench import provision
+
+        body = "say({'t': 'result', 'answered': True, 'error': 'dut did not settle: region'})\n"
+        obs = _StubObserver(self.marker)
+        p = self.provisioner(obs, self.child(body), [])
+        with self.assertRaises(provision.ProvisionError) as caught:
+            p.provision(BenchNode("dut", "SER", "dut"), provision.NodeSpec())
+        self.assertEqual(str(caught.exception), "dut did not settle: region")
+
+    def test_a_child_past_its_ceiling_is_killed_and_capture_still_resumes(self):
+        """A silent node must end in a named outcome, not an open-ended wait."""
+        from bench import ports, provision
+
+        obs = _StubObserver(self.marker)
+        events = []
+        p = self.provisioner(obs, self.child("time.sleep(60)\n"), events,
+                             ceilings={"provision": 1.0})
+        started = time.monotonic()
+        with self.assertRaises(provision.ProvisionError):
+            p.provision(BenchNode("dut", "SER", "dut"), provision.NodeSpec())
+        self.assertLess(time.monotonic() - started, 20.0)
+        end = next(d for k, d in events if k == "provision_child_end")
+        self.assertEqual(end["outcome"], ports.TIMED_OUT)
+        self.assertEqual(obs.calls[-1], ("resume", provision.RECLAIM_AFTER_FAILURE_S),
+                         "a node that answered nobody gets one attempt, not a full wait")
+
+    def test_a_child_that_crashes_costs_the_step_not_the_run(self):
+        """A segfault in a child is an exit code here, with its traceback kept."""
+        from bench import ports, provision
+
+        obs = _StubObserver(self.marker)
+        events = []
+        body = "import faulthandler\nfaulthandler.enable()\nfaulthandler._sigsegv()\n"
+        p = self.provisioner(obs, self.child(body), events)
+        with self.assertRaises(provision.ProvisionError) as caught:
+            p.provision(BenchNode("dut", "SER", "dut"), provision.NodeSpec())
+        self.assertIn("without a result", str(caught.exception))
+        end = next(d for k, d in events if k == "provision_child_end")
+        self.assertEqual(end["outcome"], ports.FAILED)
+        self.assertNotEqual(end["exit_code"], 0)
+        self.assertTrue(any("Fatal Python error" in line for line in end["stderr_tail"]))
+        self.assertEqual(obs.calls[-1][0], "resume")
+
+    def test_provisioned_but_not_recaptured_is_still_a_failure(self):
+        from bench import ports, provision
+
+        body = f"say({{'t': 'result', 'answered': True, 'state': {self.STATE!r}, 'problems': []}})\n"
+        obs = _StubObserver(self.marker, resume_outcome=ports.FAILED)
+        p = self.provisioner(obs, self.child(body), [])
+        with self.assertRaises(provision.ProvisionError) as caught:
+            p.provision(BenchNode("dut", "SER", "dut"), provision.NodeSpec())
+        self.assertIn("capture could not be taken back", str(caught.exception))
+
+
+class TestChildSide(unittest.TestCase):
+    """The child's half, driven in-process with a stand-in Provisioner."""
+
+    def run_child(self, op, behaviour):
+        import io
+
+        from bench import provision, provision_child
+
+        out = io.StringIO()
+        emit = provision_child._Emitter(out)
+
+        class FakeProvisioner:
+            def __init__(self, view, on_event):
+                self.view = view
+                self.on_event = on_event
+
+            def _state(self, node):
+                return provision.SettledState(
+                    node=node.name, serial_number=node.serial_number, port="COM9",
+                    node_id="!a", node_num=1, firmware_version="v", build_tag=None,
+                    region="EU_868", modem_preset=None, role=None)
+
+            def provision(self, node, spec):
+                self.on_event("provision_start", {"node": node.name})
+                return behaviour(self, node)
+
+            def verify(self, node, spec):
+                return behaviour(self, node)
+
+        job = {"op": op, "node": provision.node_to_json(BenchNode("dut", "SER", "dut")),
+               "spec": provision.spec_to_json(provision.NodeSpec(region="EU_868"))}
+        result = provision_child.run_job(job, emit, make_provisioner=FakeProvisioner)
+        lines = [json.loads(l[len(provision.CHILD_TAG):]) for l in out.getvalue().splitlines()]
+        return result, lines
+
+    def test_a_provision_reports_its_events_and_its_state(self):
+        result, lines = self.run_child("provision", lambda p, node: p._state(node))
+        self.assertNotIn("error", result)
+        self.assertEqual(result["state"]["region"], "EU_868")
+        self.assertFalse(result["answered"], "nothing was open when the child finished")
+        self.assertIn({"t": "event", "kind": "provision_start", "data": {"node": "dut"}}, lines)
+
+    def test_a_provision_error_becomes_a_result_not_a_crash(self):
+        from bench import provision
+
+        def boom(p, node):
+            raise provision.ProvisionError("dut did not become ready: failed")
+
+        result, _ = self.run_child("provision", boom)
+        self.assertEqual(result["error"], "dut did not become ready: failed")
+
+    def test_the_child_reads_from_what_the_owner_holds_now(self):
+        """After a reboot the owner reopens; a copy of the old interface reads a dead cache."""
+        from bench import provision_child
+
+        view = provision_child._OneNode(BenchNode("dut", "SER", "dut"), None)
+        view.owner.iface = first = object()
+        self.assertIs(view.interface("dut"), first)
+        view.owner.iface = second = object()
+        self.assertIs(view.interface("dut"), second)
+        view.owner.iface = None
+        with self.assertRaises(RuntimeError):
+            view.interface("dut")
+
+
+class TestObserverFollowsTheOwner(unittest.TestCase):
+    def test_commands_ride_the_connection_the_owner_holds_now(self):
+        """wait_answering reopens without telling the observer.
+
+        The read-back after a refresh then read config from the interface it had just
+        closed - its cache, which is the exact thing the refresh exists to avoid.
+        """
+        from bench import observer as observer_mod
+        from bench import streams
+
+        rec = streams.Recorder(Path(tempfile.mkdtemp()))
+        obs = observer_mod.Observer(rec, [BenchNode("dut", "SER-DUT", "dut")])
+        held = obs.held["dut"]
+        held.iface = stale = object()
+        held.owner.iface = fresh = object()
+        self.assertIs(obs.interface("dut"), fresh)
+        self.assertIsNot(obs.interface("dut"), stale)
+        rec.close()
+
+    def test_resuming_with_a_budget_takes_capture_back_before_returning(self):
+        from bench import observer as observer_mod
+        from bench import ports, streams
+
+        rec = streams.Recorder(Path(tempfile.mkdtemp()))
+        obs = observer_mod.Observer(rec, [BenchNode("dut", "SER-DUT", "dut")])
+        held = obs.held["dut"]
+        obs._suspended.add("dut")
+        iface = object()
+
+        def answering(budget_s=180.0, spacing=4.0):
+            held.owner.iface = iface
+            return ports.Result(ports.OK, "", 0.0, budget_s)
+
+        held.owner.wait_answering = answering
+        result = obs.resume("dut", budget_s=5.0)
+        self.assertTrue(result.ok)
+        self.assertFalse(obs.is_suspended("dut"))
+        self.assertIs(held.iface, iface)
+        self.assertTrue(held.connected)
+        rec.close()
 
 
 if __name__ == "__main__":

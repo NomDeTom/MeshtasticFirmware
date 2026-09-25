@@ -399,6 +399,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A native crash otherwise ends the process with exit 139 and nothing else: no
+    # traceback, no results. With this, every thread's Python stack goes to stderr first.
+    import faulthandler
+
+    if not faulthandler.is_enabled():
+        try:
+            faulthandler.enable()
+        except (AttributeError, ValueError, OSError):
+            pass  # no usable stderr (a windowless interpreter); run without it
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

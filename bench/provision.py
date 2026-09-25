@@ -286,6 +286,12 @@ class Provisioner:
             raise ProvisionError(f"{node.name} did not settle: {'; '.join(problems)}")
         return state
 
+    def reboot(self, node: devices.BenchNode) -> None:
+        """Reboot a node and wait for it to answer again. Nothing else."""
+        devices.assert_commandable(node)
+        self._wait_ready(node)
+        self._reboot(node)
+
     def verify(self, node: devices.BenchNode, spec: NodeSpec) -> tuple[SettledState, list[str]]:
         """Read the device's state and say how it differs from the spec.
 
@@ -377,11 +383,12 @@ class Provisioner:
             "node_ready" if result.ok else "node_not_ready",
             node=node.name, outcome=result.outcome,
             waited_s=round(result.elapsed_s, 1), budget_s=result.budget_s,
+            detail=result.detail,
         )
         if not result.ok:
             raise ProvisionError(
                 f"{node.name} did not become ready: {result.outcome} after "
-                f"{result.elapsed_s:.0f}s of {result.budget_s:.0f}s"
+                f"{result.elapsed_s:.0f}s of {result.budget_s:.0f}s - {result.detail}"
             )
 
     # -- read-back -------------------------------------------------------------
@@ -628,3 +635,302 @@ def _safe(values: dict) -> dict:
         else:
             out[key] = value
     return out
+
+
+# -- isolation ------------------------------------------------------------------
+#
+# Every operation that reboots a node, and the wait for it to come back, runs in a
+# short-lived child process (bench/provision_child.py). A reboot is exactly when this
+# process used to lose track of a handle: an open that overran against a node that was
+# leaving or silent, a reader thread outliving the interface it served, a close racing
+# the library's own. Each of those contested the port for the rest of the operation -
+# opens alternating "Access is denied" and 25 s timeouts - and one run ended in a
+# segfault. When a child exits the OS closes every handle it had, so none of that can
+# outlive the operation. The parent only ever closes a node that is staying put, and
+# reopens it once the child is gone.
+
+# Hard ceilings on a child, past which it is killed. Deliberately above the budgets the
+# work inside plans against: they exist so an unattended run always ends, not to time
+# the work.
+CHILD_CEILING_S = {
+    "provision": PROVISION_BUDGET_S + READY_TIMEOUT_S,
+    "verify": READY_TIMEOUT_S + 60.0,
+    "reboot": READY_TIMEOUT_S + 90.0,
+}
+# How long the parent waits to take capture back when the child got no answer either.
+# One real attempt: a node wedged after a config reboot stays wedged, and the health
+# loop keeps trying at its own spacing after this.
+RECLAIM_AFTER_FAILURE_S = 45.0
+# Prefix on every protocol line a child writes, so anything else that reaches its stdout
+# cannot be mistaken for a message.
+CHILD_TAG = "@@bench "
+
+
+def spec_to_json(spec: NodeSpec) -> dict:
+    """The whole spec, secrets included - it travels over a pipe, never argv or a log."""
+    return {
+        "region": spec.region,
+        "modem_preset": spec.modem_preset,
+        "role": spec.role,
+        "channel_url": spec.channel_url,
+        "long_name": spec.long_name,
+        "short_name": spec.short_name,
+        "debug_log_api": spec.debug_log_api,
+        "extra_config": dict(spec.extra_config),
+    }
+
+
+def node_to_json(node: devices.BenchNode) -> dict:
+    return {
+        "name": node.name,
+        "serial_number": node.serial_number,
+        "role": node.role,
+        "board": node.board,
+        "never_command": node.never_command,
+        "never_flash": node.never_flash,
+    }
+
+
+def state_from_json(data: dict) -> SettledState:
+    known = set(SettledState.__dataclass_fields__)
+    return SettledState(**{k: v for k, v in data.items() if k in known})
+
+
+def child_command() -> list[str]:
+    """How a child is started. faulthandler, so a crash in one leaves a traceback."""
+    import sys
+
+    return [sys.executable, "-X", "faulthandler", "-m", "bench.provision_child"]
+
+
+class IsolatedProvisioner:
+    """The Provisioner's interface, with every device operation run in a child process.
+
+    provision(), verify() and reboot() behave as Provisioner's do - same events, same
+    SettledState, same ProvisionError - because the child runs the Provisioner itself and
+    this forwards what it reports. Only where the port is opened differs.
+
+    The parent's side of each call: stop the observer reconnecting to the node, lend the
+    port (closing capture's connection while the node is still staying put), run the
+    child to completion or to its ceiling, and only then - the child gone and every
+    handle it had closed by the OS - take capture back.
+    """
+
+    def __init__(
+        self,
+        observer: Any,
+        on_event: Callable[[str, dict], None] | None = None,
+        command: list[str] | None = None,
+        ceilings: dict[str, float] | None = None,
+        ready_timeout_s: float = READY_TIMEOUT_S,
+    ) -> None:
+        self.observer = observer
+        self.on_event = on_event
+        self.command = command
+        self.ceilings = {**CHILD_CEILING_S, **(ceilings or {})}
+        self.ready_timeout_s = ready_timeout_s
+
+    def _emit(self, kind: str, **data: Any) -> None:
+        if self.on_event:
+            self.on_event(kind, data)
+
+    # -- the same three operations -----------------------------------------------
+
+    def provision(self, node: devices.BenchNode, spec: NodeSpec) -> SettledState:
+        reply = self._run("provision", node, spec)
+        return state_from_json(reply["state"])
+
+    def verify(self, node: devices.BenchNode, spec: NodeSpec) -> tuple[SettledState, list[str]]:
+        reply = self._run("verify", node, spec)
+        return state_from_json(reply["state"]), list(reply.get("problems") or [])
+
+    def reboot(self, node: devices.BenchNode) -> None:
+        self._run("reboot", node, None)
+
+    # -- one child -----------------------------------------------------------------
+
+    def _run(self, op: str, node: devices.BenchNode, spec: NodeSpec | None) -> dict:
+        """Run one operation in a child and return its reply, or raise ProvisionError."""
+        from . import ports
+
+        devices.assert_commandable(node)
+        ceiling = float(self.ceilings[op])
+        reason = f"provision:{op}"
+        job: dict[str, Any] = {
+            "op": op,
+            "node": node_to_json(node),
+            "spec": spec_to_json(spec) if spec is not None else None,
+        }
+        run: dict[str, Any] = {"outcome": ports.FAILED, "detail": "not started", "reply": None}
+        back = None
+        self.observer.suspend(node.name, reason)
+        try:
+            owner = self.observer.owner_for(node.name)
+            with owner.lend(reason, budget_s=ceiling) as port:
+                job["port"] = port
+                run = self._spawn(node, op, job, ceiling)
+        finally:
+            # The child is gone by here - _spawn does not return while it lives - so
+            # nothing of it can contest the port the parent is about to open.
+            reply = run.get("reply") or {}
+            back = self.observer.resume(
+                node.name,
+                budget_s=(
+                    self.ready_timeout_s if reply.get("answered") else RECLAIM_AFTER_FAILURE_S
+                ),
+            )
+            if back is not None:
+                self._emit(
+                    "capture_resumed", node=node.name, outcome=back.outcome,
+                    waited_s=round(back.elapsed_s, 1), budget_s=back.budget_s,
+                    detail=back.detail,
+                )
+
+        reply = run.get("reply")
+        if reply is None:
+            raise ProvisionError(
+                f"{node.name}: {op} child ended {run['outcome']} without a result "
+                f"({run.get('detail', '')})"
+            )
+        if reply.get("error"):
+            raise ProvisionError(reply["error"])
+        if back is not None and not back.ok:
+            raise ProvisionError(
+                f"{node.name}: {op} completed in the child but capture could not be taken "
+                f"back: {back.outcome} ({back.detail})"
+            )
+        return reply
+
+    def _spawn(self, node: devices.BenchNode, op: str, job: dict, ceiling_s: float) -> dict:
+        """Start the child, forward what it reports, and never return while it lives."""
+        import collections
+        import json
+        import os
+        import queue
+        import subprocess
+        import threading
+        from pathlib import Path
+
+        from . import ports
+
+        budget = ports.Budget(ceiling_s)
+        env = dict(os.environ)
+        root = str(Path(__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        proc = subprocess.Popen(
+            self.command or child_command(),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        self._emit(
+            "provision_child_start", node=node.name, op=op, pid=proc.pid,
+            port=job.get("port"), budget_s=ceiling_s,
+        )
+        lines: "queue.Queue[str | None]" = queue.Queue()
+        stderr_tail: "collections.deque[str]" = collections.deque(maxlen=40)
+
+        def _pump_out() -> None:
+            for line in proc.stdout:
+                lines.put(line)
+            lines.put(None)
+
+        def _pump_err() -> None:
+            for line in proc.stderr:
+                stderr_tail.append(line.rstrip())
+
+        out_thread = threading.Thread(target=_pump_out, daemon=True, name="bench-child-out")
+        out_thread.start()
+        err_thread = threading.Thread(target=_pump_err, daemon=True, name="bench-child-err")
+        err_thread.start()
+
+        reply: dict | None = None
+        killed = False
+        try:
+            try:
+                proc.stdin.write(json.dumps(job))
+                proc.stdin.close()
+            except OSError:
+                pass  # it died at once; the exit code says why
+            while True:
+                if budget.spent:
+                    killed = True
+                    break
+                try:
+                    line = lines.get(timeout=min(1.0, max(0.05, budget.remaining)))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break
+                if not line.startswith(CHILD_TAG):
+                    stderr_tail.append(line.rstrip())
+                    continue
+                try:
+                    msg = json.loads(line[len(CHILD_TAG):])
+                except ValueError:
+                    stderr_tail.append(line.rstrip())
+                    continue
+                if msg.get("t") == "event":
+                    data = dict(msg.get("data") or {})
+                    data["via"] = "child"
+                    self._emit(msg.get("kind") or "provision_child_event", **data)
+                elif msg.get("t") == "log":
+                    self._forward_log(node.name, msg.get("line", ""))
+                elif msg.get("t") == "result":
+                    reply = msg
+        finally:
+            if proc.poll() is None:
+                if not killed:
+                    # Output ended but the process has not: give it a moment to exit.
+                    try:
+                        proc.wait(timeout=10.0)
+                    except subprocess.TimeoutExpired:
+                        killed = True
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait()
+            out_thread.join(2.0)
+            err_thread.join(2.0)
+            for pipe in (proc.stdout, proc.stderr):
+                try:
+                    pipe.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        code = proc.returncode
+        if killed:
+            outcome = ports.TIMED_OUT
+            detail = f"killed after {budget.elapsed:.0f}s of {ceiling_s:.0f}s"
+        elif reply is not None:
+            outcome = ports.FAILED if reply.get("error") else ports.OK
+            detail = f"exit {code}"
+        else:
+            outcome, detail = ports.FAILED, f"exit {code} ({_exit_name(code)})"
+        self._emit(
+            "provision_child_end", node=node.name, op=op, outcome=outcome, detail=detail,
+            exit_code=code, elapsed_s=round(budget.elapsed, 1), budget_s=ceiling_s,
+            stderr_tail=list(stderr_tail)[-15:] if outcome != ports.OK else [],
+        )
+        return {"outcome": outcome, "detail": detail, "reply": reply, "exit_code": code}
+
+    def _forward_log(self, name: str, line: str) -> None:
+        """A log line the child's connection received, into this run's capture."""
+        record = getattr(self.observer, "record_log", None)
+        if record is not None:
+            record(name, line)
+
+
+def _exit_name(code: int | None) -> str:
+    """Say what an exit code means when it is a crash rather than a return."""
+    if code is None:
+        return "still running"
+    unsigned = code & 0xFFFFFFFF
+    if unsigned == 0xC0000005 or code in (-11, 139):
+        return "access violation"
+    if unsigned >= 0xC0000000:
+        return f"NTSTATUS 0x{unsigned:08X}"
+    if code < 0:
+        return f"signal {-code}"
+    return "returned without a result"

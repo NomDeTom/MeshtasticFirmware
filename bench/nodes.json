@@ -2,31 +2,34 @@
   "nodes": [
     {
       "name": "dut",
-      "serial_number": "962A7036E02D0A91",
+      "serial_number": "43C2192F2DFEE099",
       "role": "dut",
       "board": "NRF52_PROMICRO_DIY",
-      "notes": ["flashed and commanded every row"]
+      "notes": ["SX1262 promicro (b3fb); contention sender A", "TCXO status unconfirmed until row I1"]
     },
     {
       "name": "peer",
-      "serial_number": "B050C9770E65DC2B",
+      "serial_number": "69DCAE3411236A3E",
       "role": "peer",
       "board": "NRF52_PROMICRO_DIY",
-      "notes": ["second endpoint, and the channel occupier for rf_peer stimulus"]
+      "notes": ["SX1262 promicro (0e3c); contention sender B", "TCXO status unconfirmed until row I1"]
     },
     {
-      "name": "observer",
-      "serial_number": "52304EFC30A77A95",
-      "role": "observer",
-      "board": "HELTEC_MESH_POCKET",
+      "name": "witness",
+      "serial_number": "C4BB0930D953D0A3",
+      "role": "witness",
+      "board": "NRF52_PROMICRO_DIY",
       "notes": [
-        "stock firmware, never flashed and never commanded DURING a run",
-        "provisioned once out of band, 2026-09-02, and not touched since:",
-        "  modem_preset LONG_SLOW - on LONG_FAST it is on a different spreading factor and hears nothing the bench does",
-        "  tx_enabled false, tx_power 10 - a passive witness must not key its transmitter; it also stays out of the duty-cycle budget",
-        "  debug_log_api_enabled FALSE - this is the one that matters. With it on, logs go to whichever client attaches and raw serial sees nothing at all",
-        "a different board on purpose: it is the naive-client instrument, so it must not share the DUT's build"
+        "SX1262 promicro (8875); passive witness, tx_enabled false in contention rows",
+        "one of the three SX1262 nodes has no TCXO: after I1, swap serials so that node is the witness"
       ]
+    },
+    {
+      "name": "lr",
+      "serial_number": "06E3F87E62341649",
+      "role": "lr",
+      "board": "NRF52_PROMICRO_DIY",
+      "notes": ["LR2021 promicro (b6d6); second passive witness in the SX1262 contention rows"]
     }
   ]
 }

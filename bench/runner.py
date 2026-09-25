@@ -768,32 +768,37 @@ class Runner:
         if node is None or node.never_command or self.observer is None:
             return None
         self.event("build_tag_reboot", node=node_name, reason="tag not seen during prep")
+        # Through the provisioner, so the reboot and the wait for the node run in a child
+        # process like every other reboot. The child forwards the node's log lines into
+        # the capture, and capture reattaches after it - either one hears the banner.
         try:
-            self.observer.interface(node_name).localNode.reboot()
-        except Exception as exc:  # noqa: BLE001 - the node reboots out from under the call
+            self._provisioner_for_run().reboot(node)
+        except Exception as exc:  # noqa: BLE001 - a missing tag is reported, not fatal
             self.event("build_tag_reboot_raised", node=node_name, error=str(exc))
-        self.observer.owner_for(node_name).expect_reboot("build_tag_reboot")
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            time.sleep(3.0)
-            self.observer.owner_for(node_name).hold(budget_s=20.0)
             tag = self._build_tag_for(node_name, None, since=None)
             if tag:
                 self.event("build_tag_observed", node=node_name, tag=tag)
                 return tag
+            time.sleep(3.0)
         self.event("build_tag_missing", node=node_name)
         return None
 
-    def _provisioner_for_run(self) -> provision.Provisioner:
+    def _provisioner_for_run(self) -> provision.IsolatedProvisioner:
         """One provisioner for the whole run.
 
         It is stateless per call, but building a fresh one per role per row hid the fact
         that prep decisions accumulate across rows - which is exactly what
         _provision_or_verify depends on.
+
+        Isolated: every provisioning, verification and reboot runs in a child process
+        that owns the port for its duration, so no handle from a rebooting node can be
+        left in this one.
         """
         if self._provisioner is None:
-            self._provisioner = provision.Provisioner(
+            self._provisioner = provision.IsolatedProvisioner(
                 self.observer, on_event=lambda kind, data: self.event(kind, data)
             )
         return self._provisioner
@@ -942,22 +947,47 @@ class Runner:
         self.event(
             "stimulus_rf_peer", scenario=scen.id, sources=list(sources), count=count
         )
+        # concurrent: release every source's send from one barrier. Sequential sends reach
+        # the second node one USB round trip after the first, which on a fast preset is
+        # long enough for the first frame to be nearly over - the pair then never contends.
+        concurrent = bool(params.get("concurrent", False))
         sent = {name: 0 for name in sources}
         failures = 0
-        for i in range(count):
-            for name in sources:
-                try:
-                    self.observer.send_text(name, f"{text}-{name}-{i}")
+        lock = threading.Lock()
+
+        def send_one(name: str, i: int, barrier: threading.Barrier | None) -> None:
+            nonlocal failures
+            try:
+                if barrier is not None:
+                    barrier.wait(timeout=10.0)
+                self.observer.send_text(name, f"{text}-{name}-{i}")
+                with lock:
                     sent[name] += 1
-                except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                with lock:
                     failures += 1
-                    self.event(
-                        "stimulus_send_failed",
-                        scenario=scen.id,
-                        source=name,
-                        index=i,
-                        error=str(exc),
-                    )
+                self.event(
+                    "stimulus_send_failed",
+                    scenario=scen.id,
+                    source=name,
+                    index=i,
+                    error=str(exc),
+                )
+
+        for i in range(count):
+            if concurrent:
+                barrier = threading.Barrier(len(sources))
+                threads = [
+                    threading.Thread(target=send_one, args=(name, i, barrier), daemon=True)
+                    for name in sources
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=30.0)
+            else:
+                for name in sources:
+                    send_one(name, i, None)
             time.sleep(interval)
         # Report what was actually emitted, so a row can tell "the DUT did not defer"
         # from "the stimulus never ran".

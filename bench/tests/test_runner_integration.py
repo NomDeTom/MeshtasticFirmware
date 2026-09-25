@@ -172,6 +172,7 @@ class RunnerHarness(unittest.TestCase):
     def run_with_fakes(self, r):
         with mock.patch.object(runner, "observer_mod") as obs_mod, \
              mock.patch.object(runner.provision, "Provisioner", FakeProvisioner), \
+             mock.patch.object(runner.provision, "IsolatedProvisioner", FakeProvisioner), \
              mock.patch.object(runner.manifest_mod, "git_state", return_value=("sha", False)), \
              mock.patch.object(r, "stage_preflight"), \
              mock.patch.object(r, "stage_build"):

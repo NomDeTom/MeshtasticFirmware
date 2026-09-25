@@ -154,6 +154,10 @@ class Observer:
             return True, port
 
         result = held.owner.hold(budget_s=45.0)
+        return self._adopt(held, result)
+
+    def _adopt(self, held: Held, result: ports.Result) -> tuple[bool, str]:
+        """Take up whatever the owner now holds as this node's capture connection."""
         held.port = held.owner.port
         held.iface = held.owner.iface
         held.connected = result.ok
@@ -278,12 +282,25 @@ class Observer:
         self.mark_dropped(name, reason=reason)
         self.recorder.event("observer_suspended", node=name, reason=reason)
 
-    def resume(self, name: str) -> None:
-        """Hand a node back to the observer and let it reconnect."""
+    def resume(self, name: str, budget_s: float | None = None) -> ports.Result | None:
+        """Hand a node back to the observer and let it reconnect.
+
+        With a budget, wait for the node to answer and take capture up again before
+        returning, rather than leaving it to the health loop's spacing. That is what an
+        operation that lent the port to another process wants: the node back under
+        capture, or a named outcome saying why not.
+        """
         with self._lock:
             self._suspended.discard(name)
         self.recorder.event("observer_resumed", node=name)
-        self.health_tick()
+        held = self.held.get(name)
+        if budget_s is None or held is None or held.raw_mode or held.owner is None:
+            self.health_tick()
+            return None
+        result = held.owner.wait_answering(budget_s=budget_s)
+        with self._lock:
+            self._adopt(held, result)
+        return result
 
     def is_suspended(self, name: str) -> bool:
         with self._lock:
@@ -376,6 +393,18 @@ class Observer:
         if held is not None:
             held.log_lines += 1
 
+    def record_log(self, name: str, line: str, source: str = "api") -> None:
+        """A log line received on a connection this process does not hold.
+
+        A node lent to a child process is still talking - its boot banner, above all,
+        which carries the build tag - and the child's connection is the one hearing it.
+        Forwarded here, the lines land in the capture as though capture had heard them.
+        """
+        self.recorder.log(node=name, source=source, **_parse_log_line(line))
+        held = self.held.get(name)
+        if held is not None:
+            held.log_lines += 1
+
     def _on_established(self, interface: Any = None, **_: Any) -> None:
         held = self._resolve_iface(interface)
         if held is not None:
@@ -404,6 +433,12 @@ class Observer:
         if held is None:
             raise KeyError(f"unknown node {name!r}")
         devices.assert_commandable(held.node)
+        # The owner is the authority on what is open. Its interface can be newer than the
+        # one last adopted here - wait_answering reopens without telling the observer - and
+        # the stale one answers config reads from a cache that died with its connection.
+        owner_iface = getattr(held.owner, "iface", None)
+        if owner_iface is not None:
+            held.iface = owner_iface
         if held.iface is None:
             raise RuntimeError(f"{name} is not connected")
         return held.iface

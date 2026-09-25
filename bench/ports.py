@@ -168,6 +168,9 @@ class PortOwner:
         self.observed_model: str | None = None
         self.observed_node_id: str | None = None
         self.firmware: str | None = None
+        # An open that overran its budget: (port, thread, result dict). Its thread still
+        # holds the port, so the next open adopts it rather than starting a second one.
+        self._pending: tuple[str, threading.Thread, dict[str, Any]] | None = None
 
     # -- reporting -------------------------------------------------------------
 
@@ -408,6 +411,58 @@ class PortOwner:
         """
         self.release(reason, abandon=False)
 
+    @contextmanager
+    def lend(self, reason: str, budget_s: float) -> Iterator[str | None]:
+        """Give the device to another PROCESS for the duration, holding nothing meanwhile.
+
+        Everything that reboots a node runs in a short-lived child process, because a
+        handle this process loses track of - an open that overran, a reader thread that
+        outlived its interface - keeps the port for the rest of the run, and the process
+        exiting is the only release that cannot be got wrong. This is the parent's half:
+        close what is held while the node is still staying put (a clean close, so the
+        reader thread closes its own stream), refuse every open here until the child is
+        gone, and yield the port the child should use.
+
+        Like a lease it is exclusive and it holds reconnection off; unlike a lease it
+        hands over no interface, because the only thing that may use the port meanwhile
+        is in another process.
+        """
+        budget = Budget(budget_s)
+        if not self._busy.acquire(timeout=max(1.0, min(budget.remaining, 60.0))):
+            raise PortBusy(f"{self.node.name} is busy; waited {budget.elapsed:.0f}s")
+        try:
+            with self._lock:
+                iface, self.iface = self.iface, None
+                _LIVE.discard(self)
+                pending, self._pending = self._pending, None
+                self._opened_by = None
+                self._to(ST_LEASED, reason)
+                self._event("lend_start", reason=reason, budget_s=budget_s)
+                if iface is not None:
+                    self.dropped_at = time.time()
+                    self._event("capture_gap_opened", reason=reason, abandoned=False)
+                    _let_go(iface, abandon=False)
+                if pending is not None:
+                    # An open that overran still owns the port, or will once it connects.
+                    # Let it finish and close it here, or the child is denied the port.
+                    _p_port, p_thread, p_out = pending
+                    p_thread.join(self.connect_timeout)
+                    if "iface" in p_out:
+                        _let_go(p_out["iface"], abandon=False)
+                    elif p_thread.is_alive():
+                        self._event("lend_open_still_pending", reason=reason)
+                port = self.resolve()
+                self.port = port or self.port
+            yield port
+        finally:
+            with self._lock:
+                self._to(ST_IDLE, f"{reason} returned")
+                self._event(
+                    "lend_end", reason=reason, elapsed_s=round(budget.elapsed, 1),
+                    budget_s=budget_s, overran=budget.elapsed > budget_s,
+                )
+            self._busy.release()
+
     def expect_reboot(self, reason: str, window_s: float = REBOOT_HOLDOFF_S) -> None:
         """Declare that the device is about to vanish, and drop the handle for it."""
         self.release(reason, abandon=True)
@@ -423,6 +478,7 @@ class PortOwner:
         """
         budget = Budget(budget_s)
         attempt = 0
+        last: Result | None = None
         with self._lock:
             # This is the operation responsible for bringing the node back, so it is the
             # one that clears the rebooting hold-off.
@@ -435,8 +491,20 @@ class PortOwner:
             if result.ok:
                 self.reconnects += 1 if attempt > 1 else 0
                 return budget.result(OK, f"answering after {attempt} attempt(s)")
+            last = result
             self._event("node_not_ready", attempt=attempt, detail=result.detail[:120])
-            time.sleep(spacing)
+            time.sleep(min(spacing, budget.remaining))
+        if last is not None and last.outcome in (TIMED_OUT, FAILED):
+            # Enumerated - the open got as far as the port - and never answered. Not the
+            # same thing as a node still rebooting: a node wedged after a config reboot
+            # does exactly this indefinitely (COM port present, no bytes, no reply to
+            # want_config), so waiting longer is not a remedy and the run is told so.
+            self._to(ST_GAVE_UP, f"enumerated, not answering within {budget_s:.0f}s")
+            return budget.result(
+                FAILED,
+                f"enumerated, not answering after {attempt} attempt(s) over "
+                f"{budget_s:.0f}s (last: {last.detail[:120]})",
+            )
         self._to(ST_GAVE_UP, f"no answer within {budget_s:.0f}s")
         return budget.result(TIMED_OUT, f"did not answer within {budget_s:.0f}s")
 
@@ -445,12 +513,26 @@ class PortOwner:
     def _open(self, port: str | None, budget_s: float) -> tuple[Any, str | None]:
         """Open a SerialInterface, bounded. Returns (iface, error).
 
-        The only call to SerialInterface() in the bench. The thread is abandoned on
-        timeout, which is why nothing else may open this port: an abandoned open still
-        holds it.
+        The only call to SerialInterface() in the bench. An open that overruns is kept as
+        pending, not abandoned: its thread has the port, and a node slow to answer after a
+        factory reset used to connect on that orphaned thread, keep the port forever, and
+        fail every later open with Access is denied until the row timed out.
         """
         if port is None:
             return None, "not enumerated"
+
+        if self._pending is not None:
+            p_port, p_thread, p_out = self._pending
+            if p_thread.is_alive():
+                p_thread.join(min(budget_s, self.connect_timeout))
+            if p_thread.is_alive():
+                return None, "previous open still in progress"
+            self._pending = None
+            if "iface" in p_out:
+                if p_port == port:
+                    self._event("pending_open_adopted", port=port)
+                    return p_out["iface"], None
+                threading.Thread(target=_safe_close, args=(p_out["iface"],), daemon=True).start()
 
         import meshtastic.serial_interface as si
 
@@ -467,6 +549,8 @@ class PortOwner:
         thread.join(min(budget_s, self.connect_timeout))
         if "iface" in out:
             return out["iface"], None
+        if thread.is_alive():
+            self._pending = (port, thread, out)
         return None, out.get("error")
 
 
@@ -474,15 +558,13 @@ class _InertStream:
     """Stands in for a serial handle this process has already closed.
 
     pyserial's close() is not idempotent on Windows: the first call clears the overlapped
-    read structure, and a second dereferences it. Two closes are the normal case here -
-    the bench closes the handle to free the port immediately, and the client library's
-    own reader thread then notices the device is gone and closes it again from
-    _disconnected(). Best case that is an AttributeError on a daemon thread; worst case
-    the duplicate CloseHandle takes the whole process down. It did: a run segfaulted
-    mid-provision with both flashes already banked.
+    read structure, and a second dereferences it. Only used where no reader thread ever
+    ran - the one case in which the bench itself is the closer. Swapping in this object
+    after the real close leaves the library a stream it can shut again safely.
 
-    Swapping in this object after the real close leaves the library a stream it can shut
-    twice safely, and reads raise so its reader loop exits the way it expects to.
+    It is NOT a defence against a live reader: that thread has already evaluated
+    `self.stream` and is inside the real object's read() or close() when a swap lands,
+    which is why a live reader is always left to close its own stream (see _let_go).
     """
 
     closed = True
@@ -519,28 +601,24 @@ def _claim_close(iface: Any) -> bool:
         return True
 
 
-def _neutralise(iface: Any) -> None:
-    """Leave an inert stand-in so nothing else can close the real handle again."""
-    for attr in ("stream", "_serial", "serial"):
-        if getattr(iface, attr, None) is not None:
-            try:
-                setattr(iface, attr, _InertStream())
-            except Exception:  # noqa: BLE001
-                pass
-            return
-
-
 def _let_go(iface: Any, abandon: bool) -> None:
-    """Release an interface. `abandon` skips the protocol close, never the OS handle.
+    """Release an interface so that exactly one thread ever closes its serial handle.
 
-    This distinction cost a whole matrix. close() is slow because it performs a protocol
-    disconnect and can block forever on a node the library is still draining - so on a
-    device that is going away we skip it. But skipping the WHOLE close leaks the serial
-    handle, and the port then stays owned by this process: every later open fails with
-    "Access is denied", the owner gives up, and six rows report a healthy node as dead.
+    The client library runs a reader thread per interface, and that thread closes the
+    stream itself on its way out (StreamInterface._disconnected). Closing the same pyserial
+    object from a bench thread while the reader is still inside read() is not a race
+    pyserial survives on Windows: its close() cancels the pending overlapped read without
+    waiting for it, closes the event handle and drops the OVERLAPPED structure, and the
+    kernel then completes the read into freed memory. The reader's own close runs
+    concurrently with ours, so the same Win32 handle values are closed twice - values the
+    next open in this process has usually just been given. That is the segfault with no
+    traceback, and smoke.log carries the reader thread's half of it: an AttributeError on
+    `_overlapped_write.hEvent` inside _disconnected() while the bench was closing.
 
-    So abandon means "do not wait for a graceful goodbye", not "do not hang up". The
-    underlying stream is closed directly, which is immediate and frees the port.
+    So the bench never closes a stream a live reader owns. It tells the reader to stop and
+    waits for it: the read timeout is half a second, and the reader closes the handle on
+    the same thread that was reading, after the read has returned. `abandon` skips only
+    the protocol goodbye (which blocks on a node that is leaving), never the OS handle.
     """
     if iface is None:
         return
@@ -549,37 +627,52 @@ def _let_go(iface: Any, abandon: bool) -> None:
         # is the double close that kills the process, so leave it to them.
         return
     if abandon:
-        try:
-            iface._wantExit = True  # stop its reader logging the vanish as an error
-        except Exception:  # noqa: BLE001
-            pass
-        # Release the OS handle without the protocol drain that makes close() block.
-        for attr in ("stream", "_serial", "serial"):
-            handle = getattr(iface, attr, None)
-            if handle is not None and hasattr(handle, "close"):
-                try:
-                    handle.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                # Leave something safe in its place: the library's reader thread closes
-                # this same stream again on its way out, and pyserial cannot survive that
-                # twice on Windows.
-                try:
-                    setattr(iface, attr, _InertStream())
-                except Exception:  # noqa: BLE001
-                    pass
-                break
+        _stop_reader(iface)
         return
     thread = threading.Thread(target=_safe_close, args=(iface,), daemon=True)
     thread.start()
     thread.join(5.0)
     if thread.is_alive():
-        # The graceful close is stuck inside the library. It still owns the handle, and
-        # closing it from here as well is a concurrent CloseHandle on the same Win32
-        # handle - an access violation that takes the whole process down rather than
-        # raising. A port held by a hung close is recoverable and reported; a segfault
-        # loses the run, and lost one mid-provision with both flashes already banked.
-        _neutralise(iface)
+        # The graceful close is stuck inside the library, before it ever asked the reader
+        # to stop. It never touches the stream itself, so the reader is still the only
+        # closer: tell it to go. The stuck thread's later writes find no stream and are
+        # dropped by the library.
+        _stop_reader(iface)
+
+
+# How long to wait for a reader thread to notice it has been told to stop. Its read
+# timeout is 0.5 s, so anything much past that is a reader that is not coming back.
+READER_EXIT_S = 3.0
+
+
+def _stop_reader(iface: Any, wait_s: float = READER_EXIT_S) -> None:
+    """Ask the library's reader to close its own stream, and wait until it has."""
+    try:
+        iface._wantExit = True  # the reader loop's own exit condition
+    except Exception:  # noqa: BLE001
+        pass
+    reader = getattr(iface, "_rxThread", None)
+    started = reader is not None and getattr(reader, "ident", None) is not None
+    if started:
+        if reader is not threading.current_thread() and reader.is_alive():
+            reader.join(wait_s)
+        # Whether or not it has finished, the reader owns the stream: it closes it in
+        # _disconnected() on the way out. Closing it here as well is the double close.
+        return
+    # No reader ever ran, so nothing else will close this stream: this thread is the only
+    # closer there can be. Leave an inert stand-in so a later library close is harmless.
+    for attr in ("stream", "_serial", "serial"):
+        handle = getattr(iface, attr, None)
+        if handle is not None and hasattr(handle, "close"):
+            try:
+                handle.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                setattr(iface, attr, _InertStream())
+            except Exception:  # noqa: BLE001
+                pass
+            break
 
 
 def _safe_close(iface: Any) -> None:
@@ -587,9 +680,6 @@ def _safe_close(iface: Any) -> None:
         iface.close()
     except Exception:  # noqa: BLE001
         pass
-
-
-# -- schedule -------------------------------------------------------------------
 
 
 # -- schedule -------------------------------------------------------------------
