@@ -12,6 +12,7 @@
 #include "main.h"
 #include "mesh-pb-constants.h"
 #include <pb_decode.h>
+#include <algorithm>
 #include <pb_encode.h>
 
 #if ARCH_PORTDUINO
@@ -137,6 +138,10 @@ uint32_t RadioLibInterface::maxRxFrameMsec()
 
 bool RadioLibInterface::receiveDetected(uint16_t irq, unsigned long syncWordHeaderValidFlag, unsigned long preambleDetectedFlag)
 {
+#ifdef BENCH_KNOBS
+    if (benchKnobs.pre == BenchKnobs::PRE_SOFT || benchKnobs.pre == BenchKnobs::PRE_DEADLINE)
+        return benchLegacyReceiveDetected(irq, syncWordHeaderValidFlag, preambleDetectedFlag);
+#endif
     const uint32_t nowMsec = Time::getMillis();
     const uint32_t prevPeek = rxSighting.lastPeek();
     const uint32_t preambleWas = rxSighting.preambleSeen();
@@ -323,6 +328,217 @@ void RadioLibInterface::benchDeaf(uint32_t ms, bool quiet)
     notifyLater(ms, TRANSMIT_DELAY_COMPLETED, true);
     if (!quiet)
         LOG_INFO("BENCH deaf %u ms", ms);
+}
+
+bool RadioLibInterface::benchLegacyReceiveDetected(uint16_t irq, unsigned long headerFlag, unsigned long preambleFlag)
+{
+    const uint32_t maxPacketMsec = getPacketTime(meshtastic_Constants_DATA_PAYLOAD_LEN + sizeof(PacketHeader));
+    if (benchKnobs.pre == BenchKnobs::PRE_SOFT) {
+        // listening-now be3bf1f38: one hold per cleared preamble, refires ignored during it.
+        if (benchSoftHoldStart && !Throttle::isWithinTimespanMs(benchSoftHoldStart, maxPacketMsec))
+            benchSoftHoldStart = 0;
+        if (benchSoftHoldStart)
+            return true;
+        if (irq & headerFlag) {
+            if (!benchActiveRxStart) {
+                benchActiveRxStart = Time::skipZero(Time::getMillis());
+            } else if (!Throttle::isWithinTimespanMs(benchActiveRxStart, maxPacketMsec)) {
+                benchActiveRxStart = 0;
+                LOG_TRACE("Ignore false header detection");
+                return false;
+            }
+            return true;
+        }
+        if (irq & preambleFlag) {
+            iface->clearIrq(1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED);
+            benchSoftHoldStart = Time::skipZero(Time::getMillis());
+            LOG_TRACE("Preamble seen, cleared, holding TX");
+            return true;
+        }
+        return false;
+    }
+    // develop before #11968: a bare preamble is false once 2 * preambleTimeMsec pass without a header.
+    const bool detected = irq & (headerFlag | preambleFlag);
+    if (detected) {
+        if (!benchActiveRxStart) {
+            benchActiveRxStart = Time::skipZero(Time::getMillis());
+        } else if (!Throttle::isWithinTimespanMs(benchActiveRxStart, 2 * preambleTimeMsec)) {
+            if (!(irq & headerFlag)) {
+                benchActiveRxStart = 0;
+                LOG_TRACE("Ignore false preamble detection");
+                return false;
+            } else if (!Throttle::isWithinTimespanMs(benchActiveRxStart, maxPacketMsec)) {
+                benchActiveRxStart = 0;
+                LOG_TRACE("Ignore false header detection");
+                return false;
+            }
+        }
+    }
+    return detected;
+}
+
+void RadioLibInterface::benchEmit()
+{
+    LOG_WARN("BENCH emit unsupported on this radio");
+}
+
+int32_t RadioLibInterface::benchTick()
+{
+    const uint32_t now = Time::getMillis();
+    int32_t next = 500;
+    if (benchEmitAt) {
+        if (Throttle::deadlinePassedAt(now, benchEmitAt)) {
+            const int32_t lateMs = (int32_t)(now - benchEmitAt);
+            benchEmitAt = 0;
+            benchEmit();
+            LOG_INFO("BENCH e follow id=%08x late=%ld", benchEmitAfterId, (long)lateMs);
+        } else {
+            next = std::min<int32_t>(next, benchEmitAt - now);
+        }
+    }
+    if (benchMarkDeafAt) {
+        if (Throttle::deadlinePassedAt(now, benchMarkDeafAt)) {
+            benchMarkDeafAt = 0;
+            if (benchPkSeenUs)
+                benchPkEnd("deaf"); // the window cuts the series; its own undeaf may start another
+            if (benchMarkDeafMs && sendingPacket == NULL) {
+                benchDeaf(benchMarkDeafMs, true);
+                benchMarkDeafActive = true;
+                LOG_INFO("BENCH m deaf +%lu us for %u ms", (unsigned long)(micros() - benchMarkUs), benchMarkDeafMs);
+            } else if (!benchMarkDeafMs) {
+                // D=0 is the control: the same peek timing with no deaf window.
+                LOG_INFO("BENCH m undeaf +%lu us (no deaf)", (unsigned long)(micros() - benchMarkUs));
+                if (benchKnobs.pk && (benchKnobs.pkTrig & BenchKnobs::PK_ON_UNDEAF))
+                    benchPkStart(BenchKnobs::PK_ON_UNDEAF);
+            }
+        } else {
+            next = std::min<int32_t>(next, benchMarkDeafAt - now);
+        }
+    }
+    if (benchKnobs.pk) {
+        benchPkStep();
+        next = std::min<int32_t>(next, benchKnobs.pkPoll);
+    }
+    return next;
+}
+
+void RadioLibInterface::benchMarkRx(uint32_t rxUs, uint32_t id)
+{
+    benchMarkUs = rxUs ? rxUs : 1;
+    benchMarkId = id;
+    const uint16_t idx = benchMarkIdx++;
+    if (!benchKnobs.mdeafN) {
+        LOG_INFO("BENCH m rx id=%08x idx=%u", id, idx);
+        return;
+    }
+    const uint8_t e = idx % benchKnobs.mdeafN;
+    const uint32_t spentMs = (micros() - rxUs) / 1000;
+    const uint32_t waitMs = benchKnobs.mdeafO[e] > spentMs ? benchKnobs.mdeafO[e] - spentMs : 0;
+    benchMarkDeafMs = benchKnobs.mdeafD[e];
+    benchMarkDeafAt = Time::skipZero(Time::getMillis() + waitMs);
+    benchKick(waitMs);
+    LOG_INFO("BENCH m rx id=%08x idx=%u e=%u deaf +%u ms for %u ms", id, idx, e, benchKnobs.mdeafO[e], benchMarkDeafMs);
+}
+
+void RadioLibInterface::benchPkStart(uint8_t src)
+{
+    const uint32_t us = micros();
+    benchPkSeenUs = us ? us : 1;
+    benchPkSrc = src;
+    benchPkDone = 0;
+    benchPkHdrMs = -1;
+    benchPkHerr = false;
+    memset(benchPkV, 0, sizeof(benchPkV));
+    uint32_t waitMs = 0;
+    if (benchKnobs.pkWait >= 0) {
+        waitMs = benchKnobs.pkWait;
+    } else if (src == BenchKnobs::PK_ON_PREAMBLE) {
+        // Our own frame's header ends preamble + 4.25 sync + 8 header symbols after it starts; +2 for margin.
+        const float symMs = (float)(1UL << sf) / bw;
+        waitMs = (uint32_t)((preambleLength + 14.25f) * symMs + 0.999f);
+    }
+    benchPkNextAt = Time::skipZero(Time::getMillis() + waitMs);
+}
+
+void RadioLibInterface::benchPkEnd(const char *why)
+{
+    char t[BenchKnobs::PK_MAX * 6 + 2] = "-", r[BenchKnobs::PK_MAX * 6 + 2] = "-";
+    size_t tn = 0, rn = 0;
+    for (uint8_t i = 0; i < benchPkDone; i++) {
+        tn += snprintf(t + tn, sizeof(t) - tn, "%s%u", i ? "," : "", benchPkT[i]);
+        rn += snprintf(r + rn, sizeof(r) - rn, "%s%d", i ? "," : "", benchPkRssi[i]);
+    }
+    const long markMs = benchMarkUs ? (long)((benchPkSeenUs - benchMarkUs) / 1000) : -1;
+    LOG_INFO("BENCH pk %s src=%s mark=%ld hdr=%ld herr=%d sym=%u v=%s t=%s rssi=%s", why,
+             benchPkSrc == BenchKnobs::PK_ON_UNDEAF ? "undeaf" : "pre", markMs, (long)benchPkHdrMs, benchPkHerr ? 1 : 0,
+             benchKnobs.pkSym, benchPkDone ? benchPkV : "-", t, r);
+    // An all-free series after a bare preamble says nothing is on air: the experimental early release.
+    if (benchKnobs.pkFree && benchPkSrc == BenchKnobs::PK_ON_PREAMBLE && benchPkDone && strcmp(why, "done") == 0 &&
+        !strchr(benchPkV, 'B') && rxSighting.preambleSeen()) {
+        rxSighting.reset();
+        LOG_INFO("BENCH pk released the preamble hold");
+    }
+    benchPkSeenUs = benchPkNextAt = 0;
+}
+
+void RadioLibInterface::benchPkStep()
+{
+    const uint32_t rxDone = iface->getIrqMapped(1UL << RADIOLIB_IRQ_RX_DONE);
+    const uint32_t hdrValid = iface->getIrqMapped(1UL << RADIOLIB_IRQ_HEADER_VALID);
+    const uint32_t hdrErr = iface->getIrqMapped(1UL << RADIOLIB_IRQ_HEADER_ERR);
+    const uint32_t pre = iface->getIrqMapped(1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED);
+    if (!benchPkSeenUs) {
+        // Watching: a non-destructive read, so the TX path and the stale-flag twin see the same flags.
+        if (!(benchKnobs.pkTrig & BenchKnobs::PK_ON_PREAMBLE) || !isReceiving || sendingPacket || benchDeafUntil ||
+            isIRQPending())
+            return;
+        const uint32_t irq = iface->getIrqFlags();
+        if ((irq & pre) && !(irq & (hdrValid | rxDone)))
+            benchPkStart(BenchKnobs::PK_ON_PREAMBLE);
+        return;
+    }
+    if (sendingPacket) {
+        benchPkEnd("tx");
+        return;
+    }
+    if (benchDeafUntil || !isReceiving)
+        return;
+    const uint32_t irq = iface->getIrqFlags();
+    benchPkHerr |= (irq & hdrErr) != 0;
+    if ((irq & rxDone) || isIRQPending()) {
+        benchPkEnd("rxdone"); // a frame completed: it was ours to decode, not to peek at
+        return;
+    }
+    if (irq & hdrValid) {
+        // Our own sync word and a header that checked: a real frame, which a peek would destroy.
+        benchPkHdrMs = (long)((micros() - benchPkSeenUs) / 1000);
+        benchPkEnd("hdr");
+        return;
+    }
+    if (!Throttle::deadlinePassedAt(Time::getMillis(), benchPkNextAt))
+        return;
+
+    const int16_t rssi = getCurrentRSSI();
+    // The peek's standby resets the TX-path record; keep it, so a peek never changes the LBT under test.
+    const RxSighting keep = rxSighting;
+    const uint8_t keepSym = benchKnobs.cadSymbols, keepLbt = benchKnobs.lbt;
+    benchKnobs.cadSymbols = benchKnobs.pkSym;
+    benchKnobs.lbt = BenchKnobs::LBT_CADRX;
+    const bool busy = isChannelActive();
+    benchKnobs.cadSymbols = keepSym;
+    benchKnobs.lbt = keepLbt;
+    rearmReceive(); // adopts a CAD->RX handoff, otherwise a full startReceive()
+    rxSighting = keep;
+
+    const uint8_t i = benchPkDone++;
+    benchPkV[i] = busy ? 'B' : 'F';
+    benchPkT[i] = (uint16_t)((micros() - benchPkSeenUs) / 1000);
+    benchPkRssi[i] = rssi;
+    if (benchPkDone >= benchKnobs.pk) {
+        benchPkEnd("done");
+        return;
+    }
+    benchPkNextAt = Time::skipZero(Time::getMillis() + benchKnobs.pkInt);
 }
 
 static constexpr uint32_t BENCH_TRIG_TIMEOUT_MS = 10 * 1000;
@@ -548,6 +764,13 @@ void RadioLibInterface::onNotify(uint32_t notification)
             }
             benchDeafUntil = 0;
             startReceive();
+            if (benchMarkDeafActive) {
+                benchMarkDeafActive = false;
+                LOG_INFO("BENCH m undeaf +%lu us", (unsigned long)(micros() - benchMarkUs));
+                if (benchKnobs.pk && (benchKnobs.pkTrig & BenchKnobs::PK_ON_UNDEAF))
+                    benchPkStart(BenchKnobs::PK_ON_UNDEAF);
+                benchKick(0);
+            }
             if (!benchDeafQuiet || !txQueue.empty())
                 LOG_INFO("BENCH undeaf"); // the host dates the join point from this line
         }
@@ -775,6 +998,14 @@ void RadioLibInterface::handleTransmitInterrupt()
             LOG_INFO("BENCH t txdone +%lu", (unsigned long)(us - benchTrigUs));
         benchTrigLogTx = false;
         benchTrigOpen = false; // the next queued packet waits for the next trigger
+        if (benchKnobs.eFollow >= 0) {
+            // One-shot, re-armed by the host each round, so a stray nodeinfo cannot start a second test frame.
+            const uint32_t followMs = benchKnobs.eFollow;
+            benchKnobs.eFollow = -1;
+            benchEmitAt = Time::skipZero(Time::getMillis() + followMs);
+            benchEmitAfterId = sendingPacket->id;
+            benchKick(followMs);
+        }
     }
 #endif
     if (sendingPacket)
@@ -820,6 +1051,9 @@ void RadioLibInterface::handleReceiveInterrupt()
     const bool wasCadHandoff = cadHandoffRxStart != 0;
     cadHandoffRxStart = 0; // this RX ends the wait either way; the outcome is logged below
     rxSighting.reset();    // likewise the reception a held preamble announced
+#ifdef BENCH_KNOBS
+    benchSoftHoldStart = 0; // pre=soft: any RX interrupt ends its hold
+#endif
 
     if (!isReceiving) {
         LOG_ERROR("handleReceiveInterrupt called while not in rx mode");
@@ -903,6 +1137,8 @@ void RadioLibInterface::handleReceiveInterrupt()
                 }
                 benchTrigRxFrom = radioBuffer.header.from; // logged by benchTrigAct() once RX is re-armed
             }
+            if (benchKnobs.markNode && radioBuffer.header.from == benchKnobs.markNode)
+                benchMarkRx(benchRxUs, radioBuffer.header.id);
 #endif
 
             // Note: we deliver _all_ packets to our router (i.e. our interface is intentionally promiscuous).
@@ -1132,6 +1368,9 @@ void RadioLibInterface::setStandby()
         LOG_WARN("CAD>RX void");
     cadHandedToRx = false;
     cadHandoffRxStart = 0;
+#ifdef BENCH_KNOBS
+    benchActiveRxStart = 0; // pre=soft/deadline: their header record ended at standby, as activeReceiveStart did
+#endif
 
     // neither sending nor receiving
     powerMon->clearState(meshtastic_PowerMon_State_Lora_RXOn);

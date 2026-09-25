@@ -126,8 +126,27 @@ class BenchProbeThread : public concurrency::OSThread
 
 static BenchProbeThread *benchProbeThread;
 
+// Drives the CAD-peek watcher, the mark-scheduled deaf windows and the emitter's follow timing. The work is in
+// RadioLibInterface::benchTick(), which returns how long until it next needs to run.
+class BenchRxThread : public concurrency::OSThread
+{
+  public:
+    BenchRxThread() : OSThread("BenchRx") {}
+
+  protected:
+    int32_t runOnce() override { return RadioLibInterface::instance ? RadioLibInterface::instance->benchTick() : 500; }
+};
+
+static BenchRxThread *benchRxThread;
+
+void benchKick(uint32_t ms)
+{
+    if (benchRxThread)
+        benchRxThread->setIntervalFromNow(ms);
+}
+
 static const char *const LBT_NAMES[] = {"default", "off", "rx", "cad", "cadrx", "cadtx", "rssi", "rxrssi"};
-static const char *const PRE_NAMES[] = {"default", "hold", "ignore", "busy"};
+static const char *const PRE_NAMES[] = {"default", "hold", "ignore", "busy", "soft", "deadline"};
 
 static int indexOf(const char *const *names, size_t n, const char *v)
 {
@@ -146,6 +165,12 @@ void benchKnobsLog()
              LBT_NAMES[k.lbt], k.cadSymbols, k.cwMin, k.cwMax, k.slotMs, k.fixedMs, k.noBackoff ? 1 : 0, PRE_NAMES[k.pre],
              k.syncWord, k.iqInvert, k.txPower, k.detPeak, k.detMin, (long)k.agcMs, k.li, k.nfMs, k.rssiMargin, k.floorDbm, k.dcSleepMs, k.dcWakeMs, k.rxdcRxSym, k.rxdcSleepSym, k.rxCont,
              (unsigned long)k.trigNode, k.atMs, k.atDeaf ? 1 : 0);
+    LOG_INFO("BENCH knobs pk: pk=%u pksym=%u pkint=%u pkwait=%d pkpoll=%u pktrig=%u pkfree=%d mark=%08lx mdeaf=%u "
+             "esync=%d ehdr=%s epre=%u ecr=%u elen=%u eseed=%lu efollow=%d",
+             k.pk, k.pkSym, k.pkInt, k.pkWait, k.pkPoll, k.pkTrig, k.pkFree ? 1 : 0, (unsigned long)k.markNode, k.mdeafN,
+             k.eSync, k.eImplicit ? "imp" : "exp", k.ePre, k.eCr, k.eLen, (unsigned long)k.eSeed, k.eFollow);
+    for (uint8_t i = 0; i < k.mdeafN; i++)
+        LOG_INFO("BENCH knobs mdeaf[%u]: +%u ms for %u ms", i, k.mdeafO[i], k.mdeafD[i]);
 }
 
 // Syntax: "!bench" (report), "!bench reset", or "!bench key=value [key=value ...]". Unknown keys and bad
@@ -157,7 +182,7 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
     if (len < plen || strncmp(text, PREFIX, plen) != 0 || (len > plen && text[plen] != ' '))
         return false;
 
-    char buf[200];
+    char buf[240];
     size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
     memcpy(buf, text, n);
     buf[n] = 0;
@@ -166,6 +191,8 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
     bool radioChanged = false;
     uint32_t jamMs = 0;  // actions, not settings: key a carrier once, now
     uint32_t deafMs = 0; // drop RX now, hold any queued TX, rejoin and decide after this long
+    uint32_t emitLen = 0; // emit one raw frame of this many bytes now
+    bool markSet = false; // mark= or mdeaf= given: restart the schedule at entry 0
     char *save = nullptr;
     strtok_r(buf, " ", &save); // "!bench"
     for (char *tok = strtok_r(nullptr, " ", &save); tok; tok = strtok_r(nullptr, " ", &save)) {
@@ -266,6 +293,63 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
             next.atMs = (uint16_t)constrain(num, 0, 10000);
         } else if (strcmp(key, "atdeaf") == 0) {
             next.atDeaf = num != 0;
+        } else if (strcmp(key, "pk") == 0) {
+            next.pk = (uint8_t)constrain(num, 0, BenchKnobs::PK_MAX);
+        } else if (strcmp(key, "pksym") == 0) {
+            if (num == 1 || num == 2 || num == 4 || num == 8 || num == 16)
+                next.pkSym = (uint8_t)num;
+            else
+                LOG_WARN("BENCH: pksym=%ld not one of 1/2/4/8/16", num);
+        } else if (strcmp(key, "pkint") == 0) {
+            next.pkInt = (uint16_t)constrain(num, 0, 5000);
+        } else if (strcmp(key, "pkwait") == 0) {
+            next.pkWait = (int16_t)(strcmp(val, "auto") == 0 ? -1 : constrain(num, -1, 5000));
+        } else if (strcmp(key, "pkpoll") == 0) {
+            next.pkPoll = (uint8_t)constrain(num, 1, 50);
+        } else if (strcmp(key, "pktrig") == 0) {
+            next.pkTrig = strcmp(val, "pre") == 0      ? BenchKnobs::PK_ON_PREAMBLE
+                          : strcmp(val, "undeaf") == 0 ? BenchKnobs::PK_ON_UNDEAF
+                          : strcmp(val, "both") == 0   ? BenchKnobs::PK_ON_PREAMBLE | BenchKnobs::PK_ON_UNDEAF
+                                                       : next.pkTrig;
+        } else if (strcmp(key, "pkfree") == 0) {
+            next.pkFree = num != 0;
+        } else if (strcmp(key, "mark") == 0) {
+            next.markNode = (uint32_t)strtoul(val, nullptr, 0);
+            markSet = true;
+        } else if (strcmp(key, "mdeaf") == 0) {
+            // "mdeaf=O:D,O:D,..." cycled per anchor frame; "mdeaf=0" clears the schedule
+            next.mdeafN = 0;
+            markSet = true;
+            const char *p = val;
+            while (*p && next.mdeafN < BenchKnobs::MDEAF_MAX) {
+                char *end = nullptr;
+                const long o = strtol(p, &end, 0);
+                if (!end || *end != ':')
+                    break;
+                const long d = strtol(end + 1, &end, 0);
+                next.mdeafO[next.mdeafN] = (uint16_t)constrain(o, 0, 10000);
+                next.mdeafD[next.mdeafN] = (uint16_t)constrain(d, 0, 5000);
+                next.mdeafN++;
+                if (!end || *end != ',')
+                    break;
+                p = end + 1;
+            }
+        } else if (strcmp(key, "esync") == 0) {
+            next.eSync = (int16_t)(strcmp(val, "own") == 0 ? -1 : constrain(num, -1, 255));
+        } else if (strcmp(key, "ehdr") == 0) {
+            next.eImplicit = strcmp(val, "imp") == 0;
+        } else if (strcmp(key, "epre") == 0) {
+            next.ePre = (uint16_t)constrain(num, 0, 1000);
+        } else if (strcmp(key, "ecr") == 0) {
+            next.eCr = (uint8_t)(num == 0 ? 0 : constrain(num, 5, 8));
+        } else if (strcmp(key, "elen") == 0) {
+            next.eLen = (uint8_t)constrain(num, 1, 255);
+        } else if (strcmp(key, "eseed") == 0) {
+            next.eSeed = (uint32_t)strtoul(val, nullptr, 0);
+        } else if (strcmp(key, "efollow") == 0) {
+            next.eFollow = (int16_t)constrain(num, -1, 10000);
+        } else if (strcmp(key, "emit") == 0) {
+            emitLen = (uint32_t)constrain(num, 1, 255);
         } else if (strcmp(key, "nf") == 0) {
             next.nfMs = num <= 0 ? 0 : (uint16_t)constrain(num, 50, 60000);
         } else {
@@ -284,12 +368,20 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
         radioChanged = true;
     }
     const bool trigChanged = next.trigNode != benchKnobs.trigNode;
+    const bool markChanged = markSet;
     benchKnobs = next;
     if (trigChanged && RadioLibInterface::instance)
         RadioLibInterface::instance->benchTrigChanged();
+    if (markChanged && RadioLibInterface::instance)
+        RadioLibInterface::instance->benchMarkChanged();
     if (deafMs && RadioLibInterface::instance) {
         // Like jam: timed by the host against another node's frame, so act before logging anything.
         RadioLibInterface::instance->benchDeaf(deafMs);
+        return true;
+    }
+    if (emitLen && RadioLibInterface::instance) {
+        benchKnobs.eLen = (uint8_t)emitLen;
+        RadioLibInterface::instance->benchEmit();
         return true;
     }
     if (jamMs && RadioLibInterface::instance) {
@@ -301,6 +393,9 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
         benchNoiseThread = new BenchNoiseThread();
     if (benchKnobs.dcSleepMs && !benchDutyThread)
         benchDutyThread = new BenchDutyThread();
+    if ((benchKnobs.pk || benchKnobs.markNode || benchKnobs.eFollow >= 0) && !benchRxThread)
+        benchRxThread = new BenchRxThread();
+    benchKick(0);
     if (benchKnobs.probeMs && !benchProbeThread)
         benchProbeThread = new BenchProbeThread();
     benchKnobsLog();

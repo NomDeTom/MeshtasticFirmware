@@ -739,6 +739,44 @@ template <typename T> void SX126xInterface<T>::benchJam(uint32_t ms)
     else
         LOG_ERROR("BENCH jam transmitDirect %s%d", radioLibErr, err);
 }
+
+template <typename T> void SX126xInterface<T>::benchEmit()
+{
+    if (sendingPacket != NULL) {
+        LOG_WARN("BENCH emit skipped: TX in progress");
+        return;
+    }
+    const BenchKnobs &k = benchKnobs;
+    // xorshift32 from the seed, so a payload that makes a false header can be replayed.
+    uint8_t buf[MAX_LORA_PAYLOAD_LEN];
+    uint32_t x = k.eSeed ? k.eSeed : 1;
+    for (uint8_t i = 0; i < k.eLen; i++) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        buf[i] = (uint8_t)x;
+    }
+    trySetStandby();
+    int16_t err = RADIOLIB_ERR_NONE;
+    if (k.eSync >= 0)
+        err |= lora.setSyncWord((uint8_t)k.eSync);
+    if (k.ePre)
+        err |= lora.setPreambleLength(k.ePre);
+    if (k.eCr)
+        err |= lora.setCodingRate(k.eCr);
+    if (k.eImplicit)
+        err |= lora.implicitHeader(k.eLen);
+    setTransmitEnable(true);
+    const uint32_t t0 = micros();
+    const int16_t txErr = lora.transmit(buf, k.eLen);
+    const uint32_t airUs = micros() - t0;
+    setTransmitEnable(false);
+    lora.explicitHeader();
+    LOG_INFO("BENCH e emit len=%u sync=%d hdr=%s pre=%u cr=%u seed=%lu air=%lu us err=%d/%d", k.eLen, k.eSync,
+             k.eImplicit ? "imp" : "exp", k.ePre, k.eCr, (unsigned long)k.eSeed, (unsigned long)airUs, err, txErr);
+    benchKnobs.eSeed = x; // the next emission carries a different payload
+    reconfigure();        // sync word, preamble, CR and header mode back to the node's own, then RX
+}
 #endif
 
 /** Control PA mode for GC1109 FEM - CPS pin selects full PA (txon=true) or bypass mode (txon=false) */

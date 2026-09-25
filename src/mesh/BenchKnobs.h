@@ -25,7 +25,15 @@ struct BenchKnobs {
         PRE_HOLD,        // clear a bare preamble and hold TX for one max packet
         PRE_IGNORE,      // a bare preamble does not count as busy; only a valid header does
         PRE_BUSY,        // a latched preamble counts as busy and is never cleared here
+        PRE_SOFT,        // listening-now be3bf1f38: first bare preamble cleared, one hold, refires ignored during it
+        PRE_DEADLINE,    // develop before #11968: bare preamble false after 2 * preambleTimeMsec without a header
     };
+    enum PeekTrig : uint8_t {
+        PK_ON_PREAMBLE = 1, // a bare PREAMBLE_DETECTED seen by the watcher's flag poll
+        PK_ON_UNDEAF = 2,   // the moment a mark-scheduled deaf window ends
+    };
+    static const uint8_t PK_MAX = 12;
+    static const uint8_t MDEAF_MAX = 8;
 
     uint8_t lbt = LBT_DEFAULT;
     uint8_t cadSymbols = 0;  // raw count 1, 2, 4, 8 or 16; 0 keeps the firmware's
@@ -52,6 +60,27 @@ struct BenchKnobs {
     uint32_t trigNode = 0;   // hold queued TX until a frame from this node arrives, then decide at atMs; 0 = off
     uint16_t atMs = 0;       // decision offset after the trigger frame's RX_DONE
     bool atDeaf = false;     // deaf from the trigger until atMs, instead of listening
+    // CAD peeks: a series of short CAD->RX scans after a trigger, to tell a foreign frame from a false preamble.
+    uint8_t pk = 0;         // peeks per series, 0 = watcher off
+    uint8_t pkSym = 2;      // CAD symbols per peek: 1, 2, 4, 8 or 16
+    uint16_t pkInt = 0;     // ms between peek starts; 0 = back to back
+    int16_t pkWait = -1;    // ms from the sighting to the first peek; -1 = auto, long enough for our own header
+    uint8_t pkPoll = 2;     // ms between the watcher's non-destructive IRQ-flag reads
+    uint8_t pkTrig = PK_ON_PREAMBLE;
+    bool pkFree = false;    // a preamble-triggered series that is all free ends the TX preamble hold
+    // Mark schedule: listen-only nodes go deaf at a fixed offset after a frame from markNode.
+    uint32_t markNode = 0;  // anchor sender; 0 = off
+    uint8_t mdeafN = 0;     // schedule entries, cycled per anchor frame; 0 = anchor logged only
+    uint16_t mdeafO[MDEAF_MAX] = {}; // ms from the anchor's RX_DONE to going deaf
+    uint16_t mdeafD[MDEAF_MAX] = {}; // ms deaf
+    // Emitter: a raw frame, outside the mesh stack, with its own sync word, header mode, preamble and length.
+    int16_t eSync = -1;     // -1 = the node's own
+    bool eImplicit = false; // implicit header: an explicit-header receiver decodes payload as a header
+    uint16_t ePre = 0;      // preamble symbols; 0 = the node's own
+    uint8_t eCr = 0;        // coding rate 5..8; 0 = the node's own
+    uint8_t eLen = 32;      // payload bytes
+    uint32_t eSeed = 1;     // payload generator seed, advanced after every emission
+    int16_t eFollow = -1;   // one-shot: emit this many ms after the node's next TX_DONE; -1 = off
     // Not cleared by "!bench reset": a monitor, not an experiment variable.
     uint16_t nfMs = 0;       // noise-floor sample interval; 0 = sampler off
     int16_t floorDbm = -128; // latest one-second median from the sampler; -128 until it has run
@@ -67,6 +96,9 @@ extern BenchKnobs benchKnobs;
 
 /** Parse and apply a "!bench ..." command. Returns true if the text was a bench command (consumed). */
 bool benchKnobsHandleCommand(const char *text, size_t len);
+
+/** Run the bench RX thread (peeks, mark schedule, emitter follow) ms from now; no-op before it exists. */
+void benchKick(uint32_t ms);
 
 /** Log the current knob state on one line, prefixed "BENCH knobs:". */
 void benchKnobsLog();

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "MeshPacketQueue.h"
+#ifdef BENCH_KNOBS
+#include "BenchKnobs.h"
+#endif
 #include "RadioInterface.h"
 #include "UptimeClock.h"
 #include "concurrency/NotifiedWorkerThread.h"
@@ -205,6 +208,48 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     /** One passive channel reading, no TX: RX-flag peek (non-destructive), RSSI, then a CAD scan with the current
      *  knobs, after which RX is re-armed. False if the radio is not idling in RX. */
     bool benchProbe(bool &cadBusy, bool &rxBusy, int16_t &rssi);
+    /** One raw frame from the e* knobs, outside the mesh stack, then back to RX. Unsupported by default. */
+    virtual void benchEmit();
+    /** Restart the mark schedule at entry 0 and drop any pending deaf window; after mark= or mdeaf= change. */
+    void benchMarkChanged()
+    {
+        benchMarkIdx = 0;
+        benchMarkDeafAt = 0;
+    }
+    /** The bench RX thread's work: emitter follow, mark deaf windows, the peek watcher. Returns ms to next run. */
+    int32_t benchTick();
+
+  protected:
+    // pre=soft and pre=deadline: the two receiveDetected() rules #11968 replaced, kept for A/B on one image.
+    uint32_t benchSoftHoldStart = 0;   // soft: Time::getMillis() when a hold began, 0 when none
+    uint32_t benchActiveRxStart = 0;   // both: first look that saw a flag since standby, 0 when none
+    bool benchLegacyReceiveDetected(uint16_t irq, unsigned long headerFlag, unsigned long preambleFlag);
+    // Emitter follow: Time::getMillis() at which to emit, 0 when none, and the TX it follows.
+    uint32_t benchEmitAt = 0;
+    uint32_t benchEmitAfterId = 0;
+    // Mark schedule: the anchor frame, and the deaf window it scheduled.
+    uint32_t benchMarkUs = 0;       // micros() at the last anchor's RX_DONE, 0 before the first
+    uint32_t benchMarkId = 0;       // its packet id
+    uint16_t benchMarkIdx = 0;      // anchor frames heard since the schedule was set
+    uint32_t benchMarkDeafAt = 0;   // Time::getMillis() to go deaf, 0 when none pending
+    uint16_t benchMarkDeafMs = 0;
+    bool benchMarkDeafActive = false; // the current deaf window is the schedule's: log and peek on waking
+    void benchMarkRx(uint32_t rxUs, uint32_t id);
+    // Peek watcher and series.
+    uint32_t benchPkSeenUs = 0;     // micros() of the trigger, 0 when idle
+    uint32_t benchPkNextAt = 0;     // Time::getMillis() of the next peek, 0 while waiting for a trigger
+    uint8_t benchPkSrc = 0;         // PeekTrig that started the series
+    uint8_t benchPkDone = 0;        // peeks made in this series
+    int32_t benchPkHdrMs = -1;      // ms from the trigger to a HEADER_VALID seen before the first peek, -1 if none
+    bool benchPkHerr = false;       // HEADER_ERR seen during the series
+    char benchPkV[BenchKnobs::PK_MAX + 1] = {}; // one char per peek: B busy, F free
+    uint16_t benchPkT[BenchKnobs::PK_MAX] = {}; // ms from the trigger
+    int16_t benchPkRssi[BenchKnobs::PK_MAX] = {};
+    void benchPkStart(uint8_t src);
+    void benchPkEnd(const char *why);
+    void benchPkStep();
+
+  public:
 #endif
 
     /** Clear instance on destruction so stale pointer checks in loop() are safe */
