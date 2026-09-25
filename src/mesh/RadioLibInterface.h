@@ -140,6 +140,38 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
      */
     static RadioLibInterface *instance;
 
+#ifdef BENCH_KNOBS
+    /** RSSI sample for the bench noise monitor, taken only while idling in RX. Deliberately skips
+     *  isActivelyReceiving(), which clears latched preamble flags. False if the radio is busy. */
+    bool benchSampleRssi(int16_t &rssi);
+    /** Key an unmodulated carrier for ms on the current frequency, then return to RX. */
+    virtual void benchJam(uint32_t ms);
+    /** Drop RX for ms and hold any queued TX; on waking, restart RX and make the channel decision at once. */
+    void benchDeaf(uint32_t ms, bool quiet = false);
+    uint32_t benchDeafUntil = 0; // Time::getMillis() deadline, 0 when not deaf
+    bool benchDeafQuiet = false;  // duty-cycled: log only a wake-up that has a packet to decide
+    // Timing trigger (trig/at/atdeaf knobs): queued TX waits for a frame from trigNode, then decides at +atMs.
+    uint32_t benchTrigUs = 0;        // micros() at the trigger frame's RX_DONE; timing logs are relative to it
+    uint32_t benchTrigFireAt = 0;    // Time::getMillis() of the fired decision, 0 when none is pending
+    uint32_t benchTrigHoldStart = 0; // Time::getMillis() when a queued packet began waiting, 0 when none
+    bool benchTrigSeen = false;      // a trigger frame arrived since arming
+    bool benchTrigNew = false;       // trigger just received; acted on once RX is re-armed
+    bool benchTrigOpen = false;      // the hold is released until the next TX completes
+    bool benchTrigLogDecide = false; // log the first decision after firing
+    bool benchTrigLogTx = false;     // log txstart/txdone of the packet sent after firing
+    uint32_t benchTrigRxFrom = 0;    // sender of the last good frame, logged once RX is re-armed; 0 when none
+    uint32_t benchTrigRxUs = 0;      // micros() at that frame's RX_DONE
+    /** Reset the trigger state after trigNode changes; releases any held packet. */
+    void benchTrigChanged();
+    /** After an RX interrupt: fire a just-received trigger, or restore a pending fired wake-up. */
+    void benchTrigAct();
+    /** Log the first decision after the trigger fired. */
+    void benchTrigDecided(bool busy, uint32_t us);
+    /** One passive channel reading, no TX: RX-flag peek (non-destructive), RSSI, then a CAD scan with the current
+     *  knobs, after which RX is re-armed. False if the radio is not idling in RX. */
+    bool benchProbe(bool &cadBusy, bool &rxBusy, int16_t &rssi);
+#endif
+
     /** Clear instance on destruction so stale pointer checks in loop() are safe */
     virtual ~RadioLibInterface()
     {

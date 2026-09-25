@@ -31,6 +31,10 @@ template <class T> class SX126xInterface : public RadioLibInterface
 
     void resetAGC() override;
 
+#ifdef BENCH_KNOBS
+    void benchJam(uint32_t ms) override;
+#endif
+
     void setTCXOVoltage(float voltage) { tcxoVoltage = voltage; }
 
   protected:

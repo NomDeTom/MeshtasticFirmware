@@ -1,5 +1,6 @@
 #if RADIOLIB_EXCLUDE_SX126X != 1
 #include "SX126xInterface.h"
+#include "BenchKnobs.h"
 #include "configuration.h"
 #include "error.h"
 #include "mesh/NodeDB.h"
@@ -251,17 +252,34 @@ template <typename T> int16_t SX126xInterface<T>::programModemParams()
         return err;
     }
 
+#ifdef BENCH_KNOBS
+    // Long interleaving has no 4/7 variant.
+    err = lora.setCodingRate(cr, benchKnobs.li == 1 && cr != 7);
+#else
     err = lora.setCodingRate(cr);
+#endif
     if (err != RADIOLIB_ERR_NONE) {
         LOG_ERROR("SX126X setCodingRate(%u) %s%d", cr, radioLibErr, err);
         return err;
     }
 
+#ifdef BENCH_KNOBS
+    err = lora.setSyncWord(benchKnobs.syncWordOr(syncWord));
+#else
     err = lora.setSyncWord(syncWord);
+#endif
     if (err != RADIOLIB_ERR_NONE) {
         LOG_ERROR("SX126X setSyncWord %s%d", radioLibErr, err);
         return err;
     }
+#ifdef BENCH_KNOBS
+    // Only when asked: re-sending the packet params with IQ standard left the LR2021 deaf to long frames.
+    if (benchKnobs.iqInvert >= 0) {
+        err = lora.invertIQ(benchKnobs.iqInverted());
+        if (err != RADIOLIB_ERR_NONE)
+            LOG_ERROR("SX126X invertIQ %s%d", radioLibErr, err);
+    }
+#endif
 
     err = lora.setCurrentLimit(currentLimit);
     if (err != RADIOLIB_ERR_NONE) {
@@ -281,6 +299,10 @@ template <typename T> int16_t SX126xInterface<T>::programModemParams()
         return err;
     }
 
+#ifdef BENCH_KNOBS
+    if (benchKnobs.txPower != -128)
+        power = benchKnobs.txPower;
+#endif
     limitPower(SX126X_MAX_POWER);
     // Make sure we reach the minimum power supported to turn the chip on (-9dBm)
     if (power < -9)
@@ -467,6 +489,17 @@ template <typename T> void SX126xInterface<T>::startReceive()
         // windows and stalls the slow WebUSB SPI link. No battery to save here.
         return lora.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF, MESHTASTIC_RADIOLIB_IRQ_RX_FLAGS);
 #else
+#ifdef BENCH_KNOBS
+        if (benchKnobs.rxdcRxSym && benchKnobs.rxdcSleepSym) {
+            // Hardware sniff: the chip alternates RX and sleep itself and stays in RX on a detected preamble.
+            const float symUs = (float)(1UL << sf) * 1000.0f / bw; // bw is kHz
+            return lora.startReceiveDutyCycle((uint32_t)(benchKnobs.rxdcRxSym * symUs),
+                                              (uint32_t)(benchKnobs.rxdcSleepSym * symUs), MESHTASTIC_RADIOLIB_IRQ_RX_FLAGS);
+        }
+        // Continuous RX: in sniff sleep BUSY is high and an instantaneous RSSI read is stale or fails.
+        if (benchKnobs.rxCont || benchKnobs.usesRssi())
+            return lora.startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF, MESHTASTIC_RADIOLIB_IRQ_RX_FLAGS);
+#endif
         // We use a 16 bit preamble so this should save some power by letting radio sit in standby mostly.
         return lora.startReceiveDutyCycleAuto(preambleLength, 8, MESHTASTIC_RADIOLIB_IRQ_RX_FLAGS);
 #endif
@@ -519,10 +552,43 @@ template <typename T> bool SX126xInterface<T>::isChannelActive()
     // detection that delivers nothing then expires to standby and raises TIMEOUT, which re-arms us.
     const RadioLibTime_t cadRxTimeoutUsec =
         (RadioLibTime_t)getPacketTime(meshtastic_Constants_DATA_PAYLOAD_LEN + sizeof(PacketHeader), false) * 1000;
-    ChannelScanConfig_t cfg = {.cad = {.symNum = RADIOLIB_SX126X_CAD_ON_4_SYMB,
+    uint8_t cadSymNum = RADIOLIB_SX126X_CAD_ON_4_SYMB;
+    uint8_t cadExitMode = RADIOLIB_SX126X_CAD_GOTO_RX;
+#ifdef BENCH_KNOBS
+    switch (benchKnobs.cadSymbols) {
+    case 1:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_1_SYMB;
+        break;
+    case 2:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_2_SYMB;
+        break;
+    case 4:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_4_SYMB;
+        break;
+    case 8:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_8_SYMB;
+        break;
+    case 16:
+        cadSymNum = RADIOLIB_SX126X_CAD_ON_16_SYMB;
+        break;
+    default:
+        break;
+    }
+    // Plain CAD and CAD-then-TX both leave the chip in standby; only CAD->RX hands off to the receiver.
+    if (benchKnobs.lbt == BenchKnobs::LBT_CAD || benchKnobs.lbt == BenchKnobs::LBT_CADTX)
+        cadExitMode = RADIOLIB_SX126X_CAD_GOTO_STDBY;
+#endif
+    ChannelScanConfig_t cfg = {.cad = {.symNum = cadSymNum,
+#ifdef BENCH_KNOBS
+                                       .detPeak = benchKnobs.detPeak >= 0 ? (uint8_t)benchKnobs.detPeak
+                                                                          : (uint8_t)RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
+                                       .detMin = benchKnobs.detMin >= 0 ? (uint8_t)benchKnobs.detMin
+                                                                        : (uint8_t)RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
+#else
                                        .detPeak = RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
                                        .detMin = RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
-                                       .exitMode = RADIOLIB_SX126X_CAD_GOTO_RX,
+#endif
+                                       .exitMode = cadExitMode,
                                        .timeout = cadRxTimeoutUsec,
                                        .irqFlags = cadIrqFlags,
                                        .irqMask = cadIrqMask}};
@@ -534,7 +600,8 @@ template <typename T> bool SX126xInterface<T>::isChannelActive()
             // The chip auto-entered RX (GOTO_RX). Drop the latched CAD verdict so the pin releases and the
             // coming RX_DONE is a clean edge.
             lora.clearIrqFlags(RADIOLIB_SX126X_IRQ_CAD_DONE | RADIOLIB_SX126X_IRQ_CAD_DETECTED);
-            noteCadHandoffToRx(); // nothing below arms the radio; the caller's rearmReceive() adopts it
+            if (cadExitMode == RADIOLIB_SX126X_CAD_GOTO_RX)
+                noteCadHandoffToRx(); // nothing below arms the radio; the caller's rearmReceive() adopts it
             return true;
         }
         if (result != RADIOLIB_CHANNEL_FREE)
@@ -651,6 +718,28 @@ template <typename T> void SX126xInterface<T>::resetAGC()
     // 7. Resume receiving
     startReceive();
 }
+
+#ifdef BENCH_KNOBS
+template <typename T> void SX126xInterface<T>::benchJam(uint32_t ms)
+{
+    if (sendingPacket != NULL) {
+        LOG_WARN("BENCH jam skipped: TX in progress");
+        return;
+    }
+    lora.standby();
+    setTransmitEnable(true);
+    const int16_t err = lora.transmitDirect(); // unmodulated carrier on the current frequency
+    if (err == RADIOLIB_ERR_NONE)
+        delay(ms);
+    lora.standby();
+    setTransmitEnable(false);
+    startReceive();
+    if (err == RADIOLIB_ERR_NONE)
+        LOG_INFO("BENCH jam %u ms done", ms);
+    else
+        LOG_ERROR("BENCH jam transmitDirect %s%d", radioLibErr, err);
+}
+#endif
 
 /** Control PA mode for GC1109 FEM - CPS pin selects full PA (txon=true) or bypass mode (txon=false) */
 template <typename T> void SX126xInterface<T>::setTransmitEnable(bool txon)

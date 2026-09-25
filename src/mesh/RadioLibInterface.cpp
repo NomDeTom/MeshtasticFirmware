@@ -1,4 +1,5 @@
 #include "RadioLibInterface.h"
+#include "BenchKnobs.h"
 #include "MeshTypes.h"
 #include "NodeDB.h"
 #include "PowerMon.h"
@@ -97,7 +98,11 @@ bool RadioLibInterface::canSendImmediately()
     // To do otherwise would be doubly bad because not only would we drop the packet that was on the way in,
     // we almost certainly guarantee no one outside will like the packet we are sending.
     bool busyTx = sendingPacket != NULL;
+#ifdef BENCH_KNOBS
+    bool busyRx = isReceiving && benchKnobs.checksRx() && isActivelyReceiving();
+#else
     bool busyRx = isReceiving && isActivelyReceiving();
+#endif
 
     if (busyTx || busyRx) {
         if (busyTx) {
@@ -140,8 +145,14 @@ void RadioLibInterface::holdOnPreamble()
 
 bool RadioLibInterface::receiveDetected(uint16_t irq, unsigned long syncWordHeaderValidFlag, unsigned long preambleDetectedFlag)
 {
+#ifdef BENCH_KNOBS
+    const bool holdMode = benchKnobs.pre == BenchKnobs::PRE_DEFAULT || benchKnobs.pre == BenchKnobs::PRE_HOLD;
+    if (holdMode && preambleHoldActive())
+        return true;
+#else
     if (preambleHoldActive())
         return true;
+#endif
 
     if (irq & syncWordHeaderValidFlag) {
         if (!activeReceiveStart) {
@@ -157,6 +168,12 @@ bool RadioLibInterface::receiveDetected(uint16_t irq, unsigned long syncWordHead
     }
 
     if (irq & preambleDetectedFlag) {
+#ifdef BENCH_KNOBS
+        if (benchKnobs.pre == BenchKnobs::PRE_IGNORE)
+            return false;
+        if (benchKnobs.pre == BenchKnobs::PRE_BUSY)
+            return true;
+#endif
         // Looks come once per CSMA backoff, too rarely to judge a preamble by symbol-time deadline (#11933).
         // Clear it so the next look sees only a fresh one, and hold TX meanwhile; a clear never aborts RX.
         holdOnPreamble();
@@ -280,6 +297,95 @@ bool RadioLibInterface::findInTxQueue(NodeNum from, PacketId id)
 {
     return txQueue.find(from, id);
 }
+
+#ifdef BENCH_KNOBS
+bool RadioLibInterface::benchSampleRssi(int16_t &rssi)
+{
+    if (!isReceiving || sendingPacket != NULL || isIRQPending())
+        return false;
+    rssi = getCurrentRSSI();
+    return rssi != NOISE_FLOOR_INVALID && rssi < 0 && rssi >= NOISE_FLOOR_VALID_MIN;
+}
+
+void RadioLibInterface::benchJam(uint32_t ms)
+{
+    LOG_WARN("BENCH jam unsupported on this radio (%u ms)", ms);
+}
+
+bool RadioLibInterface::benchProbe(bool &cadBusy, bool &rxBusy, int16_t &rssi)
+{
+    if (!isReceiving || sendingPacket != NULL || isIRQPending())
+        return false;
+    // checkIrq() only reads the IRQ register; receiveDetected() would clear PREAMBLE and start a hold.
+    rxBusy = iface->checkIrq(RADIOLIB_IRQ_PREAMBLE_DETECTED) == 1 || iface->checkIrq(RADIOLIB_IRQ_HEADER_VALID) == 1;
+    rssi = getCurrentRSSI();
+    cadBusy = isChannelActive();
+    rearmReceive(); // adopts a CAD->RX handoff, otherwise a full startReceive()
+    return true;
+}
+
+void RadioLibInterface::benchDeaf(uint32_t ms, bool quiet)
+{
+    if (sendingPacket != NULL) {
+        LOG_DEBUG("BENCH deaf skipped: TX in progress"); // standby would abort the frame mid-air
+        return;
+    }
+    benchDeafQuiet = quiet;
+    benchDeafUntil = Time::skipZero(Time::getMillis() + ms);
+    setStandby();
+    // Wakes the TX path at the deadline even with nothing queued, so RX always comes back.
+    notifyLater(ms, TRANSMIT_DELAY_COMPLETED, true);
+    if (!quiet)
+        LOG_INFO("BENCH deaf %u ms", ms);
+}
+
+static constexpr uint32_t BENCH_TRIG_TIMEOUT_MS = 10 * 1000;
+
+void RadioLibInterface::benchTrigChanged()
+{
+    benchTrigUs = benchTrigFireAt = benchTrigHoldStart = benchTrigRxFrom = 0;
+    benchTrigSeen = benchTrigNew = benchTrigOpen = benchTrigLogDecide = benchTrigLogTx = false;
+    if (!txQueue.empty())
+        notifyLater(1, TRANSMIT_DELAY_COMPLETED, true); // release anything held for the old trigger
+}
+
+void RadioLibInterface::benchTrigAct()
+{
+    const uint32_t from = benchTrigRxFrom;
+    benchTrigRxFrom = 0;
+    if (benchTrigNew) {
+        benchTrigNew = false;
+        const uint32_t elapsedMs = (micros() - benchTrigUs) / 1000;
+        const uint32_t waitMs = benchKnobs.atMs > elapsedMs ? benchKnobs.atMs - elapsedMs : 0;
+        benchTrigFireAt = Time::skipZero(Time::getMillis() + waitMs);
+        benchTrigOpen = true;
+        benchTrigHoldStart = 0;
+        benchTrigLogDecide = benchTrigLogTx = true;
+        if (benchKnobs.atDeaf)
+            benchDeaf(waitMs, true); // the undeaf path restarts RX and decides at once
+        else
+            notifyLater(waitMs, TRANSMIT_DELAY_COMPLETED, true);
+        LOG_INFO("BENCH t trig from=%08x", from);
+        return;
+    }
+    // An RX interrupt took the notification slot and setTransmitDelay() rescheduled: restore the fired wake-up.
+    if (benchTrigFireAt && !benchDeafUntil) {
+        const uint32_t now = Time::getMillis();
+        notifyLater(Throttle::deadlinePassedAt(now, benchTrigFireAt) ? 0 : benchTrigFireAt - now, TRANSMIT_DELAY_COMPLETED,
+                    true);
+    }
+    if (from && benchTrigSeen)
+        LOG_INFO("BENCH t rx from=%08x +%lu", from, (unsigned long)(benchTrigRxUs - benchTrigUs));
+}
+
+void RadioLibInterface::benchTrigDecided(bool busy, uint32_t us)
+{
+    if (!benchTrigLogDecide)
+        return;
+    benchTrigLogDecide = false;
+    LOG_INFO("BENCH t decide +%lu busy=%d", (unsigned long)(us - benchTrigUs), busy ? 1 : 0);
+}
+#endif
 
 void RadioLibInterface::updateNoiseFloor()
 {
@@ -439,16 +545,63 @@ void RadioLibInterface::onNotify(uint32_t notification)
         // so a second packet that is already arriving is not aborted.
         rearmReceive();
         setTransmitDelay();
+#ifdef BENCH_KNOBS
+        benchTrigAct(); // after the re-arm and reschedule, which would otherwise undo it
+#endif
         break;
     case ISR_POLL_TICK:
         handleSoftwareLoraIrqPoll();
         break;
     case TRANSMIT_DELAY_COMPLETED:
+#ifdef BENCH_KNOBS
+        if (benchDeafUntil) {
+            const uint32_t now = Time::getMillis();
+            if (!Throttle::deadlinePassedAt(now, benchDeafUntil)) {
+                notifyLater(benchDeafUntil - now, TRANSMIT_DELAY_COMPLETED, true); // still deaf: hold TX
+                break;
+            }
+            benchDeafUntil = 0;
+            startReceive();
+            if (!benchDeafQuiet || !txQueue.empty())
+                LOG_INFO("BENCH undeaf"); // the host dates the join point from this line
+        }
+        bool benchFired; // no initializer: a case label may not jump past one
+        benchFired = false;
+        if (benchKnobs.trigNode && txQueue.empty()) {
+            benchTrigFireAt = 0;
+            benchTrigOpen = false;
+        } else if (benchKnobs.trigNode) {
+            const uint32_t now = Time::getMillis();
+            if (benchTrigFireAt) {
+                if (!Throttle::deadlinePassedAt(now, benchTrigFireAt)) {
+                    notifyLater(benchTrigFireAt - now, TRANSMIT_DELAY_COMPLETED, txTimerOverwrite);
+                    break;
+                }
+                benchTrigFireAt = 0;
+                benchFired = true;
+            } else if (!benchTrigOpen) {
+                // Held for the trigger frame; the only wake-up scheduled here is the timeout.
+                if (!benchTrigHoldStart)
+                    benchTrigHoldStart = Time::skipZero(now);
+                const uint32_t left = Throttle::remainingMs(benchTrigHoldStart, BENCH_TRIG_TIMEOUT_MS);
+                if (left) {
+                    notifyLater(left, TRANSMIT_DELAY_COMPLETED, txTimerOverwrite);
+                    break;
+                }
+                LOG_WARN("BENCH trig timeout");
+                benchTrigHoldStart = 0;
+                benchTrigOpen = true;
+            }
+        }
+#endif
 
         // If we are not currently in receive mode, then restart the random delay (this can happen if the main thread
         // has placed the unit into standby)  FIXME, how will this work if the chipset is in sleep mode?
         if (!txQueue.empty()) {
             if (!canSendImmediately()) {
+#ifdef BENCH_KNOBS
+                benchTrigDecided(true, micros());
+#endif
                 setTransmitDelay(); // currently Rx/Tx-ing: reset random delay
             } else {
                 meshtastic_MeshPacket *txp = txQueue.getFront();
@@ -456,7 +609,12 @@ void RadioLibInterface::onNotify(uint32_t notification)
                 const uint32_t now = Time::getMillis();
                 // Not `long remaining = tx_after - Time::getMillis()`: that uint32_t subtraction widens to
                 // ~4.29e9 where long is 64-bit (portduino), rescheduling a due packet ~49.7 days out.
+#ifdef BENCH_KNOBS
+                // The fired decision goes straight to the channel check, whatever backoff is pending.
+                if (!benchFired && txp->tx_after && !Throttle::deadlinePassedAt(now, txp->tx_after)) {
+#else
                 if (txp->tx_after && !Throttle::deadlinePassedAt(now, txp->tx_after)) {
+#endif
                     // There's still some delay pending on this packet, so resume waiting for it to elapse
                     notifyLater(txp->tx_after - now, TRANSMIT_DELAY_COMPLETED, txTimerOverwrite);
                 } else if (const RadioTxHook::PreTxAction action = RadioTxHooks::beforeTransmit(this, txp);
@@ -472,8 +630,33 @@ void RadioLibInterface::onNotify(uint32_t notification)
                     setTransmitDelay(); // the radio config moved, so re-run the delay and scan on it
                 } else {
                     // Listen-before-talk: a CAD preamble scan immediately before we key up.
+#ifdef BENCH_KNOBS
+                    bool energyBusy = false;
+                    if (benchKnobs.usesRssi()) {
+                        int16_t rssi = 0;
+                        const int32_t floor = benchKnobs.floorDbm > -128 ? benchKnobs.floorDbm : getNoiseFloor();
+                        if (benchSampleRssi(rssi)) {
+                            energyBusy = rssi > floor + benchKnobs.rssiMargin;
+                            LOG_DEBUG("RSSI look %d dBm, floor %ld + %d: %s", rssi, (long)floor, benchKnobs.rssiMargin,
+                                      energyBusy ? "busy" : "free");
+                        } else {
+                            // Not busy on energy; LBT_RXRSSI already had its RX-flag check in canSendImmediately().
+                            LOG_DEBUG("RSSI look invalid (%d)", rssi);
+                        }
+                    }
+                    const bool scan = benchKnobs.usesCad();
+                    if (scan)
+                        LOG_DEBUG("CAD arm");
+                    else
+                        LOG_DEBUG("CAD skipped (bench lbt)");
+                    const bool channelBusy = energyBusy || (scan && isChannelActive());
+                    const uint32_t decideUs = micros();
+                    if (channelBusy) {
+                        benchTrigDecided(true, decideUs);
+#else
                     LOG_DEBUG("CAD arm");
                     if (isChannelActive()) { // currently traffic on the channel?
+#endif
                         LOG_DEBUG("CAD busy");
                         // Beacon target or not: reconfigureForBeaconTX() already left RX running on that
                         // config, so skipping this only ever left the node deaf in standby.
@@ -486,6 +669,9 @@ void RadioLibInterface::onNotify(uint32_t notification)
                         txp = txQueue.dequeue();
                         assert(txp);
                         startSend(txp);
+#ifdef BENCH_KNOBS
+                        benchTrigDecided(false, decideUs); // logged after keying up, not before
+#endif
                         LOG_TRACE("%d packets in TX queue", txQueue.getMaxLen() - txQueue.getFree());
                     }
                 }
@@ -596,6 +782,15 @@ void RadioLibInterface::handleTransmitInterrupt()
 {
     // This can be null if we forced the device to enter standby mode.  In that case
     // ignore the transmit interrupt
+#ifdef BENCH_KNOBS
+    if (sendingPacket) {
+        const uint32_t us = micros();
+        if (benchTrigLogTx)
+            LOG_INFO("BENCH t txdone +%lu", (unsigned long)(us - benchTrigUs));
+        benchTrigLogTx = false;
+        benchTrigOpen = false; // the next queued packet waits for the next trigger
+    }
+#endif
     if (sendingPacket)
         completeSending();
     powerMon->clearState(meshtastic_PowerMon_State_Lora_TXOn); // But our transmitter is definitely off now
@@ -633,6 +828,9 @@ void RadioLibInterface::handleReceiveInterrupt()
 {
     // when this is called, we should be in receive mode - if we are not, just jump out instead of bombing. Possible Race
     // Condition?
+#ifdef BENCH_KNOBS
+    const uint32_t benchRxUs = micros(); // as early as possible: the trigger timestamp
+#endif
     const bool wasCadHandoff = cadHandoffRxStart != 0;
     cadHandoffRxStart = 0; // this RX ends the wait either way; the outcome is logged below
     preambleHoldStart = 0; // likewise the reception a held preamble announced
@@ -707,6 +905,19 @@ void RadioLibInterface::handleReceiveInterrupt()
                 LOG_WARN("Ignore received packet without sender");
                 return;
             }
+#ifdef BENCH_KNOBS
+            if (benchKnobs.trigNode) {
+                // Each trigger frame fires once; one arriving during an open cycle logs as plain RX.
+                if (radioBuffer.header.from == benchKnobs.trigNode && !benchTrigOpen && !benchTrigFireAt) {
+                    benchTrigUs = benchRxUs;
+                    benchTrigSeen = true;
+                    benchTrigNew = !txQueue.empty();
+                } else {
+                    benchTrigRxUs = benchRxUs;
+                }
+                benchTrigRxFrom = radioBuffer.header.from; // logged by benchTrigAct() once RX is re-armed
+            }
+#endif
 
             // Note: we deliver _all_ packets to our router (i.e. our interface is intentionally promiscuous).
             // This allows the router and other apps on our node to sniff packets (usually routing) between other
@@ -869,6 +1080,12 @@ void RadioLibInterface::periodicRadioMaintenance()
         return; // a chip just re-inited (or still dead) has no use for an AGC reset this tick
     }
 
+#ifdef BENCH_KNOBS
+    if (benchKnobs.agcMs < 0)
+        return; // bench: AGC resets disabled, RX-offline recovery above still runs
+    if (benchDeafUntil)
+        return; // resetAGC() restarts RX, which would end the deaf window early
+#endif
     resetAGC();
 }
 
@@ -957,6 +1174,9 @@ bool RadioLibInterface::startSend(meshtastic_MeshPacket *txp)
         size_t numbytes = beginSending(txp);
 
         int res = iface->startTransmit((uint8_t *)&radioBuffer, numbytes);
+#ifdef BENCH_KNOBS
+        const uint32_t benchTxUs = micros();
+#endif
         if (res != RADIOLIB_ERR_NONE) {
             LOG_ERROR("startTransmit failed, error=%d", res);
             RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_RADIO_SPI_BUG);
@@ -972,6 +1192,10 @@ bool RadioLibInterface::startSend(meshtastic_MeshPacket *txp)
             // unset-sentinel-ok: busyTx/sendingPacket is the armed flag, so 0 is a legal stamp
             lastTxStart = Time::getMillis();
             printPacket("Started Tx", txp);
+#ifdef BENCH_KNOBS
+            if (benchTrigLogTx)
+                LOG_INFO("BENCH t txstart +%lu", (unsigned long)(benchTxUs - benchTrigUs));
+#endif
 #ifdef LED_LORA
             digitalWrite(LED_LORA, LED_STATE_ON);
 #endif

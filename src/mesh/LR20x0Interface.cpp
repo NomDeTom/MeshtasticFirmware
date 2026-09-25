@@ -3,6 +3,7 @@
 #if (defined(USE_LR2021) || defined(ARCH_PORTDUINO)) && RADIOLIB_EXCLUDE_LR2021 != 1
 #include "LR20x0Band.h"
 #include "LR20x0Interface.h"
+#include "BenchKnobs.h"
 #include "error.h"
 #include "mesh/NodeDB.h"
 
@@ -269,6 +270,10 @@ template <typename T> bool LR20x0Interface<T>::reconfigure()
     // base-class failure isn't masked as success.
     const bool reconfigureSuccess = RadioLibInterface::reconfigure();
 
+#ifdef BENCH_KNOBS
+    if (benchKnobs.txPower != -128)
+        power = benchKnobs.txPower;
+#endif
     if (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_LORA_24) {
         limitPower(LR2021_MAX_POWER_HF);
     } else {
@@ -318,19 +323,35 @@ template <typename T> bool LR20x0Interface<T>::reconfigure()
             standbySuccess = false;
         }
 
+#ifdef BENCH_KNOBS
+        err = lora.setCodingRate(cr, benchKnobs.li >= 0 ? (benchKnobs.li == 1 && cr != 7) : cr != 7);
+#else
         err = lora.setCodingRate(cr, cr != 7);
+#endif
         if (err != RADIOLIB_ERR_NONE) {
             LOG_ERROR("LR20x0 setCodingRate(%u) %s%d", cr, radioLibErr, err);
             RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
             standbySuccess = false;
         }
 
+#ifdef BENCH_KNOBS
+        err = lora.setSyncWord(benchKnobs.syncWordOr(syncWord));
+#else
         err = lora.setSyncWord(syncWord);
+#endif
         if (err != RADIOLIB_ERR_NONE) {
             LOG_ERROR("LR20x0 setSyncWord %s%d", radioLibErr, err);
             RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
             standbySuccess = false;
         }
+#ifdef BENCH_KNOBS
+        // Only when asked: re-sending the packet params with IQ standard left the LR2021 deaf to long frames.
+        if (benchKnobs.iqInvert >= 0) {
+            err = lora.invertIQ(benchKnobs.iqInverted());
+            if (err != RADIOLIB_ERR_NONE)
+                LOG_ERROR("LR20x0 invertIQ %s%d", radioLibErr, err);
+        }
+#endif
 
         err = lora.setPreambleLength(preambleLength);
         if (err != RADIOLIB_ERR_NONE) {
@@ -651,9 +672,19 @@ template <typename T> bool LR20x0Interface<T>::isChannelActive()
         {51, 51, 52, 54, 56, 60, 60, 65}, // 3 symbols
         {51, 51, 51, 54, 56, 60, 60, 64}, // 4 symbols
     };
+#ifdef BENCH_KNOBS
+    const uint8_t symNum = benchKnobs.cadSymbols ? benchKnobs.cadSymbols : getCadSymbolCount();
+    const uint8_t tableDetPeak = CAD_DET_PEAK[(symNum >= 1 && symNum <= 4) ? symNum - 1 : 3][(sf >= 5 && sf <= 12) ? sf - 5 : 6];
+    const uint8_t detPeak = benchKnobs.detPeak >= 0 ? (uint8_t)benchKnobs.detPeak : tableDetPeak;
+    // Plain CAD and CAD-then-TX both exit to the fallback mode (STBY_RC); only CAD->RX hands off to the receiver.
+    const uint8_t cadExitMode = (benchKnobs.lbt == BenchKnobs::LBT_CAD || benchKnobs.lbt == BenchKnobs::LBT_CADTX)
+                                    ? RADIOLIB_LR2021_CAD_EXIT_MODE_FALLBACK
+                                    : RADIOLIB_LR2021_CAD_EXIT_MODE_RX;
+#else
     const uint8_t symNum = getCadSymbolCount();
     const uint8_t detPeak = CAD_DET_PEAK[(symNum >= 1 && symNum <= 4) ? symNum - 1 : 3]
                                         [(sf >= 5 && sf <= 12) ? sf - 5 : 6]; // out of range: 4 symbols, SF11
+#endif
     // Times the RX that follows a detection. lr20xx_driver calls this field PLL steps of 31.25 us (the
     // datasheet's "32 MHz periods" disagrees); RadioLib scales it as 30.52, so we land ~2% long.
     const RadioLibTime_t cadRxTimeoutUsec =
@@ -663,7 +694,11 @@ template <typename T> bool LR20x0Interface<T>::isChannelActive()
                                        // ignored: SetLoraCadParams has no det_min - that byte carries
                                        // pnr_delta, which scanChannel() takes from lora.fastCad below
                                        .detMin = RADIOLIB_LR2021_CAD_PARAM_DEFAULT,
+#ifdef BENCH_KNOBS
+                                       .exitMode = cadExitMode,
+#else
                                        .exitMode = RADIOLIB_LR2021_CAD_EXIT_MODE_RX,
+#endif
                                        .timeout = cadRxTimeoutUsec,
                                        // DS rev 2.2 6.8.3: only routes IRQs to a pin, so keep
                                        // preamble/header off it - they would fire the ISR mid-frame
@@ -682,7 +717,10 @@ template <typename T> bool LR20x0Interface<T>::isChannelActive()
             // The chip auto-entered RX. Drop the latched CAD verdict so the pin releases and the coming
             // RX_DONE is a clean edge.
             lora.clearIrqFlags(RADIOLIB_LR2021_IRQ_CAD_DONE | RADIOLIB_LR2021_IRQ_CAD_DETECTED);
-            noteCadHandoffToRx(); // nothing below arms the radio; the caller's rearmReceive() adopts it
+#ifdef BENCH_KNOBS
+            if (cadExitMode == RADIOLIB_LR2021_CAD_EXIT_MODE_RX)
+#endif
+                noteCadHandoffToRx(); // nothing below arms the radio; the caller's rearmReceive() adopts it
             return true;
         }
         if (result != RADIOLIB_ERR_WRONG_MODEM)
