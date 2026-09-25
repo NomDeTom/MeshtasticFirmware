@@ -2,9 +2,9 @@
 
 #ifdef BENCH_KNOBS
 
-#include "configuration.h"
 #include "RadioLibInterface.h"
 #include "concurrency/OSThread.h"
+#include "configuration.h"
 #include <algorithm>
 #include <stdlib.h>
 #include <string.h>
@@ -97,8 +97,7 @@ class BenchProbeThread : public concurrency::OSThread
             n++;
             cadBusy += cad;
             rxBusy += rx;
-            const int32_t floor = benchKnobs.floorDbm > -128 ? benchKnobs.floorDbm
-                                                             : RadioLibInterface::instance->getNoiseFloor();
+            const int32_t floor = benchKnobs.floorDbm > -128 ? benchKnobs.floorDbm : RadioLibInterface::instance->getNoiseFloor();
             rssiBusy += rssi > floor + benchKnobs.rssiMargin;
             if (n <= MAX_SAMPLES)
                 samples[n - 1] = rssi;
@@ -109,8 +108,8 @@ class BenchProbeThread : public concurrency::OSThread
         if (now - windowStart >= 1000) {
             const uint8_t k = n < MAX_SAMPLES ? n : MAX_SAMPLES;
             std::sort(samples, samples + k);
-            LOG_INFO("BENCH probe: n=%u skip=%u cad_busy=%u rx_busy=%u rssi_busy=%u rssi_p50=%d floor=%d", n, skipped,
-                     cadBusy, rxBusy, rssiBusy, k ? samples[k / 2] : 0, benchKnobs.floorDbm);
+            LOG_INFO("BENCH probe: n=%u skip=%u cad_busy=%u rx_busy=%u rssi_busy=%u rssi_p50=%d floor=%d", n, skipped, cadBusy,
+                     rxBusy, rssiBusy, k ? samples[k / 2] : 0, benchKnobs.floorDbm);
             n = skipped = cadBusy = rxBusy = rssiBusy = 0;
             windowStart = now;
         }
@@ -128,6 +127,7 @@ static BenchProbeThread *benchProbeThread;
 
 static const char *const LBT_NAMES[] = {"default", "off", "rx", "cad", "cadrx", "cadtx", "rssi", "rxrssi"};
 static const char *const PRE_NAMES[] = {"default", "hold", "ignore", "busy"};
+static const char *const TXARM_NAMES[] = {"default", "early"};
 
 static int indexOf(const char *const *names, size_t n, const char *v)
 {
@@ -142,10 +142,11 @@ void benchKnobsLog()
     const BenchKnobs &k = benchKnobs;
     LOG_INFO("BENCH knobs: lbt=%s sym=%u cwmin=%d cwmax=%d slot=%d fixed=%u nobackoff=%d pre=%s sync=%d iq=%d pwr=%d "
              "detpeak=%d detmin=%d agc=%ld li=%d nf=%u rssim=%d floor=%d dc=%u/%u rxdc=%u/%u rxcont=%u trig=%08lx at=%u "
-             "atdeaf=%d",
+             "atdeaf=%d txarm=%s txgap=%d",
              LBT_NAMES[k.lbt], k.cadSymbols, k.cwMin, k.cwMax, k.slotMs, k.fixedMs, k.noBackoff ? 1 : 0, PRE_NAMES[k.pre],
-             k.syncWord, k.iqInvert, k.txPower, k.detPeak, k.detMin, (long)k.agcMs, k.li, k.nfMs, k.rssiMargin, k.floorDbm, k.dcSleepMs, k.dcWakeMs, k.rxdcRxSym, k.rxdcSleepSym, k.rxCont,
-             (unsigned long)k.trigNode, k.atMs, k.atDeaf ? 1 : 0);
+             k.syncWord, k.iqInvert, k.txPower, k.detPeak, k.detMin, (long)k.agcMs, k.li, k.nfMs, k.rssiMargin, k.floorDbm,
+             k.dcSleepMs, k.dcWakeMs, k.rxdcRxSym, k.rxdcSleepSym, k.rxCont, (unsigned long)k.trigNode, k.atMs, k.atDeaf ? 1 : 0,
+             TXARM_NAMES[k.txArm], k.txGap ? 1 : 0);
 }
 
 // Syntax: "!bench" (report), "!bench reset", or "!bench key=value [key=value ...]". Unknown keys and bad
@@ -174,9 +175,11 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
                             next.rxdcRxSym != 0 || next.rxCont != 0;
             const uint16_t keepNf = next.nfMs;
             const int16_t keepFloor = next.floorDbm;
+            const bool keepTxGap = next.txGap;
             next = BenchKnobs();
             next.nfMs = keepNf;
             next.floorDbm = keepFloor;
+            next.txGap = keepTxGap;
             continue;
         }
         char *eq = strchr(tok, '=');
@@ -266,6 +269,14 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
             next.atMs = (uint16_t)constrain(num, 0, 10000);
         } else if (strcmp(key, "atdeaf") == 0) {
             next.atDeaf = num != 0;
+        } else if (strcmp(key, "txarm") == 0) {
+            int i = indexOf(TXARM_NAMES, sizeof(TXARM_NAMES) / sizeof(*TXARM_NAMES), val);
+            if (i < 0)
+                LOG_WARN("BENCH: txarm=%s unknown", val);
+            else
+                next.txArm = (uint8_t)i;
+        } else if (strcmp(key, "txgap") == 0) {
+            next.txGap = num != 0;
         } else if (strcmp(key, "nf") == 0) {
             next.nfMs = num <= 0 ? 0 : (uint16_t)constrain(num, 50, 60000);
         } else {
@@ -284,6 +295,13 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
         radioChanged = true;
     }
     const bool trigChanged = next.trigNode != benchKnobs.trigNode;
+#if defined(ARCH_NRF52) && !defined(ARCH_NRF54L)
+    // Also switches the core's micros() to CYCCNT/64, which jumps back to 0 every 67 s instead of wrapping mod 2^32.
+    if (next.txGap && !benchKnobs.txGap)
+        dwt_enable();
+    else if (!next.txGap && benchKnobs.txGap)
+        dwt_disable();
+#endif
     benchKnobs = next;
     if (trigChanged && RadioLibInterface::instance)
         RadioLibInterface::instance->benchTrigChanged();

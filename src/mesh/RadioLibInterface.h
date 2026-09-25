@@ -1,5 +1,6 @@
 #pragma once
 
+#include "BenchKnobs.h"
 #include "MeshPacketQueue.h"
 #include "RadioInterface.h"
 #include "concurrency/NotifiedWorkerThread.h"
@@ -149,7 +150,7 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     /** Drop RX for ms and hold any queued TX; on waking, restart RX and make the channel decision at once. */
     void benchDeaf(uint32_t ms, bool quiet = false);
     uint32_t benchDeafUntil = 0; // Time::getMillis() deadline, 0 when not deaf
-    bool benchDeafQuiet = false;  // duty-cycled: log only a wake-up that has a packet to decide
+    bool benchDeafQuiet = false; // duty-cycled: log only a wake-up that has a packet to decide
     // Timing trigger (trig/at/atdeaf knobs): queued TX waits for a frame from trigNode, then decides at +atMs.
     uint32_t benchTrigUs = 0;        // micros() at the trigger frame's RX_DONE; timing logs are relative to it
     uint32_t benchTrigFireAt = 0;    // Time::getMillis() of the fired decision, 0 when none is pending
@@ -170,6 +171,26 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     /** One passive channel reading, no TX: RX-flag peek (non-destructive), RSSI, then a CAD scan with the current
      *  knobs, after which RX is re-armed. False if the radio is not idling in RX. */
     bool benchProbe(bool &cadBusy, bool &rxBusy, int16_t &rssi);
+    // TX_DONE -> RX re-armed stopwatch (txgap knob), in benchTicks(); one "BENCH txgap" line per completed TX.
+    enum BenchGapMark : uint8_t { GAP_WAKE, GAP_LOG, GAP_LOGGED, GAP_RELEASED, GAP_HOOK0, GAP_HOOK, GAP_ARMED, GAP_MARKS };
+    volatile uint32_t benchGapIsr = 0;     // benchTicks() in the TX ISR
+    volatile bool benchGapHaveIsr = false; // false when TX_DONE came from the poll or a missed-edge catch
+    bool benchGapFromIsr = false;
+    bool benchGapTiming = false;
+    bool benchTxNotify = false;                       // inside onNotify(ISR_TX)
+    meshtastic_MeshPacket *benchDeferredTx = nullptr; // txarm=early: logged and released after RX is re-armed
+    uint32_t benchGapStart = 0;
+    uint32_t benchGapT[GAP_MARKS] = {};
+    uint32_t benchGapId = 0;
+    void benchGapMark(uint8_t mark)
+    {
+        if (benchGapTiming)
+            benchGapT[mark] = benchTicks();
+    }
+    /** Entry of onNotify(ISR_TX): starts the stopwatch when txgap is on. */
+    void benchGapBegin();
+    /** After RX is re-armed: log and release a deferred packet, then report the gap. */
+    void benchGapEnd();
 #endif
 
     /** Clear instance on destruction so stale pointer checks in loop() are safe */

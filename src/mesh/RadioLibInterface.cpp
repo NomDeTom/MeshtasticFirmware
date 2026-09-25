@@ -84,6 +84,12 @@ void INTERRUPT_ATTR RadioLibInterface::isrRxLevel0()
 
 void INTERRUPT_ATTR RadioLibInterface::isrTxLevel0()
 {
+#ifdef BENCH_KNOBS
+    if (benchKnobs.txGap) {
+        instance->benchGapIsr = benchTicks();
+        instance->benchGapHaveIsr = true;
+    }
+#endif
     isrLevel0Common(ISR_TX);
 }
 
@@ -371,8 +377,7 @@ void RadioLibInterface::benchTrigAct()
     // An RX interrupt took the notification slot and setTransmitDelay() rescheduled: restore the fired wake-up.
     if (benchTrigFireAt && !benchDeafUntil) {
         const uint32_t now = Time::getMillis();
-        notifyLater(Throttle::deadlinePassedAt(now, benchTrigFireAt) ? 0 : benchTrigFireAt - now, TRANSMIT_DELAY_COMPLETED,
-                    true);
+        notifyLater(Throttle::deadlinePassedAt(now, benchTrigFireAt) ? 0 : benchTrigFireAt - now, TRANSMIT_DELAY_COMPLETED, true);
     }
     if (from && benchTrigSeen)
         LOG_INFO("BENCH t rx from=%08x +%lu", from, (unsigned long)(benchTrigRxUs - benchTrigUs));
@@ -531,13 +536,28 @@ void RadioLibInterface::onNotify(uint32_t notification)
 
     switch (notification) {
     case ISR_TX:
+#ifdef BENCH_KNOBS
+        benchGapBegin();
+#endif
         handleTransmitInterrupt(); // completeSending() already restored the radio to the home config
-        // Let the hooks pre-stage the radio for the NEXT queued packet. Not required for correctness -
-        // TRANSMIT_DELAY_COMPLETED asks again before the scan, which is where the answer is acted on -
-        // but it keeps the post-TX listen window on the channel we are about to transmit on.
+                                   // Let the hooks pre-stage the radio for the NEXT queued packet. Not required for correctness -
+                                   // TRANSMIT_DELAY_COMPLETED asks again before the scan, which is where the answer is acted on -
+                                   // but it keeps the post-TX listen window on the channel we are about to transmit on.
+#ifdef BENCH_KNOBS
+        benchGapMark(GAP_HOOK0);
+#endif
         (void)RadioTxHooks::beforeTransmit(this, txQueue.getFront());
+#ifdef BENCH_KNOBS
+        benchGapMark(GAP_HOOK);
+#endif
         startReceive();
+#ifdef BENCH_KNOBS
+        benchGapMark(GAP_ARMED);
+#endif
         setTransmitDelay();
+#ifdef BENCH_KNOBS
+        benchGapEnd();
+#endif
         break;
     case ISR_RX:
         handleReceiveInterrupt();
@@ -814,15 +834,71 @@ void RadioLibInterface::completeSending()
         txGood++;
         if (!isFromUs(p))
             txRelay++;
+#ifdef BENCH_KNOBS
+        benchGapId = p->id;
+        if (benchTxNotify && benchKnobs.txArm == BenchKnobs::TXARM_EARLY) {
+            // Undo the pre-TX switch now so RX re-arms on the home config; log and release after the arm.
+            RadioTxHooks::packetReleased(this, p);
+            benchDeferredTx = p;
+            return;
+        }
+        benchGapMark(GAP_LOG);
+#endif
         printPacket("Completed sending", p);
+#ifdef BENCH_KNOBS
+        benchGapMark(GAP_LOGGED);
+#endif
         // Keep this inside `if (p)`: completeSending() also runs on every setStandby(), where a hook
         // undoing its own pre-TX switch would recurse back through reconfigure().
         RadioTxHooks::packetReleased(this, p);
 
         // We are done sending that packet, release it
         packetPool.release(p);
+#ifdef BENCH_KNOBS
+        benchGapMark(GAP_RELEASED);
+#endif
     }
 }
+
+#ifdef BENCH_KNOBS
+void RadioLibInterface::benchGapBegin()
+{
+    benchTxNotify = true;
+    benchGapTiming = benchKnobs.txGap;
+    const uint32_t now = benchTicks();
+    for (uint32_t &t : benchGapT)
+        t = now; // a step that never runs reads as 0 us
+    benchGapFromIsr = benchGapHaveIsr;
+    benchGapHaveIsr = false;
+    benchGapStart = benchGapFromIsr ? benchGapIsr : now;
+    benchGapId = 0;
+}
+
+void RadioLibInterface::benchGapEnd()
+{
+    benchTxNotify = false;
+    const bool deferred = benchDeferredTx != nullptr;
+    if (deferred) {
+        meshtastic_MeshPacket *p = benchDeferredTx;
+        benchDeferredTx = nullptr;
+        benchGapMark(GAP_LOG);
+        printPacket("Completed sending", p);
+        benchGapMark(GAP_LOGGED);
+        packetPool.release(p);
+        benchGapMark(GAP_RELEASED);
+    }
+    if (!benchGapTiming)
+        return;
+    benchGapTiming = false;
+    const uint32_t *t = benchGapT;
+    auto us = [](uint32_t from, uint32_t to) { return (unsigned long)benchTicksToUs(to - from); };
+    // total is ISR (or wake, when isr=0) to RX armed; with order=early, log and rel land after the arm.
+    LOG_INFO("BENCH txgap id=%08lx order=%s isr=%d wake=%lu log=%lu rel=%lu hook=%lu arm=%lu total=%lu",
+             (unsigned long)benchGapId, deferred ? "early" : "default", benchGapFromIsr ? 1 : 0, us(benchGapStart, t[GAP_WAKE]),
+             us(t[GAP_LOG], t[GAP_LOGGED]), us(t[GAP_LOGGED], t[GAP_RELEASED]), us(t[GAP_HOOK0], t[GAP_HOOK]),
+             us(t[GAP_HOOK], t[GAP_ARMED]), us(benchGapStart, t[GAP_ARMED]));
+}
+#endif
 
 void RadioLibInterface::handleReceiveInterrupt()
 {
