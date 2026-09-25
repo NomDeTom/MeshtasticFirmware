@@ -12,6 +12,7 @@ import json
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -42,6 +43,20 @@ def main():
                                      headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"})
         body = urllib.request.urlopen(req).read()
         return body if raw else (json.loads(body) if body else None)
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    def download(url):
+        # Artifact downloads redirect to blob storage, which rejects the GitHub token: follow it without auth.
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+        try:
+            return urllib.request.build_opener(NoRedirect).open(req).read()
+        except urllib.error.HTTPError as e:
+            if e.code not in (301, 302, 303, 307, 308):
+                raise
+            return urllib.request.urlopen(e.headers["Location"]).read()
 
     run_id = a.run
     if not run_id:
@@ -79,7 +94,7 @@ def main():
 
     # The repackaged single zip is the largest firmware-* artifact; the per-build one is nested inside it anyway.
     art = max(arts, key=lambda x: x["size_in_bytes"])
-    for n, zf in walk(zipfile.ZipFile(io.BytesIO(call(art["archive_download_url"], raw=True)))):
+    for n, zf in walk(zipfile.ZipFile(io.BytesIO(download(art["archive_download_url"])))):
         name = Path(n).name
         if name.endswith("-ota.zip"):
             (out / f"{a.tag}-ota.zip").write_bytes(zf.read(n))
