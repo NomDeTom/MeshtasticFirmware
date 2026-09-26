@@ -742,12 +742,17 @@ void RadioLibInterface::onNotify(uint32_t notification)
 {
 
     switch (notification) {
-    case ISR_TX:
+    case ISR_TX: {
 #ifdef BENCH_KNOBS
         benchGapBegin();
 #endif
-        handleTransmitInterrupt(); // completeSending() already restored the radio to the home config
+        // The chip is deaf in standby until startReceive(), so the airtime log and printPacket() wait until after it.
+        meshtastic_MeshPacket *sent = handleTransmitInterrupt(); // radio already back on the home config
 #ifdef BENCH_KNOBS
+        if (benchKnobs.txArm == BenchKnobs::TXARM_LATE) { // develop's order: account and log before re-arming
+            finishSentPacket(sent);
+            sent = nullptr;
+        }
         benchGapMark(GAP_HOOK0);
 #endif
         // Let the hooks pre-stage the radio for the NEXT queued packet. Not required for correctness -
@@ -762,10 +767,12 @@ void RadioLibInterface::onNotify(uint32_t notification)
         benchGapMark(GAP_ARMED);
 #endif
         setTransmitDelay();
+        finishSentPacket(sent);
 #ifdef BENCH_KNOBS
         benchGapEnd();
 #endif
         break;
+    }
     case ISR_RX:
         handleReceiveInterrupt();
         // Re-arm for the next packet. rearmReceive() avoids a standby where the chip is already in RX,
@@ -1012,10 +1019,8 @@ bool RadioLibInterface::removePendingTXPacket(NodeNum from, PacketId id, uint32_
     return false;
 }
 
-void RadioLibInterface::handleTransmitInterrupt()
+meshtastic_MeshPacket *RadioLibInterface::handleTransmitInterrupt()
 {
-    // This can be null if we forced the device to enter standby mode.  In that case
-    // ignore the transmit interrupt
 #ifdef BENCH_KNOBS
     if (sendingPacket) {
         const uint32_t us = micros();
@@ -1033,65 +1038,68 @@ void RadioLibInterface::handleTransmitInterrupt()
         }
     }
 #endif
-    if (sendingPacket)
-        completeSending();
+    // Null if we forced the device into standby, which already completed the send.
+    meshtastic_MeshPacket *sent = detachSentPacket();
     powerMon->clearState(meshtastic_PowerMon_State_Lora_TXOn); // But our transmitter is definitely off now
+    return sent;
 }
 
 void RadioLibInterface::completeSending()
 {
-    // We are careful to clear sending packet before calling printPacket because
-    // that can take a long time
+    finishSentPacket(detachSentPacket());
+}
+
+meshtastic_MeshPacket *RadioLibInterface::detachSentPacket()
+{
+    // Cleared first: printPacket() in finishSentPacket() can take a long time.
     auto p = sendingPacket;
     sendingPacket = NULL;
 #ifdef LED_LORA
     digitalWrite(LED_LORA, LED_STATE_OFF);
 #endif
-
-    if (p) {
-#ifdef BENCH_KNOBS
-        benchGapId = p->id;
-        if (benchTxNotify && benchKnobs.txArm == BenchKnobs::TXARM_EARLY) {
-            // Undo the pre-TX switch now so RX re-arms on the home config; account, log and release after the arm.
-            RadioTxHooks::packetReleased(this, p);
-            benchDeferredTx = p;
-            return;
-        }
-        benchGapMark(GAP_AIR0);
-#endif
-        // Packet has been sent, count it toward our TX airtime utilization.
-        uint32_t xmitMsec = getPacketTime(p);
-        airTime->logAirtime(TX_LOG, xmitMsec);
-#ifdef BENCH_KNOBS
-        benchGapMark(GAP_AIR);
-#endif
-
-        txGood++;
-        if (!isFromUs(p))
-            txRelay++;
-#ifdef BENCH_KNOBS
-        benchGapMark(GAP_LOG);
-#endif
-        printPacket("Completed sending", p);
-#ifdef BENCH_KNOBS
-        benchGapMark(GAP_LOGGED);
-#endif
-        // Keep this inside `if (p)`: completeSending() also runs on every setStandby(), where a hook
-        // undoing its own pre-TX switch would recurse back through reconfigure().
+    // Keep this behind `if (p)`: completeSending() also runs on every setStandby(), where a hook
+    // undoing its own pre-TX switch would recurse back through reconfigure().
+    if (p)
         RadioTxHooks::packetReleased(this, p);
+    return p;
+}
 
-        // We are done sending that packet, release it
-        packetPool.release(p);
+void RadioLibInterface::finishSentPacket(meshtastic_MeshPacket *p)
+{
+    if (!p)
+        return;
 #ifdef BENCH_KNOBS
-        benchGapMark(GAP_RELEASED);
+    benchGapId = p->id;
+    benchGapMark(GAP_AIR0);
 #endif
-    }
+    // Packet has been sent, count it toward our TX airtime utilization.
+    uint32_t xmitMsec = getPacketTime(p);
+    airTime->logAirtime(TX_LOG, xmitMsec);
+#ifdef BENCH_KNOBS
+    benchGapMark(GAP_AIR);
+#endif
+
+    txGood++;
+    if (!isFromUs(p))
+        txRelay++;
+#ifdef BENCH_KNOBS
+    benchGapMark(GAP_LOG);
+#endif
+    printPacket("Completed sending", p);
+#ifdef BENCH_KNOBS
+    benchGapMark(GAP_LOGGED);
+#endif
+
+    // We are done sending that packet, release it
+    packetPool.release(p);
+#ifdef BENCH_KNOBS
+    benchGapMark(GAP_RELEASED);
+#endif
 }
 
 #ifdef BENCH_KNOBS
 void RadioLibInterface::benchGapBegin()
 {
-    benchTxNotify = true;
     benchGapTiming = benchKnobs.txGap;
     const uint32_t now = benchTicks();
     for (uint32_t &t : benchGapT)
@@ -1105,23 +1113,7 @@ void RadioLibInterface::benchGapBegin()
 
 void RadioLibInterface::benchGapEnd()
 {
-    benchTxNotify = false;
-    const bool deferred = benchDeferredTx != nullptr;
-    if (deferred) {
-        meshtastic_MeshPacket *p = benchDeferredTx;
-        benchDeferredTx = nullptr;
-        benchGapMark(GAP_AIR0);
-        airTime->logAirtime(TX_LOG, getPacketTime(p));
-        benchGapMark(GAP_AIR);
-        txGood++;
-        if (!isFromUs(p))
-            txRelay++;
-        benchGapMark(GAP_LOG);
-        printPacket("Completed sending", p);
-        benchGapMark(GAP_LOGGED);
-        packetPool.release(p);
-        benchGapMark(GAP_RELEASED);
-    }
+    const bool early = benchKnobs.txArm == BenchKnobs::TXARM_EARLY;
     if (!benchGapTiming)
         return;
     benchGapTiming = false;
@@ -1134,7 +1126,7 @@ void RadioLibInterface::benchGapEnd()
     const long rxUs = benchGapSplitArm ? (long)us(t[GAP_STANDBY], t[GAP_ARMED]) : -1;
     LOG_INFO("BENCH txgap id=%08lx order=%s isr=%d wake=%lu air=%lu log=%lu rel=%lu hook=%lu arm=%lu (notify=%ld stby=%ld "
              "rx=%ld) total=%lu",
-             (unsigned long)benchGapId, deferred ? "early" : "default", benchGapFromIsr ? 1 : 0, us(benchGapStart, t[GAP_WAKE]),
+             (unsigned long)benchGapId, early ? "early" : "late", benchGapFromIsr ? 1 : 0, us(benchGapStart, t[GAP_WAKE]),
              us(t[GAP_AIR0], t[GAP_AIR]), us(t[GAP_LOG], t[GAP_LOGGED]), us(t[GAP_LOGGED], t[GAP_RELEASED]),
              us(t[GAP_HOOK0], t[GAP_HOOK]), us(t[GAP_HOOK], t[GAP_ARMED]), notifyUs, stbyUs, rxUs,
              us(benchGapStart, t[GAP_ARMED]));
@@ -1401,6 +1393,16 @@ void RadioLibInterface::periodicRadioMaintenance()
             startReceive();
         return; // a chip just re-inited (or still dead) has no use for an AGC reset this tick
     }
+    // resetAGC() ends in startReceive(), whose standby would run a queued packet's TX delay, start it and cut it off.
+#ifdef BENCH_KNOBS
+    if (benchKnobs.agcQ && hasQueuedTx()) { // agcq=0 brings back develop's clobber for A/B
+        LOG_DEBUG("BENCH AGC reset skipped: TX queued");
+        return;
+    }
+#else
+    if (hasQueuedTx())
+        return;
+#endif
 
 #ifdef BENCH_KNOBS
     if (benchKnobs.agcMs < 0)

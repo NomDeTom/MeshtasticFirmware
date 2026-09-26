@@ -184,15 +184,20 @@ template <typename T> bool SX126xInterface<T>::reinitChip()
         res = lora.setDio2AsRfSwitch(dio2AsRfSwitch);
         LOG_DEBUG("Set DIO2 as %sRF switch, result: %d", dio2AsRfSwitch ? "" : "not ", res);
     }
-#ifdef BENCH_KNOBS
-    // The xosc/tcxo knobs, applied at every init so their defaults hold from boot and after a chip recovery.
     if (res == RADIOLIB_ERR_NONE && tcxoVoltage > 0) {
+        // Standby and TX/RX fallback on STDBY_XOSC keep the TCXO powered: from STDBY_RC every SetRx and SetTx
+        // first waits out the TCXO start-up delay (5 ms by RadioLib's default).
+#ifdef BENCH_KNOBS
+        // The xosc/tcxo knobs, applied at every init so they hold from boot and after a chip recovery.
         if (benchKnobs.tcxoUs)
             lora.setTCXO(tcxoVoltage, benchKnobs.tcxoUs);
-        const int16_t xoscRes = lora.setStandbyXOSC(benchKnobs.xosc);
-        LOG_DEBUG("BENCH osc at init: xosc=%d tcxo=%u, result: %d", benchKnobs.xosc ? 1 : 0, benchKnobs.tcxoUs, xoscRes);
-    }
+        const bool keepTcxo = benchKnobs.xosc;
+#else
+        const bool keepTcxo = true;
 #endif
+        const int16_t xoscRes = lora.setStandbyXOSC(keepTcxo);
+        LOG_DEBUG("Keep TCXO on in standby: %d, result: %d", keepTcxo ? 1 : 0, xoscRes);
+    }
 
 // If a pin isn't defined, we set it to RADIOLIB_NC, it is safe to always do external RF switching with RADIOLIB_NC as it has
 // no effect
@@ -675,12 +680,6 @@ template <typename T> void SX126xInterface<T>::resetAGC()
     // Safety: don't reset mid-packet
     if (sendingPacket != NULL || (isReceiving && isActivelyReceiving()))
         return;
-#ifdef BENCH_KNOBS
-    if (benchKnobs.agcQ && hasQueuedTx()) {
-        LOG_DEBUG("BENCH AGC reset skipped: TX queued");
-        return;
-    }
-#endif
 
     LOG_DEBUG("SX126x AGC reset: warm sleep + Calibrate(0x7F)");
 
