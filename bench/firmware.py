@@ -82,7 +82,9 @@ class Image:
 
     def describe(self) -> str:
         when = time.strftime("%Y-%m-%d", time.localtime(self.added_at))
-        return f"{self.version:24} {self.board:22} {self.sha256[:12]}  {when}  {self.note}"
+        return (
+            f"{self.version:24} {self.board:22} {self.sha256[:12]}  {when}  {self.note}"
+        )
 
 
 class FirmwareStore:
@@ -107,7 +109,9 @@ class FirmwareStore:
     def save(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.index_path.write_text(
-            json.dumps({"images": {k: v.to_dict() for k, v in self.images.items()}}, indent=2),
+            json.dumps(
+                {"images": {k: v.to_dict() for k, v in self.images.items()}}, indent=2
+            ),
             encoding="utf-8",
         )
 
@@ -131,9 +135,15 @@ class FirmwareStore:
         (self.root / stored).write_bytes(payload)
 
         image = Image(
-            sha256=digest, filename=stored, board=board, version=version,
-            source=source, bytes=len(payload), added_at=time.time(),
-            note=note, tags=list(tags or []),
+            sha256=digest,
+            filename=stored,
+            board=board,
+            version=version,
+            source=source,
+            bytes=len(payload),
+            added_at=time.time(),
+            note=note,
+            tags=list(tags or []),
         )
         self.images[digest] = image
         self.save()
@@ -142,8 +152,12 @@ class FirmwareStore:
     def add_file(self, path: Path, board: str, version: str, note: str = "") -> Image:
         path = Path(path)
         return self.add_bytes(
-            path.read_bytes(), path.name, board, version,
-            source=f"file:{path}", note=note,
+            path.read_bytes(),
+            path.name,
+            board,
+            version,
+            source=f"file:{path}",
+            note=note,
         )
 
     # -- fetching from upstream ------------------------------------------------
@@ -164,14 +178,18 @@ class FirmwareStore:
         """
         arch = _arch_for(board_env)
         release, asset = self._release_with_asset(
-            tag, allow_prerelease or prerelease_only, arch, timeout,
+            tag,
+            allow_prerelease or prerelease_only,
+            arch,
+            timeout,
             prerelease_only=prerelease_only,
         )
 
         blob = _get(asset["browser_download_url"], timeout)
         archive = zipfile.ZipFile(io.BytesIO(blob))
         wanted = [
-            n for n in archive.namelist()
+            n
+            for n in archive.namelist()
             if Path(n).name.startswith(f"firmware-{board_env}-") and n.endswith(".uf2")
         ]
         if not wanted:
@@ -184,12 +202,24 @@ class FirmwareStore:
             board=_board_slug(board_env),
             version=release["tag_name"],
             source=asset["browser_download_url"],
-            note="upstream prerelease" if release.get("prerelease") else "upstream release",
-            tags=["upstream", "alpha" if release.get("prerelease") else "stable", "known-good"],
+            note=(
+                "upstream prerelease"
+                if release.get("prerelease")
+                else "upstream release"
+            ),
+            tags=[
+                "upstream",
+                "alpha" if release.get("prerelease") else "stable",
+                "known-good",
+            ],
         )
 
     def _release_with_asset(
-        self, tag: str | None, allow_prerelease: bool, arch: str, timeout: float,
+        self,
+        tag: str | None,
+        allow_prerelease: bool,
+        arch: str,
+        timeout: float,
         prerelease_only: bool = False,
     ) -> tuple[dict, dict]:
         """The newest release that actually carries an image for this architecture.
@@ -200,11 +230,21 @@ class FirmwareStore:
         fetch.
         """
         if tag:
-            releases = [json.loads(_get(
-                f"https://api.github.com/repos/{UPSTREAM}/releases/tags/{tag}", timeout))]
+            releases = [
+                json.loads(
+                    _get(
+                        f"https://api.github.com/repos/{UPSTREAM}/releases/tags/{tag}",
+                        timeout,
+                    )
+                )
+            ]
         else:
-            releases = json.loads(_get(
-                f"https://api.github.com/repos/{UPSTREAM}/releases?per_page=25", timeout))
+            releases = json.loads(
+                _get(
+                    f"https://api.github.com/repos/{UPSTREAM}/releases?per_page=25",
+                    timeout,
+                )
+            )
 
         skipped: list[str] = []
         for release in releases:
@@ -217,8 +257,12 @@ class FirmwareStore:
             if prerelease_only and not pre:
                 continue
             asset = next(
-                (a for a in release.get("assets", [])
-                 if a["name"].startswith(f"firmware-{arch}-") and a["name"].endswith(".zip")),
+                (
+                    a
+                    for a in release.get("assets", [])
+                    if a["name"].startswith(f"firmware-{arch}-")
+                    and a["name"].endswith(".zip")
+                ),
                 None,
             )
             if asset is not None:
@@ -226,7 +270,11 @@ class FirmwareStore:
             skipped.append(release["tag_name"])
         raise FirmwareError(
             f"no release carries a firmware-{arch} archive"
-            + (f" (skipped, not yet published: {', '.join(skipped[:4])})" if skipped else "")
+            + (
+                f" (skipped, not yet published: {', '.join(skipped[:4])})"
+                if skipped
+                else ""
+            )
         )
 
     # -- using -----------------------------------------------------------------
@@ -239,7 +287,9 @@ class FirmwareStore:
         except OSError:
             return False
 
-    def get(self, board: str, version: str | None = None, channel: str | None = None) -> Image:
+    def get(
+        self, board: str, version: str | None = None, channel: str | None = None
+    ) -> Image:
         """The newest verified image for a board, or a specific version.
 
         Raises rather than returning None: a scenario asking for a known-good image and
@@ -248,7 +298,8 @@ class FirmwareStore:
         """
         board_key = _norm(board)
         found = [
-            img for img in self.images.values()
+            img
+            for img in self.images.values()
             if _norm(img.board) == board_key
             and (version is None or img.version == version)
             # "stable" and "alpha" are different questions. Newest-wins across both would

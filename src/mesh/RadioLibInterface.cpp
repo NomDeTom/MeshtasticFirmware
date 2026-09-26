@@ -827,21 +827,27 @@ void RadioLibInterface::completeSending()
 #endif
 
     if (p) {
+#ifdef BENCH_KNOBS
+        benchGapId = p->id;
+        if (benchTxNotify && benchKnobs.txArm == BenchKnobs::TXARM_EARLY) {
+            // Undo the pre-TX switch now so RX re-arms on the home config; account, log and release after the arm.
+            RadioTxHooks::packetReleased(this, p);
+            benchDeferredTx = p;
+            return;
+        }
+        benchGapMark(GAP_AIR0);
+#endif
         // Packet has been sent, count it toward our TX airtime utilization.
         uint32_t xmitMsec = getPacketTime(p);
         airTime->logAirtime(TX_LOG, xmitMsec);
+#ifdef BENCH_KNOBS
+        benchGapMark(GAP_AIR);
+#endif
 
         txGood++;
         if (!isFromUs(p))
             txRelay++;
 #ifdef BENCH_KNOBS
-        benchGapId = p->id;
-        if (benchTxNotify && benchKnobs.txArm == BenchKnobs::TXARM_EARLY) {
-            // Undo the pre-TX switch now so RX re-arms on the home config; log and release after the arm.
-            RadioTxHooks::packetReleased(this, p);
-            benchDeferredTx = p;
-            return;
-        }
         benchGapMark(GAP_LOG);
 #endif
         printPacket("Completed sending", p);
@@ -868,6 +874,7 @@ void RadioLibInterface::benchGapBegin()
     const uint32_t now = benchTicks();
     for (uint32_t &t : benchGapT)
         t = now; // a step that never runs reads as 0 us
+    benchGapSplitArm = false;
     benchGapFromIsr = benchGapHaveIsr;
     benchGapHaveIsr = false;
     benchGapStart = benchGapFromIsr ? benchGapIsr : now;
@@ -881,6 +888,12 @@ void RadioLibInterface::benchGapEnd()
     if (deferred) {
         meshtastic_MeshPacket *p = benchDeferredTx;
         benchDeferredTx = nullptr;
+        benchGapMark(GAP_AIR0);
+        airTime->logAirtime(TX_LOG, getPacketTime(p));
+        benchGapMark(GAP_AIR);
+        txGood++;
+        if (!isFromUs(p))
+            txRelay++;
         benchGapMark(GAP_LOG);
         printPacket("Completed sending", p);
         benchGapMark(GAP_LOGGED);
@@ -892,11 +905,17 @@ void RadioLibInterface::benchGapEnd()
     benchGapTiming = false;
     const uint32_t *t = benchGapT;
     auto us = [](uint32_t from, uint32_t to) { return (unsigned long)benchTicksToUs(to - from); };
-    // total is ISR (or wake, when isr=0) to RX armed; with order=early, log and rel land after the arm.
-    LOG_INFO("BENCH txgap id=%08lx order=%s isr=%d wake=%lu log=%lu rel=%lu hook=%lu arm=%lu total=%lu",
+    // total is ISR (or wake, when isr=0) to RX armed; with order=early, air, log and rel land after the arm.
+    // arm = notify + stby + rx where the driver splits it (SX126x); elsewhere those three read -1.
+    const long notifyUs = benchGapSplitArm ? (long)us(t[GAP_HOOK], t[GAP_NOTIFIED]) : -1;
+    const long stbyUs = benchGapSplitArm ? (long)us(t[GAP_NOTIFIED], t[GAP_STANDBY]) : -1;
+    const long rxUs = benchGapSplitArm ? (long)us(t[GAP_STANDBY], t[GAP_ARMED]) : -1;
+    LOG_INFO("BENCH txgap id=%08lx order=%s isr=%d wake=%lu air=%lu log=%lu rel=%lu hook=%lu arm=%lu (notify=%ld stby=%ld "
+             "rx=%ld) total=%lu",
              (unsigned long)benchGapId, deferred ? "early" : "default", benchGapFromIsr ? 1 : 0, us(benchGapStart, t[GAP_WAKE]),
-             us(t[GAP_LOG], t[GAP_LOGGED]), us(t[GAP_LOGGED], t[GAP_RELEASED]), us(t[GAP_HOOK0], t[GAP_HOOK]),
-             us(t[GAP_HOOK], t[GAP_ARMED]), us(benchGapStart, t[GAP_ARMED]));
+             us(t[GAP_AIR0], t[GAP_AIR]), us(t[GAP_LOG], t[GAP_LOGGED]), us(t[GAP_LOGGED], t[GAP_RELEASED]),
+             us(t[GAP_HOOK0], t[GAP_HOOK]), us(t[GAP_HOOK], t[GAP_ARMED]), notifyUs, stbyUs, rxUs,
+             us(benchGapStart, t[GAP_ARMED]));
 }
 #endif
 

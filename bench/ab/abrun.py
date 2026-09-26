@@ -10,6 +10,7 @@ reboots while it holds them.
   python abrun.py contend PRESETKEY LABEL --pairs N --interval S
   python abrun.py identify --count N
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,7 +35,9 @@ NODES = {  # name -> USB serial number
     "lr": "06E3F87E62341649",
     "w2": "962A7036E02D0A91",
 }
-ROLES_FILE = Path(__file__).with_name("roles.json")  # optional override of NODES after identify
+ROLES_FILE = Path(__file__).with_name(
+    "roles.json"
+)  # optional override of NODES after identify
 if ROLES_FILE.exists():
     NODES.update(json.loads(ROLES_FILE.read_text()))
 
@@ -69,8 +72,12 @@ def port_of(name: str) -> str | None:
 
 def cli(port: str, *args: str, timeout: float = 90.0) -> tuple[int, str]:
     try:
-        r = subprocess.run(["meshtastic", "--port", port, *args], capture_output=True,
-                           text=True, timeout=timeout)
+        r = subprocess.run(
+            ["meshtastic", "--port", port, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
         return r.returncode, r.stdout + r.stderr
     except subprocess.TimeoutExpired as e:
         return 124, (e.stdout or "") if isinstance(e.stdout, str) else "timeout"
@@ -90,11 +97,19 @@ def wait_answering(name: str, budget: float = 180.0) -> str:
 
 # -- flash ----------------------------------------------------------------------------
 
+
 def uf2_drives() -> set[str]:
-    return {f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\INFO_UF2.TXT")}
+    return {
+        f"{d}:\\"
+        for d in string.ascii_uppercase
+        if os.path.exists(f"{d}:\\INFO_UF2.TXT")
+    }
 
 
-NRFUTIL = [sys.executable, str(Path.home() / ".platformio/packages/tool-adafruit-nrfutil/adafruit-nrfutil.py")]
+NRFUTIL = [
+    sys.executable,
+    str(Path.home() / ".platformio/packages/tool-adafruit-nrfutil/adafruit-nrfutil.py"),
+]
 
 
 def flash(name: str, image: Path) -> None:
@@ -117,20 +132,41 @@ def flash(name: str, image: Path) -> None:
         time.sleep(1)
     dport = port_of(name)
     log(f"{name}: serial DFU {pkg.name} on {dport}")
-    r = subprocess.run([*NRFUTIL, "dfu", "serial", "--package", str(pkg), "-p", dport, "-b", "115200",
-                        "--singlebank"], capture_output=True, text=True, timeout=300)
+    r = subprocess.run(
+        [
+            *NRFUTIL,
+            "dfu",
+            "serial",
+            "--package",
+            str(pkg),
+            "-p",
+            dport,
+            "-b",
+            "115200",
+            "--singlebank",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
     if "Device programmed" not in r.stdout + r.stderr:
-        raise RuntimeError(f"{name}: nrfutil failed rc={r.returncode}: {(r.stdout + r.stderr)[-400:]}")
+        raise RuntimeError(
+            f"{name}: nrfutil failed rc={r.returncode}: {(r.stdout + r.stderr)[-400:]}"
+        )
     time.sleep(5)
     out = wait_answering(name)
     ver = re.search(r'"firmwareVersion": "([^"]+)"', out)
-    log(f"{name}: answering, firmware {ver.group(1) if ver else '?'} ({time.time()-t0:.0f}s)")
+    log(
+        f"{name}: answering, firmware {ver.group(1) if ver else '?'} ({time.time()-t0:.0f}s)"
+    )
 
 
 # -- provision ------------------------------------------------------------------------
 
+
 def enum_value(field: str, name: str) -> int:
     from meshtastic.protobuf import config_pb2
+
     enums = {
         "lora.region": config_pb2.Config.LoRaConfig.RegionCode,
         "lora.modem_preset": config_pb2.Config.LoRaConfig.ModemPreset,
@@ -170,7 +206,9 @@ def provision(name: str, key: str, tx: bool) -> dict:
         rc, out = cli(port_of(name), *args)
         if rc != 0:
             log(f"{name}: set failed rc={rc}: {out[-300:]}")
-        time.sleep(8)  # config commits reboot the node; let it leave before we look for it
+        time.sleep(
+            8
+        )  # config commits reboot the node; let it leave before we look for it
         wait_answering(name)
     raise RuntimeError(f"{name}: config would not settle to {key}")
 
@@ -200,6 +238,7 @@ def same(key: str, have: str | None, want) -> bool:
 
 # -- contention / identify ------------------------------------------------------------
 
+
 class Rig:
     """Holds all four nodes for one measurement. Nothing reboots while it is open."""
 
@@ -213,7 +252,9 @@ class Rig:
         self.name_of = {}
         self.last_offset = {}
         self.dead = set()
-        self.rx_texts = []  # (node, text) of every decoded frame, for in-run health checks
+        self.rx_texts = (
+            []
+        )  # (node, text) of every decoded frame, for in-run health checks
         pub.subscribe(self.on_receive, "meshtastic.receive")
         pub.subscribe(self.on_log, "meshtastic.log.line")
         for n in names:
@@ -221,9 +262,15 @@ class Rig:
             iface = si.SerialInterface(devPath=port)
             self.ifaces[n] = iface
             self.name_of[id(iface)] = n
-            self.write({"kind": "open", "node": n, "port": port,
-                        "num": iface.myInfo.my_node_num if iface.myInfo else None,
-                        "fw": getattr(iface.metadata, "firmware_version", None)})
+            self.write(
+                {
+                    "kind": "open",
+                    "node": n,
+                    "port": port,
+                    "num": iface.myInfo.my_node_num if iface.myInfo else None,
+                    "fw": getattr(iface.metadata, "firmware_version", None),
+                }
+            )
 
     def write(self, d):
         d["ts"] = time.time()
@@ -238,29 +285,52 @@ class Rig:
         m = re.search(r"Corrected frequency offset: (-?[\d.]+)", line)
         if m:
             self.last_offset[n] = float(m.group(1))
-        if n and ("frequency offset" in line or "CAD" in line or "busy" in line.lower() or "BENCH" in line
-                  or "RSSI look" in line):
+        if n and (
+            "frequency offset" in line
+            or "CAD" in line
+            or "busy" in line.lower()
+            or "BENCH" in line
+            or "RSSI look" in line
+        ):
             self.write({"kind": "log", "node": n, "line": line[:200]})
 
     def on_receive(self, packet, interface):
         n = self.name_of.get(id(interface))
         dec = packet.get("decoded", {})
-        text = dec.get("text") or (dec["payload"].decode("utf-8", "replace")
-                                   if dec.get("portnum") == "PRIVATE_APP" and isinstance(dec.get("payload"), bytes) else None)
+        text = dec.get("text") or (
+            dec["payload"].decode("utf-8", "replace")
+            if dec.get("portnum") == "PRIVATE_APP"
+            and isinstance(dec.get("payload"), bytes)
+            else None
+        )
         if text:
             self.rx_texts.append((n, text))
-        self.write({
-            "kind": "rx", "node": n, "from": packet.get("from"), "id": packet.get("id"),
-            "portnum": dec.get("portnum"),
-            "text": dec.get("text") or (dec["payload"].decode("utf-8", "replace")
-                                        if dec.get("portnum") == "PRIVATE_APP" and isinstance(dec.get("payload"), bytes) else None),
-            "snr": packet.get("rxSnr"), "rssi": packet.get("rxRssi"),
-            "offset": self.last_offset.pop(n, None),
-        })
+        self.write(
+            {
+                "kind": "rx",
+                "node": n,
+                "from": packet.get("from"),
+                "id": packet.get("id"),
+                "portnum": dec.get("portnum"),
+                "text": dec.get("text")
+                or (
+                    dec["payload"].decode("utf-8", "replace")
+                    if dec.get("portnum") == "PRIVATE_APP"
+                    and isinstance(dec.get("payload"), bytes)
+                    else None
+                ),
+                "snr": packet.get("rxSnr"),
+                "rssi": packet.get("rxRssi"),
+                "offset": self.last_offset.pop(n, None),
+            }
+        )
 
-    def send(self, n: str, text: str, timeout: float = 10.0, port: str | None = None) -> bool:
+    def send(
+        self, n: str, text: str, timeout: float = 10.0, port: str | None = None
+    ) -> bool:
         """sendText with a bound. The library blocks forever on a node whose API stopped answering;
-        such a node is declared dead, logged, and skipped from then on rather than stalling the run."""
+        such a node is declared dead, logged, and skipped from then on rather than stalling the run.
+        """
         if n in self.dead:
             return False
         done = threading.Event()
@@ -269,7 +339,10 @@ class Rig:
             try:
                 if port == "private" and not text.startswith("!bench"):
                     from meshtastic.protobuf import portnums_pb2
-                    self.ifaces[n].sendData(text.encode(), portNum=portnums_pb2.PortNum.PRIVATE_APP)
+
+                    self.ifaces[n].sendData(
+                        text.encode(), portNum=portnums_pb2.PortNum.PRIVATE_APP
+                    )
                 else:
                     self.ifaces[n].sendText(text)
             finally:
@@ -280,15 +353,25 @@ class Rig:
             return True
         self.dead.add(n)
         self.write({"kind": "dead", "node": n, "while": text[:60]})
-        log(f"{n}: API not answering within {timeout:.0f}s - declared dead, skipped from now on")
+        log(
+            f"{n}: API not answering within {timeout:.0f}s - declared dead, skipped from now on"
+        )
         return False
 
     def send_pair(self, names, text_of, timeout=15.0):
         self.send_round({n: 0.0 for n in names}, text_of, timeout=timeout)
 
-    def send_round(self, offsets: dict, text_of, burst: int = 1, timeout=15.0, port: str | None = None):
+    def send_round(
+        self,
+        offsets: dict,
+        text_of,
+        burst: int = 1,
+        timeout=15.0,
+        port: str | None = None,
+    ):
         """Release every sender from one barrier; sender n then waits offsets[n] seconds and queues
-        `burst` messages back to back. text_of(n) or text_of(n, b) names each message."""
+        `burst` messages back to back. text_of(n) or text_of(n, b) names each message.
+        """
         barrier = threading.Barrier(len(offsets))
 
         def go(n):
@@ -308,18 +391,27 @@ class Rig:
 
     def close(self):
         from pubsub import pub
-        for topic, fn in (("meshtastic.receive", self.on_receive), ("meshtastic.log.line", self.on_log)):
+
+        for topic, fn in (
+            ("meshtastic.receive", self.on_receive),
+            ("meshtastic.log.line", self.on_log),
+        ):
             try:
                 pub.unsubscribe(fn, topic)
             except Exception:  # noqa: BLE001
                 pass
+
         # the library's close() can block forever on a node whose API died; bound it
         def shut(iface):
             try:
                 iface.close()
             except Exception:  # noqa: BLE001
                 pass
-        ts = [threading.Thread(target=shut, args=(i,), daemon=True) for i in self.ifaces.values()]
+
+        ts = [
+            threading.Thread(target=shut, args=(i,), daemon=True)
+            for i in self.ifaces.values()
+        ]
         for t in ts:
             t.start()
         for t in ts:
@@ -328,13 +420,26 @@ class Rig:
             self.rec.close()
 
 
-def contend(key: str, label: str, pairs: int, interval: float, settle: float = 20.0, size=None) -> Path:
+def contend(
+    key: str, label: str, pairs: int, interval: float, settle: float = 20.0, size=None
+) -> Path:
     OUT.mkdir(parents=True, exist_ok=True)
     rec = OUT / f"C-{key}-{label}-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     rig = Rig(SENDERS + WITNESSES, rec)
     try:
-        rig.write({"kind": "row", "key": key, "label": label, "pairs": pairs, "interval": interval,
-                   "air": AIR[key], "senders": SENDERS, "witnesses": WITNESSES, "nodes": NODES})
+        rig.write(
+            {
+                "kind": "row",
+                "key": key,
+                "label": label,
+                "pairs": pairs,
+                "interval": interval,
+                "air": AIR[key],
+                "senders": SENDERS,
+                "witnesses": WITNESSES,
+                "nodes": NODES,
+            }
+        )
         log(f"settling {settle:.0f}s")
         time.sleep(settle)
         for i in range(pairs):
@@ -355,9 +460,17 @@ HEADER_B, DATA_OVERHEAD_B, MAX_ONAIR_B = 16, 6, 249
 
 def airtime_s(key: str, onair_b: int) -> float:
     import math
-    sf, bw, cr = {"SF": (7, 250, 5), "NF": (7, 62.5, 6), "NS": (8, 62.5, 6), "SS": (8, 250, 5),
-                  "MF": (9, 250, 5), "MS": (10, 250, 5), "LM": (11, 125, 8)}[key]
-    ts = 2 ** sf / (bw * 1e3)
+
+    sf, bw, cr = {
+        "SF": (7, 250, 5),
+        "NF": (7, 62.5, 6),
+        "NS": (8, 62.5, 6),
+        "SS": (8, 250, 5),
+        "MF": (9, 250, 5),
+        "MS": (10, 250, 5),
+        "LM": (11, 125, 8),
+    }[key]
+    ts = 2**sf / (bw * 1e3)
     de = 1 if ts > 0.016 else 0
     n = 8 + max(math.ceil((8 * onair_b - 4 * sf + 44) / (4 * (sf - 2 * de))) * cr, 0)
     return (16 + 4.25 + n) * ts
@@ -373,11 +486,15 @@ def padded(base: str, size) -> str:
 
 def split_knobs(knobs: str):
     toks = knobs.split()
-    return (" ".join(t for t in toks if t.split("=")[0] in RADIO_KNOBS),
-            " ".join(t for t in toks if t.split("=")[0] not in RADIO_KNOBS))
+    return (
+        " ".join(t for t in toks if t.split("=")[0] in RADIO_KNOBS),
+        " ".join(t for t in toks if t.split("=")[0] not in RADIO_KNOBS),
+    )
 
 
-def sweep(key: str, variants: list, pairs: int, interval: float, settle: float = 15.0) -> Path:
+def sweep(
+    key: str, variants: list, pairs: int, interval: float, settle: float = 15.0
+) -> Path:
     """One Rig session, many variants. Requires the BENCH_KNOBS image.
 
     A variant is [label, knobs] or an object:
@@ -403,76 +520,139 @@ def sweep(key: str, variants: list, pairs: int, interval: float, settle: float =
     rec = OUT / f"S-{key}-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     rig = Rig(everyone, rec)
     try:
-        rig.write({"kind": "row", "key": key, "label": "sweep", "pairs": pairs, "interval": interval,
-                   "air": AIR[key], "nodes": NODES, "variants": variants})
+        rig.write(
+            {
+                "kind": "row",
+                "key": key,
+                "label": "sweep",
+                "pairs": pairs,
+                "interval": interval,
+                "air": AIR[key],
+                "nodes": NODES,
+                "variants": variants,
+            }
+        )
         time.sleep(settle)
         deadline = None
-        dl_file = Path(__file__).with_name("deadline.txt")  # overrides AB_DEADLINE for chains already running
+        dl_file = Path(__file__).with_name(
+            "deadline.txt"
+        )  # overrides AB_DEADLINE for chains already running
         if dl_file.exists():
             os.environ["AB_DEADLINE"] = dl_file.read_text().strip()
         if os.environ.get("AB_DEADLINE"):
             hh, mm = map(int, os.environ["AB_DEADLINE"].split(":"))
             now = time.localtime()
-            deadline = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, hh, mm, 0, 0, 0, -1))
+            deadline = time.mktime(
+                (now.tm_year, now.tm_mon, now.tm_mday, hh, mm, 0, 0, 0, -1)
+            )
             if deadline < time.time():
                 deadline += 86400
         done_path = Path(os.environ["AB_DONE"]) if os.environ.get("AB_DONE") else None
-        done = set(done_path.read_text().split()) if done_path and done_path.exists() else set()
+        done = (
+            set(done_path.read_text().split())
+            if done_path and done_path.exists()
+            else set()
+        )
         for v in variants:
             if (v["label"] if isinstance(v, dict) else v[0]) in done:
                 continue
             if deadline and time.time() > deadline:
-                log(f"deadline {os.environ['AB_DEADLINE']} passed; skipping the remaining variants")
+                log(
+                    f"deadline {os.environ['AB_DEADLINE']} passed; skipping the remaining variants"
+                )
                 break
-            v = {"label": v[0], "knobs": v[1]} if isinstance(v, (list, tuple)) else dict(v)
+            v = (
+                {"label": v[0], "knobs": v[1]}
+                if isinstance(v, (list, tuple))
+                else dict(v)
+            )
             label, knobs = v["label"], v.get("knobs", "")
             senders = list(v.get("senders", SENDERS))
             interferers = list(v.get("interferers", []))
             size, burst = v.get("size"), int(v.get("burst", 1))
-            n_pairs, gap = int(v.get("pairs", pairs)), float(v.get("interval", interval))
+            n_pairs, gap = int(v.get("pairs", pairs)), float(
+                v.get("interval", interval)
+            )
             radio, lbt = split_knobs(knobs)
             for n in everyone:
                 if n in plain:
                     continue
-                parts = ["!bench reset", global_knobs, radio, lbt if n in senders else "",
-                         v.get("node_knobs", {}).get(n, "")]
+                parts = [
+                    "!bench reset",
+                    global_knobs,
+                    radio,
+                    lbt if n in senders else "",
+                    v.get("node_knobs", {}).get(n, ""),
+                ]
                 cmd = " ".join(x for x in parts if x)
                 if rig.send(n, cmd):
                     rig.write({"kind": "knob", "node": n, "label": label, "cmd": cmd})
-            frame = HEADER_B + DATA_OVERHEAD_B + len(padded(f"C-{key}-{label}-peer-{n_pairs}", size))
+            frame = (
+                HEADER_B
+                + DATA_OVERHEAD_B
+                + len(padded(f"C-{key}-{label}-peer-{n_pairs}", size))
+            )
             skew_s = float(v.get("skew", 0)) * airtime_s(key, frame)
             order = senders + interferers
             offsets = {n: j * skew_s for j, n in enumerate(order)}
             jammer, jam_ms = v.get("jammer"), int(v.get("jam_ms", 0))
             if jammer and jam_ms:
                 offsets[jammer] = float(v.get("jam_at", 0.5)) * airtime_s(key, frame)
-            rig.write({"kind": "variant", **v, "frame_b": frame, "skew_s": skew_s, "offsets": offsets})
-            log(f"variant {label}: senders={senders} interferers={interferers} jammer={jammer}:{jam_ms}ms ~{frame}B "
-                f"skew={skew_s * 1000:.0f}ms burst={burst} knobs='{knobs}' node_knobs={v.get('node_knobs', {})}")
+            rig.write(
+                {
+                    "kind": "variant",
+                    **v,
+                    "frame_b": frame,
+                    "skew_s": skew_s,
+                    "offsets": offsets,
+                }
+            )
+            log(
+                f"variant {label}: senders={senders} interferers={interferers} jammer={jammer}:{jam_ms}ms ~{frame}B "
+                f"skew={skew_s * 1000:.0f}ms burst={burst} knobs='{knobs}' node_knobs={v.get('node_knobs', {})}"
+            )
             time.sleep(4)
             skews, rotate = v.get("skews"), bool(v.get("rotate"))
             for i in range(n_pairs):
                 if skews or rotate:
-                    sk = float(skews[i % len(skews)]) * airtime_s(key, frame) if skews else skew_s
+                    sk = (
+                        float(skews[i % len(skews)]) * airtime_s(key, frame)
+                        if skews
+                        else skew_s
+                    )
                     r = i % len(order) if rotate else 0
                     offsets = {n: j * sk for j, n in enumerate(order[r:] + order[:r])}
-                    rig.write({"kind": "sround", "label": label, "i": i, "offsets": offsets})
+                    rig.write(
+                        {"kind": "sround", "label": label, "i": i, "offsets": offsets}
+                    )
+
                 def text_of(n, b=0, i=i):
                     if n == jammer and jam_ms:
                         return f"!bench jam={jam_ms}"
                     tag = "J" if n in interferers else "C"
                     return padded(f"{tag}-{key}-{label}-{n}-{i * burst + b}", size)
+
                 rig.send_round(offsets, text_of, burst=burst, port=v.get("port"))
                 time.sleep(gap)
             time.sleep(gap * 2)
             if done_path:
                 # a sender nobody heard, that itself heard nothing, has a stuck radio: stop so the caller can heal it
-                silent = [s for s in senders if s not in plain and n_pairs >= 6
-                          and not any(t.startswith(f"C-{key}-{label}-{s}-") and n != s for n, t in rig.rx_texts)
-                          and not any(n == s and f"-{label}-" in t for n, t in rig.rx_texts)]
+                silent = [
+                    s
+                    for s in senders
+                    if s not in plain
+                    and n_pairs >= 6
+                    and not any(
+                        t.startswith(f"C-{key}-{label}-{s}-") and n != s
+                        for n, t in rig.rx_texts
+                    )
+                    and not any(n == s and f"-{label}-" in t for n, t in rig.rx_texts)
+                ]
                 if silent:
                     rig.write({"kind": "silent", "label": label, "nodes": silent})
-                    log(f"variant {label}: {silent} deaf and mute; stopping for a health check")
+                    log(
+                        f"variant {label}: {silent} deaf and mute; stopping for a health check"
+                    )
                     raise SystemExit(3)
                 with open(done_path, "a") as fh:
                     fh.write(label + chr(10))
@@ -488,7 +668,8 @@ def sweep(key: str, variants: list, pairs: int, interval: float, settle: float =
 def health(names=None, heal=True) -> list:
     """Each node sends two short frames in turn; a node that nobody hears and that hears nobody has a stuck radio
     (seen: peer, 22:53, logging busyRx forever) and is rebooted over the API, then everything is re-checked once.
-    Knobs are reset first so a sweep that died mid-variant cannot leave a node on another syncword or IQ."""
+    Knobs are reset first so a sweep that died mid-variant cannot leave a node on another syncword or IQ.
+    """
     names = list(names or NODES)
     OUT.mkdir(parents=True, exist_ok=True)
     rig = Rig(names, OUT / f"H-{time.strftime('%Y%m%d-%H%M%S')}.jsonl")
@@ -501,15 +682,33 @@ def health(names=None, heal=True) -> list:
                 rig.send(n, f"H-{n}-{k}", port="private")
                 time.sleep(1.5)
         time.sleep(4)
-        heard = {n: sorted({m for m, t in rig.rx_texts if t.startswith(f"H-{n}-") and m != n}) for n in names}
-        hears = {n: sorted({t.split("-")[1] for m, t in rig.rx_texts if m == n and t.startswith("H-")}) for n in names}
+        heard = {
+            n: sorted(
+                {m for m, t in rig.rx_texts if t.startswith(f"H-{n}-") and m != n}
+            )
+            for n in names
+        }
+        hears = {
+            n: sorted(
+                {
+                    t.split("-")[1]
+                    for m, t in rig.rx_texts
+                    if m == n and t.startswith("H-")
+                }
+            )
+            for n in names
+        }
         dead = set(rig.dead)
-        rig.write({"kind": "health", "heard_by": heard, "hears": hears, "dead": sorted(dead)})
+        rig.write(
+            {"kind": "health", "heard_by": heard, "hears": hears, "dead": sorted(dead)}
+        )
     finally:
         rig.close()
     bad = [n for n in names if n in dead or (not heard[n] and not hears[n])]
     for n in names:
-        log(f"health {n}: heard by {heard[n] or '-'}, hears {hears[n] or '-'}{' DEAD API' if n in dead else ''}")
+        log(
+            f"health {n}: heard by {heard[n] or '-'}, hears {hears[n] or '-'}{' DEAD API' if n in dead else ''}"
+        )
     if bad and heal:
         for n in bad:
             log(f"health: rebooting {n}")
@@ -526,7 +725,11 @@ def health(names=None, heal=True) -> list:
     return bad
 
 
-POOL = ("dut", "peer", "w2")  # SX1262 knob nodes that rotate through talker/joiner roles
+POOL = (
+    "dut",
+    "peer",
+    "w2",
+)  # SX1262 knob nodes that rotate through talker/joiner roles
 
 
 def late_sweep(key: str, variants: list, settle: float = 15.0) -> Path:
@@ -546,6 +749,7 @@ def late_sweep(key: str, variants: list, settle: float = 15.0) -> Path:
     witnesses, so timing jitter on the host only moves a round between bins.
     """
     import random
+
     everyone = SENDERS + WITNESSES
     global_knobs = os.environ.get("AB_GLOBAL", "").strip()
     OUT.mkdir(parents=True, exist_ok=True)
@@ -553,19 +757,34 @@ def late_sweep(key: str, variants: list, settle: float = 15.0) -> Path:
     rig = Rig(everyone, rec)
     rnd = random.Random(1)
     try:
-        rig.write({"kind": "row", "key": key, "label": "late", "air": AIR[key], "nodes": NODES, "variants": variants})
+        rig.write(
+            {
+                "kind": "row",
+                "key": key,
+                "label": "late",
+                "air": AIR[key],
+                "nodes": NODES,
+                "variants": variants,
+            }
+        )
         time.sleep(settle)
         for v in variants:
             label, knobs, ways = v["label"], v.get("knobs", ""), int(v.get("ways", 2))
             mode, size = v.get("mode", "deaf"), v.get("size", 249)
             n_rounds, gap = int(v.get("pairs", 40)), float(v.get("interval", 3.0))
-            frame = HEADER_B + DATA_OVERHEAD_B + len(padded(f"C-{key}-{label}-peer-{n_rounds}", size))
+            frame = (
+                HEADER_B
+                + DATA_OVERHEAD_B
+                + len(padded(f"C-{key}-{label}-peer-{n_rounds}", size))
+            )
             air = airtime_s(key, frame)
             fracs = v.get("deaf_fracs", [0.1, 0.25, 0.4, 0.55, 0.7, 0.85, 1.0, 1.2])
             lead = float(v.get("lead_ms", 30)) / 1000.0
-            log(f"late {label}: ways={ways} mode={mode} ~{frame}B air={air * 1000:.0f}ms knobs='{knobs}' {v.get('dc_knobs', '')}")
+            log(
+                f"late {label}: ways={ways} mode={mode} ~{frame}B air={air * 1000:.0f}ms knobs='{knobs}' {v.get('dc_knobs', '')}"
+            )
             for i in range(n_rounds):
-                order = POOL[i % 3:] + POOL[:i % 3]
+                order = POOL[i % 3 :] + POOL[: i % 3]
                 talker, joiners = order[0], list(order[1:ways])
                 # per-round roles: joiners get the LBT knobs (plus the duty cycle), the talker just sends promptly
                 for n in everyone:
@@ -576,8 +795,19 @@ def late_sweep(key: str, variants: list, settle: float = 15.0) -> Path:
                     else:
                         cmd = f"!bench reset {global_knobs}"
                     rig.send(n, " ".join(cmd.split()))
-                time.sleep(2.1)  # PhoneAPI text limit: the next text to each node must be >2 s later
-                rig.write({"kind": "round", "label": label, "i": i, "talker": talker, "joiners": joiners, "air_s": air})
+                time.sleep(
+                    2.1
+                )  # PhoneAPI text limit: the next text to each node must be >2 s later
+                rig.write(
+                    {
+                        "kind": "round",
+                        "label": label,
+                        "i": i,
+                        "talker": talker,
+                        "joiners": joiners,
+                        "air_s": air,
+                    }
+                )
                 barrier = threading.Barrier(1 + len(joiners))
 
                 def go_talker():
@@ -585,24 +815,42 @@ def late_sweep(key: str, variants: list, settle: float = 15.0) -> Path:
                     time.sleep(0.015)
                     t = padded(f"C-{key}-{label}-{talker}-{i}", size)
                     if rig.send(talker, t, port="private"):
-                        rig.write({"kind": "tx", "node": talker, "text": t, "role": "talker"})
+                        rig.write(
+                            {"kind": "tx", "node": talker, "text": t, "role": "talker"}
+                        )
 
                 def go_joiner(j, k):
                     barrier.wait(10)
                     t = padded(f"C-{key}-{label}-{j}-{i}", size)
                     if mode == "deaf":
-                        frac = fracs[(i // 3 + 3 * k) % len(fracs)]  # joiners in one round wake at different points
+                        frac = fracs[
+                            (i // 3 + 3 * k) % len(fracs)
+                        ]  # joiners in one round wake at different points
                         d_ms = int((lead + frac * air) * 1000)
                         rig.send(j, f"!bench deaf={d_ms}")
-                        rig.write({"kind": "deaf", "node": j, "i": i, "label": label, "ms": d_ms, "frac_target": frac})
+                        rig.write(
+                            {
+                                "kind": "deaf",
+                                "node": j,
+                                "i": i,
+                                "label": label,
+                                "ms": d_ms,
+                                "frac_target": frac,
+                            }
+                        )
                         time.sleep(0.03)
                     else:
                         time.sleep(0.015 + lead + rnd.uniform(0.0, 1.0) * air)
                     if rig.send(j, t, port="private"):
-                        rig.write({"kind": "tx", "node": j, "text": t, "role": "joiner"})
+                        rig.write(
+                            {"kind": "tx", "node": j, "text": t, "role": "joiner"}
+                        )
 
                 ts = [threading.Thread(target=go_talker, daemon=True)]
-                ts += [threading.Thread(target=go_joiner, args=(j, k), daemon=True) for k, j in enumerate(joiners)]
+                ts += [
+                    threading.Thread(target=go_joiner, args=(j, k), daemon=True)
+                    for k, j in enumerate(joiners)
+                ]
                 for t in ts:
                     t.start()
                 for t in ts:
@@ -635,24 +883,45 @@ def blast_sweep(key: str, phases: list, settle: float = 10.0) -> Path:
     rec = OUT / f"B-{key}-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     rig = Rig(everyone, rec)
     try:
-        rig.write({"kind": "row", "key": key, "label": "blast", "air": AIR[key], "nodes": NODES, "phases": phases})
+        rig.write(
+            {
+                "kind": "row",
+                "key": key,
+                "label": "blast",
+                "air": AIR[key],
+                "nodes": NODES,
+                "phases": phases,
+            }
+        )
         time.sleep(settle)
         for ph in phases:
             label, blaster = ph["label"], ph.get("blaster")
             for n in everyone:
-                extra = ph.get("blaster_knobs", "") if n == blaster else ph.get("mesh_knobs", "")
+                extra = (
+                    ph.get("blaster_knobs", "")
+                    if n == blaster
+                    else ph.get("mesh_knobs", "")
+                )
                 rig.send(n, " ".join(f"!bench reset {global_knobs} {extra}".split()))
             time.sleep(2.1)
             rig.write({"kind": "variant", "label": label, **ph})
-            log(f"blast phase {label}: {ph.get('dur_s')}s blaster={blaster} '{ph.get('blaster_knobs', '')}' "
-                f"mesh='{ph.get('mesh_knobs', '')}'")
+            log(
+                f"blast phase {label}: {ph.get('dur_s')}s blaster={blaster} '{ph.get('blaster_knobs', '')}' "
+                f"mesh='{ph.get('mesh_knobs', '')}'"
+            )
             t_end = time.time() + float(ph.get("dur_s", 30))
-            feed, pair_every = float(ph.get("feed_s", 0.15)), float(ph.get("pair_every", 3.0))
+            feed, pair_every = float(ph.get("feed_s", 0.15)), float(
+                ph.get("pair_every", 3.0)
+            )
             next_feed, next_pair, i, k = time.time(), time.time() + 1.0, 0, 0
             while time.time() < t_end:
                 now = time.time()
                 if blaster and now >= next_feed:
-                    rig.send(blaster, padded(f"J-{key}-{label}-{blaster}-{k}", ph.get("size", 249)), port="private")
+                    rig.send(
+                        blaster,
+                        padded(f"J-{key}-{label}-{blaster}-{k}", ph.get("size", 249)),
+                        port="private",
+                    )
                     k += 1
                     next_feed = now + feed
                 if now >= next_pair:
@@ -693,18 +962,33 @@ def identify(count: int, interval: float) -> Path:
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    f = sub.add_parser("flash"); f.add_argument("image"); f.add_argument("nodes", nargs="*")
-    p = sub.add_parser("provision"); p.add_argument("key"); p.add_argument("nodes", nargs="*")
+    f = sub.add_parser("flash")
+    f.add_argument("image")
+    f.add_argument("nodes", nargs="*")
+    p = sub.add_parser("provision")
+    p.add_argument("key")
+    p.add_argument("nodes", nargs="*")
     p.add_argument("--all-tx", action="store_true")
-    c = sub.add_parser("contend"); c.add_argument("key"); c.add_argument("label")
-    c.add_argument("--pairs", type=int, default=60); c.add_argument("--interval", type=float, default=4.0)
+    c = sub.add_parser("contend")
+    c.add_argument("key")
+    c.add_argument("label")
+    c.add_argument("--pairs", type=int, default=60)
+    c.add_argument("--interval", type=float, default=4.0)
     c.add_argument("--size", type=int, default=None)
-    w = sub.add_parser("sweep"); w.add_argument("key"); w.add_argument("variants", help="JSON file: [[label, knobs], ...]")
-    w.add_argument("--pairs", type=int, default=30); w.add_argument("--interval", type=float, default=3.0)
-    lt = sub.add_parser("late"); lt.add_argument("key"); lt.add_argument("variants", help="JSON file of late variants")
-    bl = sub.add_parser("blast"); bl.add_argument("key"); bl.add_argument("phases", help="JSON file of blast phases")
+    w = sub.add_parser("sweep")
+    w.add_argument("key")
+    w.add_argument("variants", help="JSON file: [[label, knobs], ...]")
+    w.add_argument("--pairs", type=int, default=30)
+    w.add_argument("--interval", type=float, default=3.0)
+    lt = sub.add_parser("late")
+    lt.add_argument("key")
+    lt.add_argument("variants", help="JSON file of late variants")
+    bl = sub.add_parser("blast")
+    bl.add_argument("key")
+    bl.add_argument("phases", help="JSON file of blast phases")
     sub.add_parser("health")
-    i = sub.add_parser("identify"); i.add_argument("--count", type=int, default=6)
+    i = sub.add_parser("identify")
+    i.add_argument("--count", type=int, default=6)
     i.add_argument("--interval", type=float, default=2.5)
     a = ap.parse_args()
     if a.cmd == "flash":
@@ -716,7 +1000,9 @@ def main():
     elif a.cmd == "contend":
         print(contend(a.key, a.label, a.pairs, a.interval, size=a.size))
     elif a.cmd == "sweep":
-        print(sweep(a.key, json.loads(Path(a.variants).read_text()), a.pairs, a.interval))
+        print(
+            sweep(a.key, json.loads(Path(a.variants).read_text()), a.pairs, a.interval)
+        )
     elif a.cmd == "late":
         print(late_sweep(a.key, json.loads(Path(a.variants).read_text())))
     elif a.cmd == "blast":
@@ -736,7 +1022,9 @@ if __name__ == "__main__":
         code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
     except BaseException:  # noqa: BLE001
         import traceback
+
         traceback.print_exc()
         code = 1
-    sys.stdout.flush(); sys.stderr.flush()
+    sys.stdout.flush()
+    sys.stderr.flush()
     os._exit(code)

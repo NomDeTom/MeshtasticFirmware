@@ -142,7 +142,9 @@ def stream(
                 if on_line is not None:
                     try:
                         on_line(line.rstrip("\n"))
-                    except Exception:  # noqa: BLE001 - a progress hook cannot kill a build
+                    except (
+                        Exception
+                    ):  # noqa: BLE001 - a progress hook cannot kill a build
                         pass
                 if time.monotonic() - started > timeout:
                     proc_handle.kill()

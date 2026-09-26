@@ -82,7 +82,6 @@ def build_lock(root: Path, timeout: float = BUILD_TIMEOUT_S) -> Iterator[Path]:
         lock_path.unlink(missing_ok=True)
 
 
-
 def _lock_owner_is_gone(lock_path: Path) -> bool:
     """True when the pid recorded in the lock is no longer running.
 
@@ -132,7 +131,9 @@ def temporary_userprefs(root: Path, overrides: dict[str, str]) -> Iterator[Path]
         for key, value in overrides.items():
             block.append(f'  "{key}": "{value}",')
         brace = text.index("{") + 1
-        merged = text[:brace] + "\n" + "\n".join(block) + "\n" + text[brace:].lstrip("\n")
+        merged = (
+            text[:brace] + "\n" + "\n".join(block) + "\n" + text[brace:].lstrip("\n")
+        )
         path.write_text(merged, encoding="utf-8")
 
         # Parse it back before spending half an hour compiling it. Comments are stripped
@@ -221,15 +222,21 @@ class Builder:
         Compiling is thousands of lines nobody reads; what a watcher needs is whether it
         is still moving, and the memory figures that decide whether the image fits.
         """
-        if MEMORY_RE.search(line) or line.startswith(("Compiling", "Linking", "Building")):
+        if MEMORY_RE.search(line) or line.startswith(
+            ("Compiling", "Linking", "Building")
+        ):
             self._emit("build_progress", bake_hash=bake_hash, line=line.strip()[:200])
 
-    def build_bake(self, bake: manifest.Bake, force: bool = False) -> manifest.ImageEntry:
+    def build_bake(
+        self, bake: manifest.Bake, force: bool = False
+    ) -> manifest.ImageEntry:
         """Build one bake, tagging the image with its own content hash."""
         with build_lock(self.root):
             return self._build_bake_locked(bake, force=force)
 
-    def _build_bake_locked(self, bake: manifest.Bake, force: bool = False) -> manifest.ImageEntry:
+    def _build_bake_locked(
+        self, bake: manifest.Bake, force: bool = False
+    ) -> manifest.ImageEntry:
         sha, dirty = manifest.git_state(self.root)
         bake_hash = bake.content_hash(sha, dirty)
 
@@ -282,7 +289,9 @@ class Builder:
 
         artifacts = artifacts_for(self.root, bake.env)
         if not artifacts:
-            raise BuildError(f"build of {bake.env} reported success but produced no artifacts")
+            raise BuildError(
+                f"build of {bake.env} reported success but produced no artifacts"
+            )
 
         entry = manifest.ImageEntry(
             bake_hash=bake_hash,
@@ -315,7 +324,9 @@ class Builder:
         )
         return entry
 
-    def _register_prebuilt(self, bake: manifest.Bake, bake_hash: str) -> manifest.ImageEntry:
+    def _register_prebuilt(
+        self, bake: manifest.Bake, bake_hash: str
+    ) -> manifest.ImageEntry:
         """Record an image the bench did not build - an upstream release, say.
 
         Everything the manifest asserts about it is either read from the file or left
@@ -342,8 +353,11 @@ class Builder:
         self.manifest.add(entry)
         self.manifest.save()
         self._emit(
-            "prebuilt_registered", bake_hash=bake_hash, path=str(path),
-            bytes=path.stat().st_size, hw_model=entry.hw_model,
+            "prebuilt_registered",
+            bake_hash=bake_hash,
+            path=str(path),
+            bytes=path.stat().st_size,
+            hw_model=entry.hw_model,
         )
         return entry
 

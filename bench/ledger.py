@@ -56,7 +56,9 @@ class Sighting:
     rebroadcast_count: int = 1
     # Every distinct (relay rendering, rssi, snr, hops_taken) this id arrived by. A set,
     # because collapsing them is what erases the direct-vs-relayed distinction.
-    paths: list[tuple[str, float | None, float | None, int | None]] = field(default_factory=list)
+    paths: list[tuple[str, float | None, float | None, int | None]] = field(
+        default_factory=list
+    )
     via_mqtt: bool = False
     payload_size: int | None = None
 
@@ -82,7 +84,8 @@ class Sighting:
             "last_ts": self.last_ts,
             "rebroadcast_count": self.rebroadcast_count,
             "paths": [
-                {"via": v, "rssi": r, "snr": s, "hops_taken": h} for v, r, s, h in self.paths
+                {"via": v, "rssi": r, "snr": s, "hops_taken": h}
+                for v, r, s, h in self.paths
             ],
             "via_mqtt": self.via_mqtt,
             "payload_size": self.payload_size,
@@ -325,7 +328,11 @@ class LogLane:
         return dict(out)
 
     def summary(self) -> dict:
-        return {"lines": len(self.rows), "by_node": self.by_node(), "by_level": self.levels()}
+        return {
+            "lines": len(self.rows),
+            "by_node": self.by_node(),
+            "by_level": self.levels(),
+        }
 
 
 @dataclass

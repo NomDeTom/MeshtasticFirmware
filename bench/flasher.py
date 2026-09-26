@@ -145,8 +145,11 @@ class Flasher:
         standing = platform_probe.find_uf2_volume()
         if standing is not None and not _answers_as_application(owner):
             self._emit(
-                "flash_start", node=node.name, image=str(image),
-                serial=node.serial_number, budget_s=TRANSFER_S + RETURN_S,
+                "flash_start",
+                node=node.name,
+                image=str(image),
+                serial=node.serial_number,
+                budget_s=TRANSFER_S + RETURN_S,
                 already_in_dfu=str(standing),
             )
             owner.expect_reboot("already in DFU", window_s=TRANSFER_S + RETURN_S)
@@ -161,8 +164,11 @@ class Flasher:
             return result
 
         self._emit(
-            "flash_start", node=node.name, image=str(image),
-            serial=node.serial_number, budget_s=FLASH_BUDGET_S,
+            "flash_start",
+            node=node.name,
+            image=str(image),
+            serial=node.serial_number,
+            budget_s=FLASH_BUDGET_S,
         )
 
         before = self._prologue(node, owner, image_hw_model)
@@ -174,7 +180,10 @@ class Flasher:
         return result
 
     def _prologue(
-        self, node: devices.BenchNode, owner: ports.PortOwner, image_hw_model: str | None
+        self,
+        node: devices.BenchNode,
+        owner: ports.PortOwner,
+        image_hw_model: str | None,
     ) -> dict:
         """Prove the node, check the board and command DFU, all on one leased interface.
 
@@ -186,13 +195,17 @@ class Flasher:
             # The claim has to outlive the lease: the lease ends the moment DFU is
             # commanded, and everything fragile happens after that.
             with owner.lease(
-                "flash", budget_s=PROLOGUE_S, reboots=True,
+                "flash",
+                budget_s=PROLOGUE_S,
+                reboots=True,
                 reboot_window_s=DFU_APPEAR_S + TRANSFER_S + RETURN_S,
             ) as iface:
                 device_model = hardware.model_from_interface(iface)
                 self._emit(
-                    "hw_model_check", node=node.name,
-                    device=device_model, image=image_hw_model,
+                    "hw_model_check",
+                    node=node.name,
+                    device=device_model,
+                    image=image_hw_model,
                 )
                 # Guards the instrument rather than the answer, so it blocks, never warns.
                 hardware.assert_compatible(node.name, device_model, image_hw_model)
@@ -202,7 +215,9 @@ class Flasher:
                 self._emit("enter_dfu", node=node.name, port=owner.port)
                 # Bounded: the node reboots partway through this call, so the library can
                 # be left waiting on a device that is no longer there.
-                outcome, detail = _call_bounded(lambda: iface.localNode.enterDFUMode(), 20.0)
+                outcome, detail = _call_bounded(
+                    lambda: iface.localNode.enterDFUMode(), 20.0
+                )
                 # Not fatal on its own: the node reboots partway through this call, so a
                 # raise is as consistent with success as with failure. But it is the only
                 # account of why no bootloader turned up, and discarding it turned a
@@ -249,17 +264,25 @@ class Flasher:
         uf2 = image if image.suffix.lower() == ".uf2" else _sibling_uf2(image)
         if volume is None:
             return FlashResult(
-                node.name, "dfu", False,
+                node.name,
+                "dfu",
+                False,
                 f"no bootloader interface appeared within {DFU_APPEAR_S:.0f}s",
-                0.0, ports.TIMED_OUT,
+                0.0,
+                ports.TIMED_OUT,
             )
         if uf2 is None:
             return FlashResult(
-                node.name, "dfu", False,
+                node.name,
+                "dfu",
+                False,
                 "bootloader offers mass storage only and no .uf2 was built",
-                0.0, ports.FAILED,
+                0.0,
+                ports.FAILED,
             )
-        self._emit("dfu_via", node=node.name, interface="uf2_volume", volume=str(volume))
+        self._emit(
+            "dfu_via", node=node.name, interface="uf2_volume", volume=str(volume)
+        )
         return self._copy_uf2_to_volume(node, owner, uf2, volume)
 
     # -- transports ------------------------------------------------------------
@@ -307,17 +330,22 @@ class Flasher:
             writer.join(1.0)
             if writer.is_alive() and not _volume_present(volume):
                 self._emit(
-                    "uf2_volume_vanished", node=node.name, volume=str(volume),
+                    "uf2_volume_vanished",
+                    node=node.name,
+                    volume=str(volume),
                     after_s=round(budget.elapsed, 1),
                 )
                 break
         if writer.is_alive() and budget.spent:
             self._phase(node.name, TRANSFER, "failed")
             return FlashResult(
-                node.name, "uf2", False,
+                node.name,
+                "uf2",
+                False,
                 f"the write to {volume} did not finish within {TRANSFER_S:.0f}s and the "
                 "volume never dropped; the node is left in its bootloader",
-                0.0, ports.TIMED_OUT,
+                0.0,
+                ports.TIMED_OUT,
             )
 
         self._phase(node.name, TRANSFER, "done")
@@ -326,37 +354,66 @@ class Flasher:
         self._phase(node.name, RETURN, "done" if back.ok else "failed")
         if not back.ok:
             return FlashResult(
-                node.name, "uf2", False,
+                node.name,
+                "uf2",
+                False,
                 f"flashed but the node did not answer within {RETURN_S:.0f}s",
-                0.0, back.outcome,
+                0.0,
+                back.outcome,
             )
-        return FlashResult(node.name, "uf2", True, f"flashed via {volume}", 0.0, ports.OK)
+        return FlashResult(
+            node.name, "uf2", True, f"flashed via {volume}", 0.0, ports.OK
+        )
 
     def _serial_dfu_upload(
-        self, node: devices.BenchNode, owner: ports.PortOwner, image: Path, dfu_port: str
+        self,
+        node: devices.BenchNode,
+        owner: ports.PortOwner,
+        image: Path,
+        dfu_port: str,
     ) -> FlashResult:
         if self.platform.nrfutil is None:
             return FlashResult(
-                node.name, "serial_dfu", False, "adafruit-nrfutil absent", 0.0, ports.FAILED
+                node.name,
+                "serial_dfu",
+                False,
+                "adafruit-nrfutil absent",
+                0.0,
+                ports.FAILED,
             )
         self._emit("dfu_via", node=node.name, interface="serial", port=dfu_port)
         argv = [
-            *self.platform.nrfutil.argv, "dfu", "serial",
-            "--package", str(image), "-p", dfu_port, "-b", "115200", "--singlebank",
+            *self.platform.nrfutil.argv,
+            "dfu",
+            "serial",
+            "--package",
+            str(image),
+            "-p",
+            dfu_port,
+            "-b",
+            "115200",
+            "--singlebank",
         ]
         result = proc.run(argv, env=dict(self.platform.nrfutil.env), timeout=TRANSFER_S)
         failure = next((m for m in DFU_FAILURE_MARKERS if m in result.output), None)
         if failure or not result.ok:
             return FlashResult(
-                node.name, "serial_dfu", False,
+                node.name,
+                "serial_dfu",
+                False,
                 f"nrfutil failed ({failure or result.returncode}): {result.tail(10)}",
-                0.0, ports.FAILED,
+                0.0,
+                ports.FAILED,
             )
         back = owner.wait_answering(budget_s=RETURN_S)
         if not back.ok:
             return FlashResult(
-                node.name, "serial_dfu", False,
-                "flashed but the node did not answer", 0.0, back.outcome,
+                node.name,
+                "serial_dfu",
+                False,
+                "flashed but the node did not answer",
+                0.0,
+                back.outcome,
             )
         return FlashResult(
             node.name, "serial_dfu", True, f"serial DFU on {dfu_port}", 0.0, ports.OK
@@ -395,7 +452,9 @@ class Flasher:
         self._emit("dfu_not_confirmed", node=node.name)
         return None
 
-    def power_cycle(self, location: str, port_number: int, delay_s: float = 3.0) -> bool:
+    def power_cycle(
+        self, location: str, port_number: int, delay_s: float = 3.0
+    ) -> bool:
         """Hard USB power cycle via uhubctl - the rung below a touch.
 
         Recovers a node that answers nothing, without anyone walking to the bench and
@@ -405,13 +464,25 @@ class Flasher:
             self._emit("power_cycle_unavailable", location=location)
             return False
         result = proc.run(
-            [self.platform.uhubctl, "-l", location, "-p", str(port_number),
-             "-a", "cycle", "-d", str(delay_s)],
+            [
+                self.platform.uhubctl,
+                "-l",
+                location,
+                "-p",
+                str(port_number),
+                "-a",
+                "cycle",
+                "-d",
+                str(delay_s),
+            ],
             timeout=60.0,
         )
         self._emit(
-            "power_cycle", location=location, port=port_number,
-            ok=result.ok, tail=result.tail(5),
+            "power_cycle",
+            location=location,
+            port=port_number,
+            ok=result.ok,
+            tail=result.tail(5),
         )
         return result.ok
 
@@ -431,7 +502,9 @@ def _volume_present(volume: Path) -> bool:
             mask = ctypes.windll.kernel32.GetLogicalDrives()  # type: ignore[attr-defined]
             letter = str(volume)[0].upper()
             return bool(mask & (1 << string.ascii_uppercase.index(letter)))
-        except Exception:  # noqa: BLE001 - fall back rather than misreport a live volume
+        except (
+            Exception
+        ):  # noqa: BLE001 - fall back rather than misreport a live volume
             return True
     try:
         return volume.is_dir()

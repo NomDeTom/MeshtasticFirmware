@@ -90,8 +90,12 @@ class FakeObserver:
         return self.status()
 
     def status(self):
-        return {"nodes": {n: {"connected": True, "packets": 0, "log_lines": 0} for n in self.held},
-                "dropped": []}
+        return {
+            "nodes": {
+                n: {"connected": True, "packets": 0, "log_lines": 0} for n in self.held
+            },
+            "dropped": [],
+        }
 
     def health_tick(self):
         return None
@@ -125,23 +129,39 @@ class FakeProvisioner:
 
     def _state(self, node):
         return provision.SettledState(
-            node=node.name, serial_number=node.serial_number, port="COM9",
-            node_id=f"!{node.name}", node_num=1, firmware_version="2.8.0",
-            build_tag="deadbeef", region="EU_868", modem_preset="LONG_FAST",
-            role="CLIENT", channels=[{"index": 0, "name": "bench", "psk_len": 32}],
-            tx_enabled=True)
+            node=node.name,
+            serial_number=node.serial_number,
+            port="COM9",
+            node_id=f"!{node.name}",
+            node_num=1,
+            firmware_version="2.8.0",
+            build_tag="deadbeef",
+            region="EU_868",
+            modem_preset="LONG_FAST",
+            role="CLIENT",
+            channels=[{"index": 0, "name": "bench", "psk_len": 32}],
+            tx_enabled=True,
+        )
 
 
 def make_scenarios(n=3, assertion=None):
     bake = manifest_mod.Bake("env", label="fake")
     out = []
     for i in range(n):
-        out.append(scenario.Scenario(
-            id=f"S{i}", description="fake",
-            roles={"dut": scenario.RoleBake("dut", bake, provision.NodeSpec(region="EU_868"))},
-            stimulus=scenario.STIM_SELF,
-            duration_s=0.0,
-            assertions=[assertion or scenario.SettledStateAssertion()]))
+        out.append(
+            scenario.Scenario(
+                id=f"S{i}",
+                description="fake",
+                roles={
+                    "dut": scenario.RoleBake(
+                        "dut", bake, provision.NodeSpec(region="EU_868")
+                    )
+                },
+                stimulus=scenario.STIM_SELF,
+                duration_s=0.0,
+                assertions=[assertion or scenario.SettledStateAssertion()],
+            )
+        )
     return out
 
 
@@ -150,8 +170,13 @@ class RunnerHarness(unittest.TestCase):
         run_dir = Path(tempfile.mkdtemp())
         nodes = [BenchNode("dut", "SER-dut", "dut")]
         config = runner.RunConfig(
-            run_dir=run_dir, firmware_root=Path("."), nodes=nodes,
-            scenarios=scenarios, skip_flash=True, **kw)
+            run_dir=run_dir,
+            firmware_root=Path("."),
+            nodes=nodes,
+            scenarios=scenarios,
+            skip_flash=True,
+            **kw,
+        )
         r = runner.Runner(config)
 
         # Every distinct bake is "already built", so stage 1 is a no-op and no compiler
@@ -161,21 +186,34 @@ class RunnerHarness(unittest.TestCase):
             for role, rb in s.roles.items():
                 h = rb.bake.content_hash(sha, dirty)
                 r.manifest.assign(s.id, role, h)
-                r.manifest.add(manifest_mod.ImageEntry(
-                    bake_hash=h, bake=rb.bake.fingerprint(sha, dirty), env="env",
-                    artifacts=["fake.uf2"], git_sha=sha, dirty=dirty,
-                    capabilities=["log.DEBUG", "log.sink.api"], bench_only_flags=[],
-                    release_representative=True))
+                r.manifest.add(
+                    manifest_mod.ImageEntry(
+                        bake_hash=h,
+                        bake=rb.bake.fingerprint(sha, dirty),
+                        env="env",
+                        artifacts=["fake.uf2"],
+                        git_sha=sha,
+                        dirty=dirty,
+                        capabilities=["log.DEBUG", "log.sink.api"],
+                        bench_only_flags=[],
+                        release_representative=True,
+                    )
+                )
         r.manifest.save()
         return r, run_dir
 
     def run_with_fakes(self, r):
-        with mock.patch.object(runner, "observer_mod") as obs_mod, \
-             mock.patch.object(runner.provision, "Provisioner", FakeProvisioner), \
-             mock.patch.object(runner.provision, "IsolatedProvisioner", FakeProvisioner), \
-             mock.patch.object(runner.manifest_mod, "git_state", return_value=("sha", False)), \
-             mock.patch.object(r, "stage_preflight"), \
-             mock.patch.object(r, "stage_build"):
+        with mock.patch.object(runner, "observer_mod") as obs_mod, mock.patch.object(
+            runner.provision, "Provisioner", FakeProvisioner
+        ), mock.patch.object(
+            runner.provision, "IsolatedProvisioner", FakeProvisioner
+        ), mock.patch.object(
+            runner.manifest_mod, "git_state", return_value=("sha", False)
+        ), mock.patch.object(
+            r, "stage_preflight"
+        ), mock.patch.object(
+            r, "stage_build"
+        ):
             obs_mod.Observer = FakeObserver
             r.platform = _FakePlatform()
             return r.run()
@@ -276,12 +314,24 @@ class TestStimulus(RunnerHarness):
     def test_rf_peer_stimulus_sends_from_the_named_source(self):
         bake = manifest_mod.Bake("env")
         row = scenario.Scenario(
-            id="P0", description="", duration_s=0.0,
-            roles={"dut": scenario.RoleBake("dut", bake, provision.NodeSpec(region="EU_868"))},
+            id="P0",
+            description="",
+            duration_s=0.0,
+            roles={
+                "dut": scenario.RoleBake(
+                    "dut", bake, provision.NodeSpec(region="EU_868")
+                )
+            },
             stimulus=scenario.STIM_RF_PEER,
-            stimulus_params={"source": "dut", "count": 3, "interval_s": 0.0, "text": "occupy"},
+            stimulus_params={
+                "source": "dut",
+                "count": 3,
+                "interval_s": 0.0,
+                "text": "occupy",
+            },
             senses_channel=True,
-            assertions=[scenario.SettledStateAssertion()])
+            assertions=[scenario.SettledStateAssertion()],
+        )
         r, _ = self.build_runner([row])
         self.run_with_fakes(r)
         self.assertEqual(len(r.observer.sent), 3)
@@ -290,10 +340,17 @@ class TestStimulus(RunnerHarness):
     def test_unknown_stimulus_is_an_error_not_a_silent_no_op(self):
         bake = manifest_mod.Bake("env")
         row = scenario.Scenario(
-            id="P1", description="", duration_s=0.0,
-            roles={"dut": scenario.RoleBake("dut", bake, provision.NodeSpec(region="EU_868"))},
+            id="P1",
+            description="",
+            duration_s=0.0,
+            roles={
+                "dut": scenario.RoleBake(
+                    "dut", bake, provision.NodeSpec(region="EU_868")
+                )
+            },
             stimulus="teleportation",
-            assertions=[scenario.SettledStateAssertion()])
+            assertions=[scenario.SettledStateAssertion()],
+        )
         r, _ = self.build_runner([row])
         summary = self.run_with_fakes(r)
         # A row that was never stimulated would otherwise report a confident NOT OBSERVED.

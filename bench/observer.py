@@ -38,7 +38,7 @@ from typing import Any
 from . import devices, packets, ports, streams
 
 # CSI escapes the firmware uses to colour its log prefix.
-_ANSI_RE = re.compile(chr(27) + r'\[[0-9;]*[A-Za-z]')
+_ANSI_RE = re.compile(chr(27) + r"\[[0-9;]*[A-Za-z]")
 
 # Spacing between reconnect attempts, and how many to make before giving up. A node
 # that is mid-DFU cannot answer, and hammering it is the most likely way to lose it.
@@ -77,7 +77,9 @@ class Held:
 class Observer:
     """Holds every node open and fans their traffic into the recorder."""
 
-    def __init__(self, recorder: streams.Recorder, nodes: list[devices.BenchNode]) -> None:
+    def __init__(
+        self, recorder: streams.Recorder, nodes: list[devices.BenchNode]
+    ) -> None:
         self.recorder = recorder
         self.held: dict[str, Held] = {
             n.name: Held(node=n, owner=ports.PortOwner(n, recorder)) for n in nodes
@@ -100,9 +102,15 @@ class Observer:
         report: dict[str, Any] = {}
         for name, held in self.held.items():
             ok, detail = self._open(held)
-            report[name] = {"opened": ok, "detail": detail, "mode": "raw" if held.raw_mode else "api"}
+            report[name] = {
+                "opened": ok,
+                "detail": detail,
+                "mode": "raw" if held.raw_mode else "api",
+            }
         self._stop.clear()
-        self._health = threading.Thread(target=self._health_loop, daemon=True, name="bench-health")
+        self._health = threading.Thread(
+            target=self._health_loop, daemon=True, name="bench-health"
+        )
         self._health.start()
         self.recorder.event("observer_start", nodes=report)
         return report
@@ -165,7 +173,10 @@ class Observer:
             held.attempts = 0
             held.dropped_at = None
             self.recorder.event(
-                "connection_established", node=held.node.name, port=held.port, mode="api"
+                "connection_established",
+                node=held.node.name,
+                port=held.port,
+                mode="api",
             )
             return True, held.port or ""
         return False, f"{result.outcome}: {result.detail}"
@@ -266,7 +277,9 @@ class Observer:
                 held.iface = None  # ownership moves to the caller
                 held.connected = False
                 held.dropped_at = time.time()
-        self.recorder.event("observer_detached", node=name, reason=reason, handed_over=iface is not None)
+        self.recorder.event(
+            "observer_detached", node=name, reason=reason, handed_over=iface is not None
+        )
         return iface
 
     def suspend(self, name: str, reason: str) -> None:
@@ -446,14 +459,20 @@ class Observer:
     def send_text(self, name: str, text: str, channel_index: int = 0, **kw: Any) -> Any:
         iface = self.interface(name)
         result = iface.sendText(text, channelIndex=channel_index, **kw)
-        self.recorder.event("bench_send_text", node=name, text=text, channel=channel_index)
+        self.recorder.event(
+            "bench_send_text", node=name, text=text, channel=channel_index
+        )
         return result
 
     # -- status ----------------------------------------------------------------
 
     def _brief(self) -> dict:
         return {
-            name: {"connected": h.connected, "packets": h.packets_seen, "logs": h.log_lines}
+            name: {
+                "connected": h.connected,
+                "packets": h.packets_seen,
+                "logs": h.log_lines,
+            }
             for name, h in self.held.items()
         }
 
@@ -469,7 +488,9 @@ class Observer:
                         "connected": h.connected,
                         "attempts": h.attempts,
                         "dropped_for_s": (
-                            None if h.dropped_at is None else round(time.time() - h.dropped_at, 1)
+                            None
+                            if h.dropped_at is None
+                            else round(time.time() - h.dropped_at, 1)
                         ),
                         "packets": h.packets_seen,
                         "log_lines": h.log_lines,
@@ -485,7 +506,6 @@ def _safe_close(iface: Any) -> None:
         iface.close()
     except Exception:  # noqa: BLE001
         pass
-
 
 
 def _interface_port(interface: Any) -> str | None:
@@ -567,7 +587,9 @@ class _RawSerialReader:
     # really text that happened to collide, not a frame.
     MAX_FRAME = 512
 
-    def __init__(self, held: Held, recorder: streams.Recorder, baud: int = 115200) -> None:
+    def __init__(
+        self, held: Held, recorder: streams.Recorder, baud: int = 115200
+    ) -> None:
         self.held = held
         self.recorder = recorder
         self.baud = baud

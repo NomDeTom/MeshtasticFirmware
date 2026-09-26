@@ -30,8 +30,8 @@ from . import devices, ports
 from .provision import (
     CHILD_TAG,
     NodeSpec,
-    ProvisionError,
     Provisioner,
+    ProvisionError,
 )
 
 
@@ -104,7 +104,9 @@ def run_job(
     node = devices.BenchNode(**job["node"])
     spec = NodeSpec(**job["spec"]) if job.get("spec") else None
     view = _OneNode(node, _Recorder(emit))
-    factory = make_provisioner or (lambda obs, on_event: Provisioner(obs, on_event=on_event))
+    factory = make_provisioner or (
+        lambda obs, on_event: Provisioner(obs, on_event=on_event)
+    )
     provisioner = factory(view, emit.event)
     result: dict[str, Any] = {"t": "result", "op": op, "answered": False}
     try:
@@ -161,8 +163,11 @@ def main() -> None:
         result = run_job(job, emit)
         code = 0 if not result.get("error") else 1
     except Exception as exc:  # noqa: BLE001
-        result = {"t": "result", "answered": False,
-                  "error": f"child could not run: {type(exc).__name__}: {exc}"}
+        result = {
+            "t": "result",
+            "answered": False,
+            "error": f"child could not run: {type(exc).__name__}: {exc}",
+        }
         code = 2
     emit.send(result)
     try:

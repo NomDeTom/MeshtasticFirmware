@@ -172,11 +172,25 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
      *  knobs, after which RX is re-armed. False if the radio is not idling in RX. */
     bool benchProbe(bool &cadBusy, bool &rxBusy, int16_t &rssi);
     // TX_DONE -> RX re-armed stopwatch (txgap knob), in benchTicks(); one "BENCH txgap" line per completed TX.
-    enum BenchGapMark : uint8_t { GAP_WAKE, GAP_LOG, GAP_LOGGED, GAP_RELEASED, GAP_HOOK0, GAP_HOOK, GAP_ARMED, GAP_MARKS };
+    enum BenchGapMark : uint8_t {
+        GAP_WAKE,
+        GAP_AIR0,
+        GAP_AIR,
+        GAP_LOG,
+        GAP_LOGGED,
+        GAP_RELEASED,
+        GAP_HOOK0,
+        GAP_HOOK,
+        GAP_NOTIFIED, // SX126x only: after trySetStandby()'s checkNotification()
+        GAP_STANDBY,  // SX126x only: after trySetStandby()
+        GAP_ARMED,
+        GAP_MARKS
+    };
     volatile uint32_t benchGapIsr = 0;     // benchTicks() in the TX ISR
     volatile bool benchGapHaveIsr = false; // false when TX_DONE came from the poll or a missed-edge catch
     bool benchGapFromIsr = false;
     bool benchGapTiming = false;
+    bool benchGapSplitArm = false;                    // the driver stamped GAP_NOTIFIED and GAP_STANDBY
     bool benchTxNotify = false;                       // inside onNotify(ISR_TX)
     meshtastic_MeshPacket *benchDeferredTx = nullptr; // txarm=early: logged and released after RX is re-armed
     uint32_t benchGapStart = 0;
@@ -186,6 +200,12 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     {
         if (benchGapTiming)
             benchGapT[mark] = benchTicks();
+    }
+    /** Driver stamps inside startReceive(); the last call before GAP_ARMED wins. */
+    void benchGapMarkArm(uint8_t mark)
+    {
+        benchGapMark(mark);
+        benchGapSplitArm = benchGapTiming;
     }
     /** Entry of onNotify(ISR_TX): starts the stopwatch when txgap is on. */
     void benchGapBegin();

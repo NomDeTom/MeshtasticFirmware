@@ -24,12 +24,12 @@ from ..firmware import FirmwareStore
 from ..manifest import Bake
 from ..provision import NodeSpec
 from ..scenario import (
+    STIM_RF_PEER,
     LogCount,
     PacketCount,
     RoleBake,
     Scenario,
     SettledStateAssertion,
-    STIM_RF_PEER,
 )
 
 ENV = "nrf52_promicro_diy_tcxo"
@@ -126,7 +126,6 @@ SCENARIOS = [
             # could be two nodes agreeing on the wrong settings.
             SettledStateAssertion(name="dut_settled", role="dut"),
             SettledStateAssertion(name="peer_settled", role="peer"),
-
             # The link, asserted in both directions separately. One direction working
             # proves one transmitter and one receiver; it does not prove the pair.
             PacketCount(
@@ -143,12 +142,16 @@ SCENARIOS = [
                 at_least=DELIVERED_AT_LEAST,
                 role="peer",
             ),
-
             # A duty-cycle abort would stop a node transmitting, and the delivery counts
             # above would then read as a broken link rather than a bench that asked for
             # too much airtime. Name it instead.
-            LogCount("no_duty_cycle_abort", [r"Duty cycle limit exceeded"],
-                     node="dut", at_most=0, role="dut"),
+            LogCount(
+                "no_duty_cycle_abort",
+                [r"Duty cycle limit exceeded"],
+                node="dut",
+                at_most=0,
+                role="dut",
+            ),
         ],
     ),
 ]

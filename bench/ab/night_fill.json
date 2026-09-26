@@ -1,758 +1,422 @@
 [
- {
-  "label": "A_base_F0",
-  "knobs": "",
-  "senders": [
-   "dut",
-   "peer"
-  ],
-  "size": 249,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_l2",
-  "knobs": "",
-  "senders": [
-   "lr",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_l2",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "lr",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_l2",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "lr",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_l2",
-  "knobs": "lbt=rx",
-  "senders": [
-   "lr",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_p2",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "peer",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_p2",
-  "knobs": "",
-  "senders": [
-   "peer",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_p2",
-  "knobs": "lbt=rx",
-  "senders": [
-   "peer",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_p2",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "peer",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_dp",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "dut",
-   "peer"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_dp",
-  "knobs": "lbt=rx",
-  "senders": [
-   "dut",
-   "peer"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_dp",
-  "knobs": "",
-  "senders": [
-   "dut",
-   "peer"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_dp",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "dut",
-   "peer"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_wl",
-  "knobs": "",
-  "senders": [
-   "witness",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_wl",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "witness",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_wl",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "witness",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_wl",
-  "knobs": "lbt=rx",
-  "senders": [
-   "witness",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_w2",
-  "knobs": "",
-  "senders": [
-   "witness",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_w2",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "witness",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_w2",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "witness",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_w2",
-  "knobs": "lbt=rx",
-  "senders": [
-   "witness",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_dw",
-  "knobs": "",
-  "senders": [
-   "dut",
-   "witness"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_dw",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "dut",
-   "witness"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_dw",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "dut",
-   "witness"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_dw",
-  "knobs": "lbt=rx",
-  "senders": [
-   "dut",
-   "witness"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_dl",
-  "knobs": "lbt=rx",
-  "senders": [
-   "dut",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_dl",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "dut",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_dl",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "dut",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_dl",
-  "knobs": "",
-  "senders": [
-   "dut",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_pw",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "peer",
-   "witness"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_pw",
-  "knobs": "",
-  "senders": [
-   "peer",
-   "witness"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_pw",
-  "knobs": "lbt=rx",
-  "senders": [
-   "peer",
-   "witness"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_pw",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "peer",
-   "witness"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_d2",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "dut",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_d2",
-  "knobs": "",
-  "senders": [
-   "dut",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_d2",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "dut",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_d2",
-  "knobs": "lbt=rx",
-  "senders": [
-   "dut",
-   "w2"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rssi6_pl",
-  "knobs": "lbt=rssi rssim=6",
-  "senders": [
-   "peer",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_cadrx4_pl",
-  "knobs": "lbt=cadrx sym=4",
-  "senders": [
-   "peer",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_rx_pl",
-  "knobs": "lbt=rx",
-  "senders": [
-   "peer",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "F_base_pl",
-  "knobs": "",
-  "senders": [
-   "peer",
-   "lr"
-  ],
-  "size": 100,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- },
- {
-  "label": "A_base_F1",
-  "knobs": "",
-  "senders": [
-   "dut",
-   "peer"
-  ],
-  "size": 249,
-  "skews": [
-   0,
-   0.25,
-   0.5,
-   0.75
-  ],
-  "rotate": true,
-  "pairs": 16,
-  "interval": 2.5
- }
+  {
+    "label": "A_base_F0",
+    "knobs": "",
+    "senders": ["dut", "peer"],
+    "size": 249,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_l2",
+    "knobs": "",
+    "senders": ["lr", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_l2",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["lr", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_l2",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["lr", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_l2",
+    "knobs": "lbt=rx",
+    "senders": ["lr", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_p2",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["peer", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_p2",
+    "knobs": "",
+    "senders": ["peer", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_p2",
+    "knobs": "lbt=rx",
+    "senders": ["peer", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_p2",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["peer", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_dp",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["dut", "peer"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_dp",
+    "knobs": "lbt=rx",
+    "senders": ["dut", "peer"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_dp",
+    "knobs": "",
+    "senders": ["dut", "peer"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_dp",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["dut", "peer"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_wl",
+    "knobs": "",
+    "senders": ["witness", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_wl",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["witness", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_wl",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["witness", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_wl",
+    "knobs": "lbt=rx",
+    "senders": ["witness", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_w2",
+    "knobs": "",
+    "senders": ["witness", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_w2",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["witness", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_w2",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["witness", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_w2",
+    "knobs": "lbt=rx",
+    "senders": ["witness", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_dw",
+    "knobs": "",
+    "senders": ["dut", "witness"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_dw",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["dut", "witness"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_dw",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["dut", "witness"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_dw",
+    "knobs": "lbt=rx",
+    "senders": ["dut", "witness"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_dl",
+    "knobs": "lbt=rx",
+    "senders": ["dut", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_dl",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["dut", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_dl",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["dut", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_dl",
+    "knobs": "",
+    "senders": ["dut", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_pw",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["peer", "witness"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_pw",
+    "knobs": "",
+    "senders": ["peer", "witness"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_pw",
+    "knobs": "lbt=rx",
+    "senders": ["peer", "witness"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_pw",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["peer", "witness"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_d2",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["dut", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_d2",
+    "knobs": "",
+    "senders": ["dut", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_d2",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["dut", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_d2",
+    "knobs": "lbt=rx",
+    "senders": ["dut", "w2"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rssi6_pl",
+    "knobs": "lbt=rssi rssim=6",
+    "senders": ["peer", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_cadrx4_pl",
+    "knobs": "lbt=cadrx sym=4",
+    "senders": ["peer", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_rx_pl",
+    "knobs": "lbt=rx",
+    "senders": ["peer", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "F_base_pl",
+    "knobs": "",
+    "senders": ["peer", "lr"],
+    "size": 100,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  },
+  {
+    "label": "A_base_F1",
+    "knobs": "",
+    "senders": ["dut", "peer"],
+    "size": 249,
+    "skews": [0, 0.25, 0.5, 0.75],
+    "rotate": true,
+    "pairs": 16,
+    "interval": 2.5
+  }
 ]

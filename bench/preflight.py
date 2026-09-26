@@ -151,7 +151,8 @@ class PreflightReport:
         # so the node table is joined to the bus by it.
         named = {
             str(d.get("serial_number") or "").upper(): d.get("name")
-            for d in declared if d.get("serial_number")
+            for d in declared
+            if d.get("serial_number")
         }
         seen = set()
         lines = ["  bus:"]
@@ -349,15 +350,19 @@ def _gather_resources(
     """
     declared = []
     for node in nodes:
-        port = devices.try_resolve_port(node.serial_number) if node.serial_number else None
-        declared.append({
-            "name": node.name,
-            "role": node.role,
-            "serial_number": node.serial_number,
-            "declared_board": node.board,
-            "port": port,
-            "present": port is not None,
-        })
+        port = (
+            devices.try_resolve_port(node.serial_number) if node.serial_number else None
+        )
+        declared.append(
+            {
+                "name": node.name,
+                "role": node.role,
+                "serial_number": node.serial_number,
+                "declared_board": node.board,
+                "port": port,
+                "present": port is not None,
+            }
+        )
     missing = [d["name"] for d in declared if not d["present"] and d["serial_number"]]
 
     # Two probes, because the node checks take about half a minute and a bootloader can
@@ -385,32 +390,46 @@ def _gather_resources(
         # in its bootloader (finish the flash), off the bus (replug it), or simply not
         # this node (the table has the wrong serial).
         dfu = bool(bus.get("in_bootloader")) or bool(bus.get("volumes"))
-        report.checks.append(Check(
-            "declared_nodes", BLOCK,
-            f"declared but not enumerated: {', '.join(missing)}"
-            + (" (a device is in its bootloader - see the bus inventory)" if dfu else ""),
-            fix=(
-                "the node is in DFU; the flasher will finish it once it is declared present"
-                if dfu else
-                "nothing is on the bus for this serial - replug the node, or correct the "
-                "serial number in the node table"
-            ),
-        ))
+        report.checks.append(
+            Check(
+                "declared_nodes",
+                BLOCK,
+                f"declared but not enumerated: {', '.join(missing)}"
+                + (
+                    " (a device is in its bootloader - see the bus inventory)"
+                    if dfu
+                    else ""
+                ),
+                fix=(
+                    "the node is in DFU; the flasher will finish it once it is declared present"
+                    if dfu
+                    else "nothing is on the bus for this serial - replug the node, or correct the "
+                    "serial number in the node table"
+                ),
+            )
+        )
     else:
-        report.checks.append(Check(
-            "declared_nodes", OK,
-            ", ".join(f"{d['name']}={d['port']}" for d in declared) or "none declared",
-        ))
+        report.checks.append(
+            Check(
+                "declared_nodes",
+                OK,
+                ", ".join(f"{d['name']}={d['port']}" for d in declared)
+                or "none declared",
+            )
+        )
 
     if standing is not None:
         # Not fatal: the flasher can finish a node it finds already in its bootloader.
         # But it has to be SEEN, because an unrecorded one silently claims the next
         # image written to a volume.
-        report.checks.append(Check(
-            "standing_bootloader", WARN,
-            f"a UF2 bootloader volume is already mounted at {standing}",
-            fix="a node is sitting in DFU; the run will finish it rather than flash past it",
-        ))
+        report.checks.append(
+            Check(
+                "standing_bootloader",
+                WARN,
+                f"a UF2 bootloader volume is already mounted at {standing}",
+                fix="a node is sitting in DFU; the run will finish it rather than flash past it",
+            )
+        )
 
 
 def _store_inventory() -> list[dict]:
@@ -421,14 +440,17 @@ def _store_inventory() -> list[dict]:
         store = FirmwareStore()
         return [
             {
-                "board": i.board, "version": i.version,
-                "sha256": i.sha256[:12], "verified": store.verify(i),
+                "board": i.board,
+                "version": i.version,
+                "sha256": i.sha256[:12],
+                "verified": store.verify(i),
             }
             for i in store.images.values()
         ]
-    except Exception:  # noqa: BLE001 - an unreadable store is an empty shelf, not a crash
+    except (
+        Exception
+    ):  # noqa: BLE001 - an unreadable store is an empty shelf, not a crash
         return []
-
 
 
 def _listen_briefly(port: str, seconds: float = 25.0) -> int:
@@ -456,6 +478,7 @@ def _listen_briefly(port: str, seconds: float = 25.0) -> int:
             return total
     except Exception:  # noqa: BLE001 - an unreadable port is simply "heard nothing"
         return 0
+
 
 def _check_nodes(report: PreflightReport, nodes: Iterable[devices.BenchNode]) -> None:
     nodes = list(nodes)
@@ -491,10 +514,14 @@ def _check_nodes(report: PreflightReport, nodes: Iterable[devices.BenchNode]) ->
         seen[key] = n.name
     if dupes:
         report.checks.append(
-            Check("nodes_distinct", BLOCK, "; ".join(dupes), fix="correct the node table")
+            Check(
+                "nodes_distinct", BLOCK, "; ".join(dupes), fix="correct the node table"
+            )
         )
     else:
-        report.checks.append(Check("nodes_distinct", OK, f"{len(nodes)} distinct nodes"))
+        report.checks.append(
+            Check("nodes_distinct", OK, f"{len(nodes)} distinct nodes")
+        )
 
     # Three is the floor, for two independent reasons: a simultaneous negative control
     # needs a second receiver, and any channel-sensing test needs occupier + DUT +
@@ -578,7 +605,11 @@ def _check_witness(report: PreflightReport, nodes: Iterable[devices.BenchNode]) 
         heard = _listen_briefly(node.resolve())
         if heard > 0:
             report.checks.append(
-                Check("observer_output", OK, f"{node.name} is emitting console output ({heard} bytes)")
+                Check(
+                    "observer_output",
+                    OK,
+                    f"{node.name} is emitting console output ({heard} bytes)",
+                )
             )
         else:
             report.checks.append(

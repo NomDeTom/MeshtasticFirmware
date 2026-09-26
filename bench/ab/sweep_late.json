@@ -1,260 +1,260 @@
 [
- {
-  "label": "L2off",
-  "knobs": "lbt=off",
-  "ways": 2,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L2rx",
-  "knobs": "lbt=rx",
-  "ways": 2,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L2rssi6",
-  "knobs": "lbt=rssi rssim=6",
-  "ways": 2,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L2rssi10",
-  "knobs": "lbt=rssi rssim=10",
-  "ways": 2,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L2rxrssi6",
-  "knobs": "lbt=rxrssi rssim=6",
-  "ways": 2,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L2cad2",
-  "knobs": "lbt=cad sym=2",
-  "ways": 2,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L2cad4",
-  "knobs": "lbt=cad sym=4",
-  "ways": 2,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L2cadrx4",
-  "knobs": "lbt=cadrx sym=4",
-  "ways": 2,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L2cadrx8",
-  "knobs": "lbt=cadrx sym=8",
-  "ways": 2,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L3off",
-  "knobs": "lbt=off",
-  "ways": 3,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L3rx",
-  "knobs": "lbt=rx",
-  "ways": 3,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L3rssi6",
-  "knobs": "lbt=rssi rssim=6",
-  "ways": 3,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L3cad4",
-  "knobs": "lbt=cad sym=4",
-  "ways": 3,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "L3cadrx4",
-  "knobs": "lbt=cadrx sym=4",
-  "ways": 3,
-  "mode": "deaf",
-  "pairs": 24
- },
- {
-  "label": "LSd40rx",
-  "knobs": "lbt=rx",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "dcsleep=40 dcwake=40",
-  "pairs": 24
- },
- {
-  "label": "LSd40rssi6",
-  "knobs": "lbt=rssi rssim=6",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "dcsleep=40 dcwake=40",
-  "pairs": 24
- },
- {
-  "label": "LSd40cad4",
-  "knobs": "lbt=cad sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "dcsleep=40 dcwake=40",
-  "pairs": 24
- },
- {
-  "label": "LSd40cadrx4",
-  "knobs": "lbt=cadrx sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "dcsleep=40 dcwake=40",
-  "pairs": 24
- },
- {
-  "label": "LSd150rx",
-  "knobs": "lbt=rx",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "dcsleep=150 dcwake=50",
-  "pairs": 24
- },
- {
-  "label": "LSd150rssi6",
-  "knobs": "lbt=rssi rssim=6",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "dcsleep=150 dcwake=50",
-  "pairs": 24
- },
- {
-  "label": "LSd150cad4",
-  "knobs": "lbt=cad sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "dcsleep=150 dcwake=50",
-  "pairs": 24
- },
- {
-  "label": "LSd150cadrx4",
-  "knobs": "lbt=cadrx sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "dcsleep=150 dcwake=50",
-  "pairs": 24
- },
- {
-  "label": "LHh44rx",
-  "knobs": "lbt=rx",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=4/4",
-  "pairs": 24
- },
- {
-  "label": "LHh44rssi6",
-  "knobs": "lbt=rssi rssim=6",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=4/4",
-  "pairs": 24
- },
- {
-  "label": "LHh44cad4",
-  "knobs": "lbt=cad sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=4/4",
-  "pairs": 24
- },
- {
-  "label": "LHh44cadrx4",
-  "knobs": "lbt=cadrx sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=4/4",
-  "pairs": 24
- },
- {
-  "label": "LHh412rx",
-  "knobs": "lbt=rx",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=4/12",
-  "pairs": 24
- },
- {
-  "label": "LHh412rssi6",
-  "knobs": "lbt=rssi rssim=6",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=4/12",
-  "pairs": 24
- },
- {
-  "label": "LHh412cad4",
-  "knobs": "lbt=cad sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=4/12",
-  "pairs": 24
- },
- {
-  "label": "LHh412cadrx4",
-  "knobs": "lbt=cadrx sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=4/12",
-  "pairs": 24
- },
- {
-  "label": "LHh88rx",
-  "knobs": "lbt=rx",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=8/8",
-  "pairs": 24
- },
- {
-  "label": "LHh88rssi6",
-  "knobs": "lbt=rssi rssim=6",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=8/8",
-  "pairs": 24
- },
- {
-  "label": "LHh88cad4",
-  "knobs": "lbt=cad sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=8/8",
-  "pairs": 24
- },
- {
-  "label": "LHh88cadrx4",
-  "knobs": "lbt=cadrx sym=4",
-  "ways": 2,
-  "mode": "dc",
-  "dc_knobs": "rxdc=8/8",
-  "pairs": 24
- }
+  {
+    "label": "L2off",
+    "knobs": "lbt=off",
+    "ways": 2,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L2rx",
+    "knobs": "lbt=rx",
+    "ways": 2,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L2rssi6",
+    "knobs": "lbt=rssi rssim=6",
+    "ways": 2,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L2rssi10",
+    "knobs": "lbt=rssi rssim=10",
+    "ways": 2,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L2rxrssi6",
+    "knobs": "lbt=rxrssi rssim=6",
+    "ways": 2,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L2cad2",
+    "knobs": "lbt=cad sym=2",
+    "ways": 2,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L2cad4",
+    "knobs": "lbt=cad sym=4",
+    "ways": 2,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L2cadrx4",
+    "knobs": "lbt=cadrx sym=4",
+    "ways": 2,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L2cadrx8",
+    "knobs": "lbt=cadrx sym=8",
+    "ways": 2,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L3off",
+    "knobs": "lbt=off",
+    "ways": 3,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L3rx",
+    "knobs": "lbt=rx",
+    "ways": 3,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L3rssi6",
+    "knobs": "lbt=rssi rssim=6",
+    "ways": 3,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L3cad4",
+    "knobs": "lbt=cad sym=4",
+    "ways": 3,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "L3cadrx4",
+    "knobs": "lbt=cadrx sym=4",
+    "ways": 3,
+    "mode": "deaf",
+    "pairs": 24
+  },
+  {
+    "label": "LSd40rx",
+    "knobs": "lbt=rx",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "dcsleep=40 dcwake=40",
+    "pairs": 24
+  },
+  {
+    "label": "LSd40rssi6",
+    "knobs": "lbt=rssi rssim=6",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "dcsleep=40 dcwake=40",
+    "pairs": 24
+  },
+  {
+    "label": "LSd40cad4",
+    "knobs": "lbt=cad sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "dcsleep=40 dcwake=40",
+    "pairs": 24
+  },
+  {
+    "label": "LSd40cadrx4",
+    "knobs": "lbt=cadrx sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "dcsleep=40 dcwake=40",
+    "pairs": 24
+  },
+  {
+    "label": "LSd150rx",
+    "knobs": "lbt=rx",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "dcsleep=150 dcwake=50",
+    "pairs": 24
+  },
+  {
+    "label": "LSd150rssi6",
+    "knobs": "lbt=rssi rssim=6",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "dcsleep=150 dcwake=50",
+    "pairs": 24
+  },
+  {
+    "label": "LSd150cad4",
+    "knobs": "lbt=cad sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "dcsleep=150 dcwake=50",
+    "pairs": 24
+  },
+  {
+    "label": "LSd150cadrx4",
+    "knobs": "lbt=cadrx sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "dcsleep=150 dcwake=50",
+    "pairs": 24
+  },
+  {
+    "label": "LHh44rx",
+    "knobs": "lbt=rx",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=4/4",
+    "pairs": 24
+  },
+  {
+    "label": "LHh44rssi6",
+    "knobs": "lbt=rssi rssim=6",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=4/4",
+    "pairs": 24
+  },
+  {
+    "label": "LHh44cad4",
+    "knobs": "lbt=cad sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=4/4",
+    "pairs": 24
+  },
+  {
+    "label": "LHh44cadrx4",
+    "knobs": "lbt=cadrx sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=4/4",
+    "pairs": 24
+  },
+  {
+    "label": "LHh412rx",
+    "knobs": "lbt=rx",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=4/12",
+    "pairs": 24
+  },
+  {
+    "label": "LHh412rssi6",
+    "knobs": "lbt=rssi rssim=6",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=4/12",
+    "pairs": 24
+  },
+  {
+    "label": "LHh412cad4",
+    "knobs": "lbt=cad sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=4/12",
+    "pairs": 24
+  },
+  {
+    "label": "LHh412cadrx4",
+    "knobs": "lbt=cadrx sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=4/12",
+    "pairs": 24
+  },
+  {
+    "label": "LHh88rx",
+    "knobs": "lbt=rx",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=8/8",
+    "pairs": 24
+  },
+  {
+    "label": "LHh88rssi6",
+    "knobs": "lbt=rssi rssim=6",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=8/8",
+    "pairs": 24
+  },
+  {
+    "label": "LHh88cad4",
+    "knobs": "lbt=cad sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=8/8",
+    "pairs": 24
+  },
+  {
+    "label": "LHh88cadrx4",
+    "knobs": "lbt=cadrx sym=4",
+    "ways": 2,
+    "mode": "dc",
+    "dc_knobs": "rxdc=8/8",
+    "pairs": 24
+  }
 ]

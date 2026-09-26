@@ -1,9 +1,9 @@
 #include "configuration.h"
 
 #if (defined(USE_LR2021) || defined(ARCH_PORTDUINO)) && RADIOLIB_EXCLUDE_LR2021 != 1
+#include "BenchKnobs.h"
 #include "LR20x0Band.h"
 #include "LR20x0Interface.h"
-#include "BenchKnobs.h"
 #include "error.h"
 #include "mesh/NodeDB.h"
 

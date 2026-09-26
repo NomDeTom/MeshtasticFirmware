@@ -74,7 +74,8 @@ def open_ports() -> list[dict]:
     """Owners holding an open interface right now, for leak checks and diagnostics."""
     return [
         {"node": o.node.name, "port": o.port, "state": o.state}
-        for o in list(_LIVE) if o.iface is not None
+        for o in list(_LIVE)
+        if o.iface is not None
     ]
 
 
@@ -202,7 +203,9 @@ class PortOwner:
             "port": self.port,
             "reconnects": self.reconnects,
             "dropped_for_s": (
-                None if self.dropped_at is None else round(time.time() - self.dropped_at, 1)
+                None
+                if self.dropped_at is None
+                else round(time.time() - self.dropped_at, 1)
             ),
             "last_error": self.last_error,
             # Identity, declared and observed side by side.
@@ -213,8 +216,10 @@ class PortOwner:
             "node_id": self.observed_node_id,
             "firmware": self.firmware,
             "board_matches": (
-                None if not (self.node.board and self.observed_model)
-                else self.node.board.strip().upper() == self.observed_model.strip().upper()
+                None
+                if not (self.node.board and self.observed_model)
+                else self.node.board.strip().upper()
+                == self.observed_model.strip().upper()
             ),
             "never_command": self.node.never_command,
             "never_flash": self.node.never_flash,
@@ -258,7 +263,9 @@ class PortOwner:
                 # that is waiting for it to come back. Measured: capture reclaimed a node
                 # nineteen seconds after it was told to enter DFU, and the bootloader
                 # never appeared. Only wait_answering may bring a node back from here.
-                return Result(BUSY, "device is rebooting; awaiting its return", 0.0, budget_s)
+                return Result(
+                    BUSY, "device is rebooting; awaiting its return", 0.0, budget_s
+                )
             if self.iface is not None:
                 return Result(OK, "already held", 0.0, budget_s)
 
@@ -270,14 +277,20 @@ class PortOwner:
             iface, error = self._open(self.port, budget.remaining)
             if iface is None:
                 self.last_error = error
-                self._to(ST_LOST if self.dropped_at else ST_IDLE, error or "open failed")
-                return budget.result(TIMED_OUT if error is None else FAILED, error or "open timed out")
+                self._to(
+                    ST_LOST if self.dropped_at else ST_IDLE, error or "open failed"
+                )
+                return budget.result(
+                    TIMED_OUT if error is None else FAILED, error or "open timed out"
+                )
 
             self.iface = iface
             _LIVE.add(self)
             self.observe(iface)
             if self.dropped_at is not None:
-                self._event("capture_gap_closed", gap_s=round(time.time() - self.dropped_at, 1))
+                self._event(
+                    "capture_gap_closed", gap_s=round(time.time() - self.dropped_at, 1)
+                )
                 self.dropped_at = None
             self._opened_by = by
             self._to(ST_HELD, "capture open")
@@ -309,7 +322,9 @@ class PortOwner:
     def _rebooting_now(self) -> bool:
         return self.state == ST_REBOOTING and time.time() < self._reboot_until
 
-    def release(self, reason: str, abandon: bool = False, by: str | None = None) -> None:
+    def release(
+        self, reason: str, abandon: bool = False, by: str | None = None
+    ) -> None:
         """Stop holding the port. Only whoever opened it may.
 
         `abandon` skips the close entirely, and is mandatory whenever the device is
@@ -375,8 +390,12 @@ class PortOwner:
             if iface is None:
                 iface, error = self._open(self.resolve(), budget.remaining)
                 if iface is None:
-                    self._event("lease_failed", reason=reason, error=error or "timed out")
-                    raise PortBusy(f"{self.node.name}: could not open ({error or 'timed out'})")
+                    self._event(
+                        "lease_failed", reason=reason, error=error or "timed out"
+                    )
+                    raise PortBusy(
+                        f"{self.node.name}: could not open ({error or 'timed out'})"
+                    )
 
             yield iface
         finally:
@@ -388,16 +407,24 @@ class PortOwner:
                     self.iface = None
                     self.dropped_at = time.time()
                     self._mark_rebooting(
-                        f"{reason} (device rebooting)", reboot_window_s or REBOOT_HOLDOFF_S
+                        f"{reason} (device rebooting)",
+                        reboot_window_s or REBOOT_HOLDOFF_S,
                     )
                 else:
                     self.iface = iface
                     if iface is not None:
                         _LIVE.add(self)
-                    self._to(acquired_state if acquired_state == ST_HELD else ST_IDLE, "lease ended")
+                    self._to(
+                        acquired_state if acquired_state == ST_HELD else ST_IDLE,
+                        "lease ended",
+                    )
                 self._event(
-                    "lease_end", reason=reason, elapsed_s=round(budget.elapsed, 1),
-                    budget_s=budget_s, overran=budget.elapsed > budget_s, reboots=reboots,
+                    "lease_end",
+                    reason=reason,
+                    elapsed_s=round(budget.elapsed, 1),
+                    budget_s=budget_s,
+                    overran=budget.elapsed > budget_s,
+                    reboots=reboots,
                 )
             self._busy.release()
 
@@ -458,8 +485,11 @@ class PortOwner:
             with self._lock:
                 self._to(ST_IDLE, f"{reason} returned")
                 self._event(
-                    "lend_end", reason=reason, elapsed_s=round(budget.elapsed, 1),
-                    budget_s=budget_s, overran=budget.elapsed > budget_s,
+                    "lend_end",
+                    reason=reason,
+                    elapsed_s=round(budget.elapsed, 1),
+                    budget_s=budget_s,
+                    overran=budget.elapsed > budget_s,
                 )
             self._busy.release()
 
@@ -532,7 +562,9 @@ class PortOwner:
                 if p_port == port:
                     self._event("pending_open_adopted", port=port)
                     return p_out["iface"], None
-                threading.Thread(target=_safe_close, args=(p_out["iface"],), daemon=True).start()
+                threading.Thread(
+                    target=_safe_close, args=(p_out["iface"],), daemon=True
+                ).start()
 
         import meshtastic.serial_interface as si
 
@@ -596,7 +628,9 @@ def _claim_close(iface: Any) -> bool:
             return False
         try:
             iface._bench_closing = True
-        except Exception:  # noqa: BLE001 - an interface that refuses the flag is not ours
+        except (
+            Exception
+        ):  # noqa: BLE001 - an interface that refuses the flag is not ours
             return False
         return True
 
@@ -744,7 +778,9 @@ class Step:
             return None
         return round(el - self.budget_s, 1)
 
-    def add(self, step_id: str, name: str, budget_s: float, detail: str = "", **kw) -> "Step":
+    def add(
+        self, step_id: str, name: str, budget_s: float, detail: str = "", **kw
+    ) -> "Step":
         child = Step(step_id, name, budget_s, detail, **kw)
         self.children.append(child)
         return child
@@ -784,7 +820,9 @@ class Schedule:
 
     steps: list[Step] = field(default_factory=list)
 
-    def add(self, step_id: str, name: str, budget_s: float, detail: str = "", **kw) -> Step:
+    def add(
+        self, step_id: str, name: str, budget_s: float, detail: str = "", **kw
+    ) -> Step:
         step = Step(step_id, name, budget_s, detail, **kw)
         self.steps.append(step)
         return step
@@ -803,7 +841,9 @@ class Schedule:
             step.started_at = time.time()
         return step
 
-    def finish(self, step_id: str, status: str = DONE, outcome: str | None = None) -> Step | None:
+    def finish(
+        self, step_id: str, status: str = DONE, outcome: str | None = None
+    ) -> Step | None:
         step = self.find(step_id)
         if step is not None:
             step.status = status
@@ -842,10 +882,22 @@ class Schedule:
     def summary(self) -> str:
         lines = []
         for step in self.steps:
-            mark = {PLANNED: " ", RUNNING: ">", DONE: "x", SKIPPED: "-", FAILED_STEP: "!"}
-            lines.append(f"  [{mark.get(step.status, ' ')}] {step.name:42} {step.budget_s:6.0f}s  {step.detail}")
+            mark = {
+                PLANNED: " ",
+                RUNNING: ">",
+                DONE: "x",
+                SKIPPED: "-",
+                FAILED_STEP: "!",
+            }
+            lines.append(
+                f"  [{mark.get(step.status, ' ')}] {step.name:42} {step.budget_s:6.0f}s  {step.detail}"
+            )
             for child in step.children:
-                lines.append(f"        {mark.get(child.status, ' ')} {child.name:38} {child.budget_s:6.0f}s")
+                lines.append(
+                    f"        {mark.get(child.status, ' ')} {child.name:38} {child.budget_s:6.0f}s"
+                )
         hours, rem = divmod(int(self.total_s), 3600)
-        lines.append(f"  {'TOTAL (worst case)':46} {self.total_s:6.0f}s  = {hours}h{rem // 60:02d}m")
+        lines.append(
+            f"  {'TOTAL (worst case)':46} {self.total_s:6.0f}s  = {hours}h{rem // 60:02d}m"
+        )
         return "\n".join(lines)

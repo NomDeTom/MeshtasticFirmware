@@ -23,8 +23,11 @@ import sys
 import time
 from pathlib import Path
 
-from . import devices, ledger as ledger_mod, observer as observer_mod
+from . import devices
+from . import ledger as ledger_mod
+from . import observer as observer_mod
 from . import platform_probe, preflight, runner, scenario, server, streams
+
 
 # Run artifacts default to LOCAL storage, deliberately not the repo.
 #
@@ -118,7 +121,9 @@ def cmd_nodes(args: argparse.Namespace) -> int:
 
 def cmd_preflight(args: argparse.Namespace) -> int:
     nodes = load_nodes(Path(args.nodes)) if Path(args.nodes).exists() else []
-    report = preflight.run_preflight(nodes=nodes, firmware_root=Path(args.firmware_root))
+    report = preflight.run_preflight(
+        nodes=nodes, firmware_root=Path(args.firmware_root)
+    )
     print(report.summary())
     # Written where the dashboard reads it, not only printed here. A blocked preflight is
     # the one time nothing else will write this file - the run refuses to start - and it
@@ -134,7 +139,8 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
-    from . import builder, manifest as manifest_mod
+    from . import builder
+    from . import manifest as manifest_mod
 
     info = platform_probe.probe()
     if not info.pio:
@@ -149,7 +155,9 @@ def cmd_build(args: argparse.Namespace) -> int:
         root=Path(args.firmware_root),
         pio=info.pio,
         manifest=mf,
-        on_event=lambda k, d: print(f"[{k}] {json.dumps(d, default=str)[:200]}", flush=True),
+        on_event=lambda k, d: print(
+            f"[{k}] {json.dumps(d, default=str)[:200]}", flush=True
+        ),
     )
     outcome = b.build_all(wanted, force=args.force)
     print(json.dumps(outcome, indent=2))
@@ -183,13 +191,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001 - nothing listening is the normal case
             pass
         if already:
-            print(f"status: http://127.0.0.1:{args.port}/?run={run_dir.name}"
-                  "  (existing daemon)", flush=True)
+            print(
+                f"status: http://127.0.0.1:{args.port}/?run={run_dir.name}"
+                "  (existing daemon)",
+                flush=True,
+            )
         else:
             http = server.serve(run_dir.parent, port=args.port)
             threading.Thread(target=http.serve_forever, daemon=True).start()
-            print(f"status: http://127.0.0.1:{args.port}/?run={run_dir.name}"
-                  "  (read-only)", flush=True)
+            print(
+                f"status: http://127.0.0.1:{args.port}/?run={run_dir.name}"
+                "  (read-only)",
+                flush=True,
+            )
     try:
         summary = r.run()
     finally:
@@ -226,8 +240,10 @@ def cmd_firmware(args: argparse.Namespace) -> int:
         if not args.env:
             raise SystemExit("fetch needs a board env, e.g. nrf52_promicro_diy_tcxo")
         image = store.fetch_release(
-            args.env, tag=args.tag,
-            allow_prerelease=args.alpha, prerelease_only=args.alpha,
+            args.env,
+            tag=args.tag,
+            allow_prerelease=args.alpha,
+            prerelease_only=args.alpha,
         )
         print(f"stored {image.version} for {image.board}")
         print(f"  {image.path(store.root)}")
@@ -238,8 +254,10 @@ def cmd_firmware(args: argparse.Namespace) -> int:
         if not (args.file and args.env):
             raise SystemExit("add needs --file and a board env")
         image = store.add_file(
-            Path(args.file), board=fw._board_slug(args.env),
-            version=args.tag or "local", note=args.note or "added locally",
+            Path(args.file),
+            board=fw._board_slug(args.env),
+            version=args.tag or "local",
+            note=args.note or "added locally",
         )
         print(f"stored {image.version} for {image.board}: {image.path(store.root)}")
         return 0
@@ -254,8 +272,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     before anything exists and never needs restarting as builds and runs come and go -
     which is the whole point for headless and unattended work.
     """
-    root = Path(args.root) if args.root else (
-        Path(args.run_dir) if args.run_dir else DEFAULT_RUN_ROOT
+    root = (
+        Path(args.root)
+        if args.root
+        else (Path(args.run_dir) if args.run_dir else DEFAULT_RUN_ROOT)
     )
     root.mkdir(parents=True, exist_ok=True)
     http = server.serve(root, port=args.port, host=args.host)
@@ -311,7 +331,10 @@ def cmd_capture(args: argparse.Namespace) -> int:
         while time.monotonic() < deadline:
             time.sleep(5.0)
             status = obs.status()
-            live = {n: f"{v['packets']}p/{v['log_lines']}l" for n, v in status["nodes"].items()}
+            live = {
+                n: f"{v['packets']}p/{v['log_lines']}l"
+                for n, v in status["nodes"].items()
+            }
             print(f"  {int(deadline - time.monotonic()):>5}s left  {live}", flush=True)
     except KeyboardInterrupt:
         print("\ninterrupted")
@@ -330,7 +353,9 @@ def _run_dir(args: argparse.Namespace) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="bench", description="scripted hardware test bench")
+    p = argparse.ArgumentParser(
+        prog="bench", description="scripted hardware test bench"
+    )
     p.add_argument("--run", default="latest", help="run name under bench/runs")
     p.add_argument("--run-dir", default=None, help="explicit run directory")
     p.add_argument("--nodes", default=str(DEFAULT_NODES), help="node table JSON")
@@ -343,8 +368,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_nodes)
 
     s = sub.add_parser("preflight", help="stage -1 checks")
-    s.add_argument("--write", action="store_true",
-                   help="create the run directory if it does not exist and record there")
+    s.add_argument(
+        "--write",
+        action="store_true",
+        help="create the run directory if it does not exist and record there",
+    )
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_preflight)
 
@@ -359,8 +387,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--only", nargs="*", help="run only these scenario ids")
     s.add_argument("--skip-flash", action="store_true")
     s.add_argument("--skip-provision", action="store_true")
-    s.add_argument("--serve", action="store_true",
-                   help="serve status, reusing a running daemon if there is one")
+    s.add_argument(
+        "--serve",
+        action="store_true",
+        help="serve status, reusing a running daemon if there is one",
+    )
     s.add_argument("--port", type=int, default=8730)
     s.set_defaults(func=cmd_run)
 
@@ -368,19 +399,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", choices=["list", "fetch", "verify", "add"])
     s.add_argument("env", nargs="?", help="board env, e.g. nrf52_promicro_diy_tcxo")
     s.add_argument("--tag", default=None, help="a specific release tag")
-    s.add_argument("--alpha", action="store_true",
-                   help="fetch the newest PRERELEASE that has published binaries")
+    s.add_argument(
+        "--alpha",
+        action="store_true",
+        help="fetch the newest PRERELEASE that has published binaries",
+    )
     s.add_argument("--file", default=None, help="image to add from disk")
     s.add_argument("--note", default=None)
     s.add_argument("--root", default=None, help="store location")
     s.set_defaults(func=cmd_firmware)
 
     s = sub.add_parser("serve", help="read-only status daemon over all runs")
-    s.add_argument("--root", default=None,
-                   help=f"runs root to watch (default {DEFAULT_RUN_ROOT})")
+    s.add_argument(
+        "--root", default=None, help=f"runs root to watch (default {DEFAULT_RUN_ROOT})"
+    )
     s.add_argument("--port", type=int, default=8730)
-    s.add_argument("--host", default="127.0.0.1",
-                   help="0.0.0.0 to watch an unattended bench from another machine")
+    s.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="0.0.0.0 to watch an unattended bench from another machine",
+    )
     s.set_defaults(func=cmd_serve)
 
     s = sub.add_parser("status", help="one-line summary")

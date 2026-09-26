@@ -106,7 +106,9 @@ class Bake:
 
     # -- identity --------------------------------------------------------------
 
-    def fingerprint(self, git_sha: str | None = None, dirty: bool | None = None) -> dict:
+    def fingerprint(
+        self, git_sha: str | None = None, dirty: bool | None = None
+    ) -> dict:
         """Everything that makes this bake distinct, in a stable, comparable form."""
         if self.is_prebuilt:
             return {"env": self.env, "prebuilt": self.prebuilt, "label": self.label}
@@ -126,7 +128,9 @@ class Bake:
     def is_prebuilt(self) -> bool:
         return self.prebuilt is not None
 
-    def content_hash(self, git_sha: str | None = None, dirty: bool | None = None) -> str:
+    def content_hash(
+        self, git_sha: str | None = None, dirty: bool | None = None
+    ) -> str:
         """Short, stable hash over the fingerprint.
 
         Includes the git SHA and the dirty flag: the same flags against different source
@@ -144,7 +148,9 @@ class Bake:
             except OSError:
                 digest = hashlib.sha256(str(path).encode()).hexdigest()[:12]
             return digest
-        blob = json.dumps(self.fingerprint(git_sha, dirty), sort_keys=True, separators=(",", ":"))
+        blob = json.dumps(
+            self.fingerprint(git_sha, dirty), sort_keys=True, separators=(",", ":")
+        )
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
     # -- capability ------------------------------------------------------------
@@ -210,7 +216,12 @@ class Bake:
         """
         flags = dict(self.build_flags)
         flags["BENCH_BUILD_TAG"] = tag
-        return Bake(env=self.env, userprefs=dict(self.userprefs), build_flags=flags, label=self.label)
+        return Bake(
+            env=self.env,
+            userprefs=dict(self.userprefs),
+            build_flags=flags,
+            label=self.label,
+        )
 
 
 @dataclass
@@ -316,12 +327,16 @@ class Manifest:
         # A manifest entry whose artifact has since been deleted is not a built image.
         return all(Path(a).exists() for a in entry.artifacts) and bool(entry.artifacts)
 
-    def check_drift(self, scenario: str, role: str, bake: Bake, git_sha: str, dirty: bool) -> None:
+    def check_drift(
+        self, scenario: str, role: str, bake: Bake, git_sha: str, dirty: bool
+    ) -> None:
         """Refuse to flash an image that no longer matches its scenario's definition."""
         want = bake.content_hash(git_sha, dirty)
         have = self.assignments.get(f"{scenario}/{role}")
         if have is None:
-            raise DriftError(f"{scenario}/{role} has no built image; run the build stage")
+            raise DriftError(
+                f"{scenario}/{role} has no built image; run the build stage"
+            )
         if have != want:
             raise DriftError(
                 f"{scenario}/{role} was built from bake {have} but its current definition "
@@ -329,7 +344,9 @@ class Manifest:
                 "rebuild rather than asserting new expectations against old firmware."
             )
 
-    def missing_capabilities(self, scenario: str, role: str, required: Iterable[str]) -> list[str]:
+    def missing_capabilities(
+        self, scenario: str, role: str, required: Iterable[str]
+    ) -> list[str]:
         """Required capabilities this image cannot provide."""
         entry = self.image_for(scenario, role)
         if entry is None:

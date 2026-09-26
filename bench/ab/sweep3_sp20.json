@@ -1,130 +1,130 @@
 [
- {
-  "label": "P10s2Br1",
-  "knobs": "sync=0x2B pwr=10",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "P10s12r1",
-  "knobs": "sync=0x12 pwr=10",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "P10s2Br2",
-  "knobs": "sync=0x2B pwr=10",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "P10s12r2",
-  "knobs": "sync=0x12 pwr=10",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "P2s2Br1",
-  "knobs": "sync=0x2B pwr=2",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "P2s12r1",
-  "knobs": "sync=0x12 pwr=2",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "P2s2Br2",
-  "knobs": "sync=0x2B pwr=2",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "P2s12r2",
-  "knobs": "sync=0x12 pwr=2",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "Pm4s2Br1",
-  "knobs": "sync=0x2B pwr=-4",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "Pm4s12r1",
-  "knobs": "sync=0x12 pwr=-4",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "Pm4s2Br2",
-  "knobs": "sync=0x2B pwr=-4",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "Pm4s12r2",
-  "knobs": "sync=0x12 pwr=-4",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "Pm9s2Br1",
-  "knobs": "sync=0x2B pwr=-9",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "Pm9s12r1",
-  "knobs": "sync=0x12 pwr=-9",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "Pm9s2Br2",
-  "knobs": "sync=0x2B pwr=-9",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- },
- {
-  "label": "Pm9s12r2",
-  "knobs": "sync=0x12 pwr=-9",
-  "size": 100,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 2.5
- }
+  {
+    "label": "P10s2Br1",
+    "knobs": "sync=0x2B pwr=10",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "P10s12r1",
+    "knobs": "sync=0x12 pwr=10",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "P10s2Br2",
+    "knobs": "sync=0x2B pwr=10",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "P10s12r2",
+    "knobs": "sync=0x12 pwr=10",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "P2s2Br1",
+    "knobs": "sync=0x2B pwr=2",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "P2s12r1",
+    "knobs": "sync=0x12 pwr=2",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "P2s2Br2",
+    "knobs": "sync=0x2B pwr=2",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "P2s12r2",
+    "knobs": "sync=0x12 pwr=2",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "Pm4s2Br1",
+    "knobs": "sync=0x2B pwr=-4",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "Pm4s12r1",
+    "knobs": "sync=0x12 pwr=-4",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "Pm4s2Br2",
+    "knobs": "sync=0x2B pwr=-4",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "Pm4s12r2",
+    "knobs": "sync=0x12 pwr=-4",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "Pm9s2Br1",
+    "knobs": "sync=0x2B pwr=-9",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "Pm9s12r1",
+    "knobs": "sync=0x12 pwr=-9",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "Pm9s2Br2",
+    "knobs": "sync=0x2B pwr=-9",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  },
+  {
+    "label": "Pm9s12r2",
+    "knobs": "sync=0x12 pwr=-9",
+    "size": 100,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 2.5
+  }
 ]

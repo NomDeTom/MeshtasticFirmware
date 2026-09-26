@@ -1,336 +1,336 @@
 [
- {
-  "label": "J0li0",
-  "knobs": "li=0",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 0
- },
- {
-  "label": "J0li1",
-  "knobs": "li=1",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 0
- },
- {
-  "label": "J5li0",
-  "knobs": "li=0",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 5
- },
- {
-  "label": "J5li1",
-  "knobs": "li=1",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 5
- },
- {
-  "label": "J10li0",
-  "knobs": "li=0",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 10
- },
- {
-  "label": "J10li1",
-  "knobs": "li=1",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 10
- },
- {
-  "label": "J20li0",
-  "knobs": "li=0",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 20
- },
- {
-  "label": "J20li1",
-  "knobs": "li=1",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 20
- },
- {
-  "label": "J40li0",
-  "knobs": "li=0",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 40
- },
- {
-  "label": "J40li1",
-  "knobs": "li=1",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 40
- },
- {
-  "label": "J10li0w",
-  "knobs": "li=0",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 10,
-  "node_knobs": {
-   "w2": "pwr=-9"
+  {
+    "label": "J0li0",
+    "knobs": "li=0",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 0
+  },
+  {
+    "label": "J0li1",
+    "knobs": "li=1",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 0
+  },
+  {
+    "label": "J5li0",
+    "knobs": "li=0",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 5
+  },
+  {
+    "label": "J5li1",
+    "knobs": "li=1",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 5
+  },
+  {
+    "label": "J10li0",
+    "knobs": "li=0",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 10
+  },
+  {
+    "label": "J10li1",
+    "knobs": "li=1",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 10
+  },
+  {
+    "label": "J20li0",
+    "knobs": "li=0",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 20
+  },
+  {
+    "label": "J20li1",
+    "knobs": "li=1",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 20
+  },
+  {
+    "label": "J40li0",
+    "knobs": "li=0",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 40
+  },
+  {
+    "label": "J40li1",
+    "knobs": "li=1",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 40
+  },
+  {
+    "label": "J10li0w",
+    "knobs": "li=0",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 10,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    }
+  },
+  {
+    "label": "J10li1w",
+    "knobs": "li=1",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 10,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    }
+  },
+  {
+    "label": "J20li0w",
+    "knobs": "li=0",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 20,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    }
+  },
+  {
+    "label": "J20li1w",
+    "knobs": "li=1",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "jam_ms": 20,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    }
+  },
+  {
+    "label": "JPm4j0li0",
+    "knobs": "li=0 pwr=-4",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 0
+  },
+  {
+    "label": "JPm4j0li1",
+    "knobs": "li=1 pwr=-4",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 0
+  },
+  {
+    "label": "JPm4j10li0",
+    "knobs": "li=0 pwr=-4",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 10
+  },
+  {
+    "label": "JPm4j10li1",
+    "knobs": "li=1 pwr=-4",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 10
+  },
+  {
+    "label": "JPm4j20li0",
+    "knobs": "li=0 pwr=-4",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 20
+  },
+  {
+    "label": "JPm4j20li1",
+    "knobs": "li=1 pwr=-4",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 20
+  },
+  {
+    "label": "JPm9j0li0",
+    "knobs": "li=0 pwr=-9",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 0
+  },
+  {
+    "label": "JPm9j0li1",
+    "knobs": "li=1 pwr=-9",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 0
+  },
+  {
+    "label": "JPm9j10li0",
+    "knobs": "li=0 pwr=-9",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 10
+  },
+  {
+    "label": "JPm9j10li1",
+    "knobs": "li=1 pwr=-9",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 10
+  },
+  {
+    "label": "JPm9j20li0",
+    "knobs": "li=0 pwr=-9",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 20
+  },
+  {
+    "label": "JPm9j20li1",
+    "knobs": "li=1 pwr=-9",
+    "size": 249,
+    "skew": 4,
+    "pairs": 20,
+    "interval": 3.0,
+    "jammer": "w2",
+    "jam_at": 0.5,
+    "node_knobs": {
+      "w2": "pwr=-9"
+    },
+    "jam_ms": 20
   }
- },
- {
-  "label": "J10li1w",
-  "knobs": "li=1",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 10,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  }
- },
- {
-  "label": "J20li0w",
-  "knobs": "li=0",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 20,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  }
- },
- {
-  "label": "J20li1w",
-  "knobs": "li=1",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "jam_ms": 20,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  }
- },
- {
-  "label": "JPm4j0li0",
-  "knobs": "li=0 pwr=-4",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 0
- },
- {
-  "label": "JPm4j0li1",
-  "knobs": "li=1 pwr=-4",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 0
- },
- {
-  "label": "JPm4j10li0",
-  "knobs": "li=0 pwr=-4",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 10
- },
- {
-  "label": "JPm4j10li1",
-  "knobs": "li=1 pwr=-4",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 10
- },
- {
-  "label": "JPm4j20li0",
-  "knobs": "li=0 pwr=-4",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 20
- },
- {
-  "label": "JPm4j20li1",
-  "knobs": "li=1 pwr=-4",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 20
- },
- {
-  "label": "JPm9j0li0",
-  "knobs": "li=0 pwr=-9",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 0
- },
- {
-  "label": "JPm9j0li1",
-  "knobs": "li=1 pwr=-9",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 0
- },
- {
-  "label": "JPm9j10li0",
-  "knobs": "li=0 pwr=-9",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 10
- },
- {
-  "label": "JPm9j10li1",
-  "knobs": "li=1 pwr=-9",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 10
- },
- {
-  "label": "JPm9j20li0",
-  "knobs": "li=0 pwr=-9",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 20
- },
- {
-  "label": "JPm9j20li1",
-  "knobs": "li=1 pwr=-9",
-  "size": 249,
-  "skew": 4,
-  "pairs": 20,
-  "interval": 3.0,
-  "jammer": "w2",
-  "jam_at": 0.5,
-  "node_knobs": {
-   "w2": "pwr=-9"
-  },
-  "jam_ms": 20
- }
 ]

@@ -5,14 +5,20 @@
       "serial_number": "43C2192F2DFEE099",
       "role": "dut",
       "board": "NRF52_PROMICRO_DIY",
-      "notes": ["SX1262 promicro (b3fb); contention sender A", "TCXO status unconfirmed until row I1"]
+      "notes": [
+        "SX1262 promicro (b3fb); contention sender A",
+        "TCXO status unconfirmed until row I1"
+      ]
     },
     {
       "name": "peer",
       "serial_number": "69DCAE3411236A3E",
       "role": "peer",
       "board": "NRF52_PROMICRO_DIY",
-      "notes": ["SX1262 promicro (0e3c); contention sender B", "TCXO status unconfirmed until row I1"]
+      "notes": [
+        "SX1262 promicro (0e3c); contention sender B",
+        "TCXO status unconfirmed until row I1"
+      ]
     },
     {
       "name": "witness",
@@ -29,7 +35,9 @@
       "serial_number": "06E3F87E62341649",
       "role": "lr",
       "board": "NRF52_PROMICRO_DIY",
-      "notes": ["LR2021 promicro (b6d6); second passive witness in the SX1262 contention rows"]
+      "notes": [
+        "LR2021 promicro (b6d6); second passive witness in the SX1262 contention rows"
+      ]
     }
   ]
 }

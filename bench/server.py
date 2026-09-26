@@ -74,7 +74,6 @@ STAGE_MEDIANS_S = {
 }
 
 
-
 # Files that mark a directory as a bench run. A build-only invocation writes only a
 # manifest and a build log, and must still be visible - it is the longest stage.
 RUN_MARKERS = ("state.json", "results.json", "manifest.json", "events.jsonl", "builds")
@@ -173,7 +172,6 @@ def resolve_run(root: Path, name: str | None) -> Path | None:
     return Path(rows[0]["path"]) if rows else None
 
 
-
 def devices_view(state: dict, run_status: str, beat_age: float | None) -> list[dict]:
     """One row per device: what is true NOW, and what the run last recorded.
 
@@ -216,9 +214,8 @@ def devices_view(state: dict, run_status: str, beat_age: float | None) -> list[d
             "firmware": recorded.get("firmware"),
             "never_command": node.get("never_command"),
             "never_flash": node.get("never_flash"),
-            "capture": recorded.get("capture") or (
-                "raw serial" if node.get("never_command") else "protobuf api"
-            ),
+            "capture": recorded.get("capture")
+            or ("raw serial" if node.get("never_command") else "protobuf api"),
             # Live, and labelled as such.
             "present": seen is not None,
             "port": seen.port if seen else None,
@@ -232,7 +229,8 @@ def devices_view(state: dict, run_status: str, beat_age: float | None) -> list[d
         }
         declared, observed = row["declared_board"], row["observed_model"]
         row["board_matches"] = (
-            None if not (declared and observed)
+            None
+            if not (declared and observed)
             else declared.strip().upper() == observed.strip().upper()
         )
         out.append(row)
@@ -249,7 +247,9 @@ def read_state(run_dir: Path) -> dict:
 
     beats = list(streams.read_stream(run_dir, streams.STATUS))
     last_beat = beats[-1] if beats else None
-    beat_age = None if last_beat is None else round(time.time() - last_beat.get("ts", 0), 1)
+    beat_age = (
+        None if last_beat is None else round(time.time() - last_beat.get("ts", 0), 1)
+    )
 
     status = _liveness(state, results, beat_age)
     return {
@@ -277,7 +277,10 @@ def read_state(run_dir: Path) -> dict:
             # rather than something slow - which a percentage bar could never say.
             "planned_total_s": (state.get("schedule") or {}).get("total_s"),
             "over_plan": (
-                bool(state.get("elapsed_s", 0) > (state.get("schedule") or {}).get("total_s", 1e9))
+                bool(
+                    state.get("elapsed_s", 0)
+                    > (state.get("schedule") or {}).get("total_s", 1e9)
+                )
             ),
         },
         "schedule": state.get("schedule"),
@@ -293,8 +296,9 @@ def read_state(run_dir: Path) -> dict:
             ),
         },
         "counts": state.get("counts", {}),
-        "rows": _rows(results, state.get("attempt_started_at"),
-                      state.get("pending_retry", [])),
+        "rows": _rows(
+            results, state.get("attempt_started_at"), state.get("pending_retry", [])
+        ),
         "carried_over": state.get("carried_over", 0),
         "nodes": state.get("nodes", []),
         "observer": state.get("observer"),
@@ -337,14 +341,17 @@ def _rows(
                 # was never a statement about the run in front of the reader.
                 "verdict": "PLANNED" if scenario_id in pending else row.get("verdict"),
                 "pending_retry": scenario_id in pending,
-                "previous_verdict": row.get("verdict") if scenario_id in pending else None,
+                "previous_verdict": (
+                    row.get("verdict") if scenario_id in pending else None
+                ),
                 "error": None if scenario_id in pending else row.get("error"),
                 "release_representative": row.get("release_representative", True),
                 # True when this verdict was banked by an EARLIER attempt at this run id.
                 # Resuming keeps finished rows, so without this a stale verdict reads as
                 # something the run in front of you just measured.
                 "carried_over": bool(
-                    attempt_started_at and (row.get("ended_at") or 0) < attempt_started_at
+                    attempt_started_at
+                    and (row.get("ended_at") or 0) < attempt_started_at
                 ),
                 "images": row.get("images", {}),
                 "duration_s": (
@@ -416,7 +423,11 @@ def build_tail(run_dir: Path, limit: int = 25) -> dict:
     thing worth watching while an image compiles.
     """
     builds = Path(run_dir) / "builds"
-    logs = sorted(builds.glob("*.log"), key=lambda p: p.stat().st_mtime) if builds.is_dir() else []
+    logs = (
+        sorted(builds.glob("*.log"), key=lambda p: p.stat().st_mtime)
+        if builds.is_dir()
+        else []
+    )
     if not logs:
         return {"bake_hash": None, "lines": [], "path": None}
     newest = logs[-1]
@@ -438,7 +449,9 @@ def build_tail(run_dir: Path, limit: int = 25) -> dict:
     }
 
 
-def tail(run_dir: Path, stream: str, limit: int = 40, node: str | None = None) -> list[dict]:
+def tail(
+    run_dir: Path, stream: str, limit: int = 40, node: str | None = None
+) -> list[dict]:
     rows = list(streams.read_stream(Path(run_dir), stream))
     if node:
         rows = [r for r in rows if r.get("node") == node]
@@ -469,7 +482,11 @@ def tail_sources(run_dir: Path, rows: list[dict]) -> dict:
         if not name:
             continue
         if ev.get("kind") == "port_state":
-            states[name] = {"state": ev.get("now"), "why": ev.get("why"), "ts": ev.get("ts")}
+            states[name] = {
+                "state": ev.get("now"),
+                "why": ev.get("why"),
+                "ts": ev.get("ts"),
+            }
         elif ev.get("kind") in ("flash_start", "enter_dfu", "dfu_via"):
             states.setdefault(name, {})["last_flash_event"] = ev.get("kind")
 
@@ -530,9 +547,14 @@ class _Handler(BaseHTTPRequestHandler):
                 if path == "/status.txt":
                     self._text("no runs yet under " + str(self.root))
                 else:
-                    self._json({"status": NO_RUN, "root": str(self.root),
-                                "server_started_at": SERVER_STARTED_AT,
-                                "runs": discover_runs(self.root)})
+                    self._json(
+                        {
+                            "status": NO_RUN,
+                            "root": str(self.root),
+                            "server_started_at": SERVER_STARTED_AT,
+                            "runs": discover_runs(self.root),
+                        }
+                    )
                 return
 
             if path == "/status.json":
@@ -543,14 +565,20 @@ class _Handler(BaseHTTPRequestHandler):
                 self._text(one_line(read_state(run)))
             elif path == "/tail.json":
                 logs = tail(run, streams.LOGS)
-                self._json({"run": run.name,
-                            "logs": logs,
-                            "events": tail(run, streams.EVENTS, 20),
-                            "sources": tail_sources(run, logs),
-                            "build": build_tail(run)})
+                self._json(
+                    {
+                        "run": run.name,
+                        "logs": logs,
+                        "events": tail(run, streams.EVENTS, 20),
+                        "sources": tail_sources(run, logs),
+                        "build": build_tail(run),
+                    }
+                )
             else:
                 self.send_error(404, "not found")
-        except Exception as exc:  # noqa: BLE001 - a broken render must not kill the server
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - a broken render must not kill the server
             self._json({"error": f"{type(exc).__name__}: {exc}"}, code=500)
 
     def _json(self, payload: Any, code: int = 200) -> None:

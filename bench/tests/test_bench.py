@@ -11,10 +11,10 @@ distinction, and preprocessor-faithful capability derivation.
 from __future__ import annotations
 
 import json
-import tempfile
-import time
 import os
+import tempfile
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -40,13 +40,23 @@ class TestPackets(unittest.TestCase):
             },
             observer="dut",
         )
-        for field in ("hop_start", "via_mqtt", "transport_mechanism", "tx_after",
-                      "priority", "pki_encrypted", "xeddsa_signed", "rx_time"):
+        for field in (
+            "hop_start",
+            "via_mqtt",
+            "transport_mechanism",
+            "tx_after",
+            "priority",
+            "pki_encrypted",
+            "xeddsa_signed",
+            "rx_time",
+        ):
             self.assertIn(field, row)
         self.assertEqual(row["hops_taken"], 1)
 
     def test_never_stores_key_material(self):
-        row = packets.summarize({"id": 1, "publicKey": b"secret-key-bytes" * 2}, observer="o")
+        row = packets.summarize(
+            {"id": 1, "publicKey": b"secret-key-bytes" * 2}, observer="o"
+        )
         self.assertEqual(row["public_key_len"], 32)
         self.assertNotIn("public_key", row)
         self.assertNotIn("secret", json.dumps(row))
@@ -71,24 +81,56 @@ class TestPackets(unittest.TestCase):
         self.assertNotIn("!", rendered)
 
     def test_decrypt_failure_is_derived_from_signal_without_portnum(self):
-        failed = packets.summarize({"id": 2, "encrypted": b"\xde\xad", "rxRssi": -64}, observer="o")
+        failed = packets.summarize(
+            {"id": 2, "encrypted": b"\xde\xad", "rxRssi": -64}, observer="o"
+        )
         self.assertEqual(failed["status"], packets.ST_DECRYPT_FAIL)
-        ok = packets.summarize({"id": 3, "decoded": {"portnum": "X", "payload": b"a"}}, observer="o")
+        ok = packets.summarize(
+            {"id": 3, "decoded": {"portnum": "X", "payload": b"a"}}, observer="o"
+        )
         self.assertEqual(ok["status"], packets.ST_OK)
 
 
 class TestLedger(unittest.TestCase):
     def rows(self):
-        base = {"observer": "obs", "dir": "SEEN", "portnum": "TEXT_MESSAGE_APP",
-                "from_node": "!aaa", "to_node": "^all", "status": "OK", "payload_size": 10}
+        base = {
+            "observer": "obs",
+            "dir": "SEEN",
+            "portnum": "TEXT_MESSAGE_APP",
+            "from_node": "!aaa",
+            "to_node": "^all",
+            "status": "OK",
+            "payload_size": 10,
+        }
         return [
-            {**base, "id": 1, "ts": 1.0, "rx_rssi": -38, "rx_snr": 6.0, "hops_taken": 0,
-             "relay_node": {"raw": None, "status": "not_set"}},
+            {
+                **base,
+                "id": 1,
+                "ts": 1.0,
+                "rx_rssi": -38,
+                "rx_snr": 6.0,
+                "hops_taken": 0,
+                "relay_node": {"raw": None, "status": "not_set"},
+            },
             # Same packet id, different path: a relayed copy at a very different level.
-            {**base, "id": 1, "ts": 1.5, "rx_rssi": -73, "rx_snr": 2.0, "hops_taken": 1,
-             "relay_node": {"raw": 0xDC, "status": "unique", "node_num": 0x77E4F0DC}},
-            {**base, "id": 2, "ts": 2.0, "rx_rssi": -60, "rx_snr": 5.0, "hops_taken": 0,
-             "relay_node": {"raw": None, "status": "not_set"}},
+            {
+                **base,
+                "id": 1,
+                "ts": 1.5,
+                "rx_rssi": -73,
+                "rx_snr": 2.0,
+                "hops_taken": 1,
+                "relay_node": {"raw": 0xDC, "status": "unique", "node_num": 0x77E4F0DC},
+            },
+            {
+                **base,
+                "id": 2,
+                "ts": 2.0,
+                "rx_rssi": -60,
+                "rx_snr": 5.0,
+                "hops_taken": 0,
+                "relay_node": {"raw": None, "status": "not_set"},
+            },
         ]
 
     def test_deduplicates_by_id_but_keeps_distinct_paths(self):
@@ -109,31 +151,58 @@ class TestLedger(unittest.TestCase):
 
     def test_rf_only_excludes_traffic_that_never_crossed_the_air(self):
         rows = self.rows() + [
-            {"id": 9, "ts": 3.0, "observer": "obs", "dir": "SEEN", "status": "OK",
-             "via_mqtt": True, "rx_rssi": None, "rx_snr": None, "relay_node": {}},
+            {
+                "id": 9,
+                "ts": 3.0,
+                "observer": "obs",
+                "dir": "SEEN",
+                "status": "OK",
+                "via_mqtt": True,
+                "rx_rssi": None,
+                "rx_snr": None,
+                "relay_node": {},
+            },
         ]
         lane = ledger.PacketLane(rows)
         self.assertEqual(lane.count(), 3)
         self.assertEqual(lane.count(rf_only=True), 2)
 
     def test_decrypt_failures_grouped_by_source(self):
-        lane = ledger.PacketLane([
-            {"id": 5, "ts": 1.0, "observer": "o", "from_node": "!bad", "status": "DECRYPT_FAIL",
-             "relay_node": {}},
-            {"id": 6, "ts": 1.0, "observer": "o", "from_node": "!bad", "status": "DECRYPT_FAIL",
-             "relay_node": {}},
-        ])
+        lane = ledger.PacketLane(
+            [
+                {
+                    "id": 5,
+                    "ts": 1.0,
+                    "observer": "o",
+                    "from_node": "!bad",
+                    "status": "DECRYPT_FAIL",
+                    "relay_node": {},
+                },
+                {
+                    "id": 6,
+                    "ts": 1.0,
+                    "observer": "o",
+                    "from_node": "!bad",
+                    "status": "DECRYPT_FAIL",
+                    "relay_node": {},
+                },
+            ]
+        )
         self.assertEqual(lane.decrypt_failures_by_source(), {"!bad": 2})
 
     def test_log_lane_accepts_alternative_wordings(self):
-        lane = ledger.LogLane([
-            {"node": "dut", "line": "Received text msg from=0x1"},
-            {"node": "dut", "line": "phone downloaded packet (id=0x2 fr=0x1)"},
-        ])
+        lane = ledger.LogLane(
+            [
+                {"node": "dut", "line": "Received text msg from=0x1"},
+                {"node": "dut", "line": "phone downloaded packet (id=0x2 fr=0x1)"},
+            ]
+        )
         # One wording finds one line; the pair finds both. This is the failure that
         # scored a demonstrably working link as zero received, twice.
         self.assertEqual(lane.count([r"Received text msg"]), 1)
-        self.assertEqual(lane.count([r"Received text msg", r"phone downloaded packet"]), 2)
+        self.assertEqual(
+            lane.count([r"Received text msg", r"phone downloaded packet"]), 2
+        )
 
 
 class TestStreams(unittest.TestCase):
@@ -158,8 +227,10 @@ class TestStreams(unittest.TestCase):
         self.rec.mark("S1:end")
         self.rec.log(node="dut", line="after")
         self.rec.close()
-        lines = [r.get("line") for r in
-                 streams.between_marks(self.dir, "S1:start", "S1:end", streams.LOGS)]
+        lines = [
+            r.get("line")
+            for r in streams.between_marks(self.dir, "S1:start", "S1:end", streams.LOGS)
+        ]
         self.assertIn("inside", lines)
         self.assertNotIn("before", lines)
         self.assertNotIn("after", lines)
@@ -190,15 +261,27 @@ class TestManifestAndBuilder(unittest.TestCase):
 
     def test_same_flags_against_different_source_are_different_images(self):
         bake = manifest.Bake("env")
-        self.assertNotEqual(bake.content_hash("aaa", False), bake.content_hash("bbb", False))
-        self.assertNotEqual(bake.content_hash("aaa", False), bake.content_hash("aaa", True))
+        self.assertNotEqual(
+            bake.content_hash("aaa", False), bake.content_hash("bbb", False)
+        )
+        self.assertNotEqual(
+            bake.content_hash("aaa", False), bake.content_hash("aaa", True)
+        )
 
     def test_capabilities_follow_the_preprocessor_not_python_truthiness(self):
         # -DFOO=0 defines the macro and disables the feature.
-        self.assertNotIn(manifest.LOG_TRACE,
-                         manifest.Bake("e", build_flags={"MESHTASTIC_TRACE_LOGGING": 0}).capabilities())
-        self.assertIn(manifest.LOG_TRACE,
-                      manifest.Bake("e", build_flags={"MESHTASTIC_TRACE_LOGGING": 1}).capabilities())
+        self.assertNotIn(
+            manifest.LOG_TRACE,
+            manifest.Bake(
+                "e", build_flags={"MESHTASTIC_TRACE_LOGGING": 0}
+            ).capabilities(),
+        )
+        self.assertIn(
+            manifest.LOG_TRACE,
+            manifest.Bake(
+                "e", build_flags={"MESHTASTIC_TRACE_LOGGING": 1}
+            ).capabilities(),
+        )
 
     def test_segger_moves_the_log_sink_out_of_reach(self):
         caps = manifest.Bake("e", build_flags={"USE_SEGGER": 1}).capabilities()
@@ -206,9 +289,13 @@ class TestManifestAndBuilder(unittest.TestCase):
         self.assertNotIn(manifest.LOG_SINK_API, caps)
 
     def test_bench_only_flags_break_release_representativeness(self):
-        self.assertTrue(manifest.Bake("e", build_flags={"DEBUG_HEAP": 1}).release_representative())
+        self.assertTrue(
+            manifest.Bake("e", build_flags={"DEBUG_HEAP": 1}).release_representative()
+        )
         self.assertFalse(
-            manifest.Bake("e", build_flags={"MESHTASTIC_TRACE_LOGGING": 1}).release_representative()
+            manifest.Bake(
+                "e", build_flags={"MESHTASTIC_TRACE_LOGGING": 1}
+            ).release_representative()
         )
 
     def test_the_build_tag_does_not_disqualify_an_image_but_must_not_ship(self):
@@ -219,7 +306,9 @@ class TestManifestAndBuilder(unittest.TestCase):
         self.assertEqual(tagged.must_not_ship(), ["BENCH_BUILD_TAG"])
 
         # A flag that does change behaviour still disqualifies, tag or no tag.
-        traced = manifest.Bake("e", build_flags={"MESHTASTIC_TRACE_LOGGING": 1}).with_build_tag("x")
+        traced = manifest.Bake(
+            "e", build_flags={"MESHTASTIC_TRACE_LOGGING": 1}
+        ).with_build_tag("x")
         self.assertFalse(traced.release_representative())
 
     def test_drift_guard_refuses_a_stale_image(self):
@@ -248,7 +337,9 @@ class TestManifestAndBuilder(unittest.TestCase):
                 pass
 
     def test_flag_translation_matches_the_preprocessor(self):
-        env = builder.build_flags_env({"BARE": True, "VAL": 7, "OFF": False, "NONE": None})
+        env = builder.build_flags_env(
+            {"BARE": True, "VAL": 7, "OFF": False, "NONE": None}
+        )
         self.assertEqual(env["PLATFORMIO_BUILD_FLAGS"], "-DBARE -DVAL=7")
 
     def test_build_lock_is_exclusive(self):
@@ -261,58 +352,94 @@ class TestManifestAndBuilder(unittest.TestCase):
 
 class TestScenario(unittest.TestCase):
     def empty_ledger(self, log_rows=()):
-        return ledger.Ledger(packets=ledger.PacketLane([]), logs=ledger.LogLane(log_rows))
+        return ledger.Ledger(
+            packets=ledger.PacketLane([]), logs=ledger.LogLane(log_rows)
+        )
 
     def test_missing_capability_is_invalid_not_not_observed(self):
-        check = scenario.LogCount("needs_trace", ["x"], at_least=1, requires=["log.TRACE"])
-        outcome = check.evaluate(self.empty_ledger(), scenario.Context("S", capabilities={"dut": set()}))
+        check = scenario.LogCount(
+            "needs_trace", ["x"], at_least=1, requires=["log.TRACE"]
+        )
+        outcome = check.evaluate(
+            self.empty_ledger(), scenario.Context("S", capabilities={"dut": set()})
+        )
         self.assertEqual(outcome.verdict, scenario.INVALID)
 
     def test_absent_evidence_with_capability_present_is_not_observed(self):
         check = scenario.LogCount("wanted", ["never-appears"], at_least=1)
         ctx = scenario.Context("S", capabilities={"dut": {"log.DEBUG"}})
-        self.assertEqual(check.evaluate(self.empty_ledger(), ctx).verdict, scenario.NOT_OBSERVED)
+        self.assertEqual(
+            check.evaluate(self.empty_ledger(), ctx).verdict, scenario.NOT_OBSERVED
+        )
 
     def test_too_few_trials_is_not_observed_not_fail(self):
         rows = [{"node": "dut", "line": "CAD arm"}, {"node": "dut", "line": "CAD arm"}]
-        check = scenario.RateAssertion("r", ["CAD busy"], ["CAD arm"], node="dut", min_trials=10)
-        outcome = check.evaluate(self.empty_ledger(rows), scenario.Context("S", capabilities={"dut": set()}))
+        check = scenario.RateAssertion(
+            "r", ["CAD busy"], ["CAD arm"], node="dut", min_trials=10
+        )
+        outcome = check.evaluate(
+            self.empty_ledger(rows), scenario.Context("S", capabilities={"dut": set()})
+        )
         self.assertEqual(outcome.verdict, scenario.NOT_OBSERVED)
 
     def test_rate_below_threshold_with_enough_trials_fails(self):
         rows = [{"node": "dut", "line": "CAD arm"} for _ in range(10)]
-        check = scenario.RateAssertion("r", ["CAD busy"], ["CAD arm"], node="dut",
-                                       min_rate=0.5, min_trials=5)
-        outcome = check.evaluate(self.empty_ledger(rows), scenario.Context("S", capabilities={"dut": set()}))
+        check = scenario.RateAssertion(
+            "r", ["CAD busy"], ["CAD arm"], node="dut", min_rate=0.5, min_trials=5
+        )
+        outcome = check.evaluate(
+            self.empty_ledger(rows), scenario.Context("S", capabilities={"dut": set()})
+        )
         self.assertEqual(outcome.verdict, scenario.FAIL)
 
     def test_precondition_yields_not_observed_rather_than_failing_good_firmware(self):
-        check = scenario.LogCount("restored", ["restore"], at_least=1,
-                                  precondition=lambda ctx: ctx.params.get("target_rf_differs", False),
-                                  precondition_reason="target uses home RF, no switch to restore")
-        outcome = check.evaluate(self.empty_ledger(), scenario.Context("S", capabilities={"dut": set()}))
+        check = scenario.LogCount(
+            "restored",
+            ["restore"],
+            at_least=1,
+            precondition=lambda ctx: ctx.params.get("target_rf_differs", False),
+            precondition_reason="target uses home RF, no switch to restore",
+        )
+        outcome = check.evaluate(
+            self.empty_ledger(), scenario.Context("S", capabilities={"dut": set()})
+        )
         self.assertEqual(outcome.verdict, scenario.NOT_OBSERVED)
         self.assertIn("home RF", outcome.evidence)
 
     def test_from_role_resolves_to_a_node_id_and_never_passes_vacuously(self):
         led = ledger.Ledger(
-            packets=ledger.PacketLane([{"id": 1, "ts": 1.0, "observer": "observer",
-                                        "from_node": "!abc", "status": "OK",
-                                        "rx_rssi": -50, "relay_node": {}}]),
-            logs=ledger.LogLane([]))
-        check = scenario.PacketCount("silent", observer="observer", from_role="dut", at_most=0)
+            packets=ledger.PacketLane(
+                [
+                    {
+                        "id": 1,
+                        "ts": 1.0,
+                        "observer": "observer",
+                        "from_node": "!abc",
+                        "status": "OK",
+                        "rx_rssi": -50,
+                        "relay_node": {},
+                    }
+                ]
+            ),
+            logs=ledger.LogLane([]),
+        )
+        check = scenario.PacketCount(
+            "silent", observer="observer", from_role="dut", at_most=0
+        )
 
         # No settled state: the check cannot address its subject, so an at_most bound
         # must not pass by matching nothing.
         unprovisioned = scenario.Context("S", capabilities={"dut": set()})
         self.assertEqual(check.evaluate(led, unprovisioned).verdict, scenario.INVALID)
 
-        silent = scenario.Context("S", capabilities={"dut": set()},
-                                  settled={"dut": {"node_id": "!dead"}})
+        silent = scenario.Context(
+            "S", capabilities={"dut": set()}, settled={"dut": {"node_id": "!dead"}}
+        )
         self.assertEqual(check.evaluate(led, silent).verdict, scenario.PASS)
 
-        talking = scenario.Context("S", capabilities={"dut": set()},
-                                   settled={"dut": {"node_id": "!abc"}})
+        talking = scenario.Context(
+            "S", capabilities={"dut": set()}, settled={"dut": {"node_id": "!abc"}}
+        )
         self.assertEqual(check.evaluate(led, talking).verdict, scenario.FAIL)
 
     def test_packet_assertion_against_a_raw_captured_node_is_invalid(self):
@@ -325,75 +452,120 @@ class TestScenario(unittest.TestCase):
         self.assertIn("raw serial", outcome.evidence)
 
     def test_observer_silence_needs_the_observer_to_have_been_listening(self):
-        heard = [{"node": "observer", "line": "Received text msg from=0x77e4f0dc"},
-                 {"node": "observer", "line": "unrelated"}]
-        check = scenario.ObserverSilence("sil", observer_node="observer", from_role="dut")
+        heard = [
+            {"node": "observer", "line": "Received text msg from=0x77e4f0dc"},
+            {"node": "observer", "line": "unrelated"},
+        ]
+        check = scenario.ObserverSilence(
+            "sil", observer_node="observer", from_role="dut"
+        )
         dut = {"dut": {"node_id": "!77e4f0dc", "node_num": 0x77E4F0DC}}
         other = {"dut": {"node_id": "!deadbeef", "node_num": 0xDEADBEEF}}
 
         self.assertEqual(
-            check.evaluate(self.empty_ledger(heard), scenario.Context("S", settled=dut)).verdict,
-            scenario.FAIL)
+            check.evaluate(
+                self.empty_ledger(heard), scenario.Context("S", settled=dut)
+            ).verdict,
+            scenario.FAIL,
+        )
         self.assertEqual(
-            check.evaluate(self.empty_ledger(heard), scenario.Context("S", settled=other)).verdict,
-            scenario.PASS)
+            check.evaluate(
+                self.empty_ledger(heard), scenario.Context("S", settled=other)
+            ).verdict,
+            scenario.PASS,
+        )
         # An observer that logged nothing was not listening; that is not evidence of
         # silence on the air.
         self.assertEqual(
-            check.evaluate(self.empty_ledger([]), scenario.Context("S", settled=other)).verdict,
-            scenario.NOT_OBSERVED)
+            check.evaluate(
+                self.empty_ledger([]), scenario.Context("S", settled=other)
+            ).verdict,
+            scenario.NOT_OBSERVED,
+        )
 
     def test_an_image_claiming_a_build_tag_must_have_echoed_one(self):
         from bench.manifest import BUILD_TAG
 
-        base = {"node_id": "!abc", "region": "EU_868", "modem_preset": "LONG_FAST",
-                "channels": [{"index": 0}], "errors": []}
+        base = {
+            "node_id": "!abc",
+            "region": "EU_868",
+            "modem_preset": "LONG_FAST",
+            "channels": [{"index": 0}],
+            "errors": [],
+        }
         check = scenario.SettledStateAssertion()
 
         # The -D silently failing to reach the compiler leaves every row asserting
         # against firmware nobody can identify.
-        claimed = scenario.Context("S", settled={"dut": {**base, "build_tag": None}},
-                                   capabilities={"dut": {BUILD_TAG}})
-        self.assertEqual(check.evaluate(self.empty_ledger(), claimed).verdict, scenario.INVALID)
+        claimed = scenario.Context(
+            "S",
+            settled={"dut": {**base, "build_tag": None}},
+            capabilities={"dut": {BUILD_TAG}},
+        )
+        self.assertEqual(
+            check.evaluate(self.empty_ledger(), claimed).verdict, scenario.INVALID
+        )
 
-        echoed = scenario.Context("S", settled={"dut": {**base, "build_tag": "f4060bbce604"}},
-                                  capabilities={"dut": {BUILD_TAG}})
-        self.assertEqual(check.evaluate(self.empty_ledger(), echoed).verdict, scenario.PASS)
+        echoed = scenario.Context(
+            "S",
+            settled={"dut": {**base, "build_tag": "f4060bbce604"}},
+            capabilities={"dut": {BUILD_TAG}},
+        )
+        self.assertEqual(
+            check.evaluate(self.empty_ledger(), echoed).verdict, scenario.PASS
+        )
 
         # An image that never claimed the capability is not penalised for lacking it.
-        untagged = scenario.Context("S", settled={"dut": {**base, "build_tag": None}},
-                                    capabilities={"dut": set()})
-        self.assertEqual(check.evaluate(self.empty_ledger(), untagged).verdict, scenario.PASS)
+        untagged = scenario.Context(
+            "S",
+            settled={"dut": {**base, "build_tag": None}},
+            capabilities={"dut": set()},
+        )
+        self.assertEqual(
+            check.evaluate(self.empty_ledger(), untagged).verdict, scenario.PASS
+        )
 
     def test_rollup_precedence(self):
         O = scenario.Outcome
         self.assertEqual(scenario.roll_up([O("a", scenario.PASS, "")]), scenario.PASS)
         self.assertEqual(
-            scenario.roll_up([O("a", scenario.PASS, ""), O("b", scenario.NOT_OBSERVED, "")]),
-            scenario.NOT_OBSERVED)
+            scenario.roll_up(
+                [O("a", scenario.PASS, ""), O("b", scenario.NOT_OBSERVED, "")]
+            ),
+            scenario.NOT_OBSERVED,
+        )
         self.assertEqual(
-            scenario.roll_up([O("a", scenario.FAIL, ""), O("b", scenario.NOT_OBSERVED, "")]),
-            scenario.FAIL)
+            scenario.roll_up(
+                [O("a", scenario.FAIL, ""), O("b", scenario.NOT_OBSERVED, "")]
+            ),
+            scenario.FAIL,
+        )
         # INVALID dominates: preconditions were never established, so the row says nothing.
         self.assertEqual(
             scenario.roll_up([O("a", scenario.FAIL, ""), O("b", scenario.INVALID, "")]),
-            scenario.INVALID)
+            scenario.INVALID,
+        )
         self.assertEqual(scenario.roll_up([]), scenario.INVALID)
 
     def test_channel_sensing_row_cannot_use_api_injection(self):
         row = scenario.Scenario(
-            id="X", description="",
+            id="X",
+            description="",
             roles={"dut": scenario.RoleBake("dut", manifest.Bake("e"))},
-            stimulus=scenario.STIM_API, senses_channel=True,
-            assertions=[scenario.LogCount("a", ["x"], at_least=1)])
+            stimulus=scenario.STIM_API,
+            senses_channel=True,
+            assertions=[scenario.LogCount("a", ["x"], at_least=1)],
+        )
         problems = row.validate()
         self.assertTrue(any("puts no energy on the air" in p for p in problems))
 
     def test_assertion_against_an_undefined_role_is_caught(self):
         row = scenario.Scenario(
-            id="X", description="",
+            id="X",
+            description="",
             roles={"dut": scenario.RoleBake("dut", manifest.Bake("e"))},
-            assertions=[scenario.LogCount("a", ["x"], at_least=1, role="ghost")])
+            assertions=[scenario.LogCount("a", ["x"], at_least=1, role="ghost")],
+        )
         self.assertTrue(any("ghost" in p for p in row.validate()))
 
 
@@ -410,8 +582,12 @@ class TestDevicesAndObserver(unittest.TestCase):
         # A bootloader-shaped PID that was always there is not evidence of DFU.
         self.assertIsNone(looks_like_dfu(before, {"COM3": (0x239A, 0x00B3)}))
         self.assertEqual(looks_like_dfu(before, {"COM3": (0x239A, 0x0029)}), "COM3")
-        self.assertEqual(looks_like_dfu(before, {"COM3": (0x239A, 0x00B3),
-                                                 "COM9": (0x239A, 0x0029)}), "COM9")
+        self.assertEqual(
+            looks_like_dfu(
+                before, {"COM3": (0x239A, 0x00B3), "COM9": (0x239A, 0x0029)}
+            ),
+            "COM9",
+        )
 
     def reader(self):
         r = _RawSerialReader.__new__(_RawSerialReader)
@@ -436,9 +612,12 @@ class TestDevicesAndObserver(unittest.TestCase):
     def test_protobuf_frames_do_not_shred_log_lines(self):
         r = self.reader()
         frame = bytes((0x94, 0xC3, 0x00, 0x05)) + bytes(range(5))
-        r._buf.extend(b"INFO  | 00:01 42 [Radio] CAD busy\n" + frame + b"DEBUG | 00:02 43 x\n")
-        self.assertEqual(r.drain(),
-                         ["INFO  | 00:01 42 [Radio] CAD busy", "DEBUG | 00:02 43 x"])
+        r._buf.extend(
+            b"INFO  | 00:01 42 [Radio] CAD busy\n" + frame + b"DEBUG | 00:02 43 x\n"
+        )
+        self.assertEqual(
+            r.drain(), ["INFO  | 00:01 42 [Radio] CAD busy", "DEBUG | 00:02 43 x"]
+        )
         self.assertEqual(r._frames_skipped, 1)
 
     def test_frame_split_across_reads_is_carried_over(self):
@@ -469,23 +648,37 @@ class TestPreflightInventory(unittest.TestCase):
                 {"name": "peer", "serial_number": "BBB"},
             ],
             "bus": {
-                "serial": [{"port": "COM18", "vid": "239a", "pid": "00b3",
-                            "serial_number": "BBB"}],
+                "serial": [
+                    {
+                        "port": "COM18",
+                        "vid": "239a",
+                        "pid": "00b3",
+                        "serial_number": "BBB",
+                    }
+                ],
                 "volumes": [{"path": "G:/", "uf2": True}],
-                "in_bootloader": [{"instance": "6&3AEE631A&0",
-                                   "interfaces": ["USB Serial Device", "USB Mass Storage"]}],
+                "in_bootloader": [
+                    {
+                        "instance": "6&3AEE631A&0",
+                        "interfaces": ["USB Serial Device", "USB Mass Storage"],
+                    }
+                ],
                 "devices": [{"name": "x", "instance": "y"}],
             },
         }
         out = report.bus_summary()
         self.assertIn("COM18", out)
         self.assertIn("= peer", out, "a port must name the declared node it is")
-        self.assertIn("ABSENT dut", out, "a declared node with nothing on the bus is named")
+        self.assertIn(
+            "ABSENT dut", out, "a declared node with nothing on the bus is named"
+        )
         self.assertIn("G:/", out)
         self.assertIn("DFU", out, "a device exposing mass storage is in its bootloader")
 
         # And it rides along on the failure, which is the only thing a blocked run prints.
-        report.checks.append(preflight.Check("declared_nodes", preflight.BLOCK, "missing"))
+        report.checks.append(
+            preflight.Check("declared_nodes", preflight.BLOCK, "missing")
+        )
         self.assertIn("ABSENT dut", str(preflight.PreflightFailed(report)))
         self.assertIn("ABSENT dut", report.summary())
 
@@ -605,7 +798,9 @@ class TestReleaseOwnership(unittest.TestCase):
         owner._to(ports.ST_HELD, "capture open")
 
         owner.release("nosy check", by="flash")
-        self.assertIsNotNone(owner.iface, "a stranger must not close capture's connection")
+        self.assertIsNotNone(
+            owner.iface, "a stranger must not close capture's connection"
+        )
         self.assertEqual(owner.state, ports.ST_HELD)
 
         owner.release("capture stopping", by="capture")
@@ -621,6 +816,7 @@ class TestOverrunOpen(unittest.TestCase):
         smoke-0923 and all six lbt-real rows. The next open must adopt it instead.
         """
         import sys
+
         from bench import ports
 
         gate = threading.Event()
@@ -636,15 +832,21 @@ class TestOverrunOpen(unittest.TestCase):
         saved = sys.modules.get("meshtastic.serial_interface")
         sys.modules["meshtastic.serial_interface"] = fake
         try:
-            owner = ports.PortOwner(BenchNode("dut", "SER", "dut"), connect_timeout=0.05)
+            owner = ports.PortOwner(
+                BenchNode("dut", "SER", "dut"), connect_timeout=0.05
+            )
             iface, err = owner._open("COM9", 1.0)
             self.assertIsNone(iface)
             iface, err = owner._open("COM9", 1.0)
             self.assertEqual(err, "previous open still in progress")
-            self.assertEqual(len(opened), 1, "a second open while the first holds the port")
+            self.assertEqual(
+                len(opened), 1, "a second open while the first holds the port"
+            )
             gate.set()
             iface, err = owner._open("COM9", 1.0)
-            self.assertIsInstance(iface, SlowInterface, "the overrun open must be adopted")
+            self.assertIsInstance(
+                iface, SlowInterface, "the overrun open must be adopted"
+            )
             self.assertEqual(len(opened), 1)
         finally:
             gate.set()
@@ -675,10 +877,14 @@ class TestSchedulePhases(unittest.TestCase):
 
         flash_src = Path("bench/flasher.py").read_text(encoding="utf-8")
         for name, _ in flasher.PHASES:
-            self.assertIn(f'"{name}"', flash_src, f"{name} is planned but never reported")
+            self.assertIn(
+                f'"{name}"', flash_src, f"{name} is planned but never reported"
+            )
         prov_src = Path("bench/provision.py").read_text(encoding="utf-8")
         for name, _ in provision.PHASES:
-            self.assertIn(f'"{name}"', prov_src, f"{name} is planned but never reported")
+            self.assertIn(
+                f'"{name}"', prov_src, f"{name} is planned but never reported"
+            )
 
 
 class TestDfuAttribution(unittest.TestCase):
@@ -696,7 +902,9 @@ class TestDfuAttribution(unittest.TestCase):
         owner = ports.PortOwner(BenchNode("dut", "SER", "dut"))
         owner.iface = object()
         owner._to(ports.ST_HELD, "capture open")
-        owner.release = lambda *a, **k: self.fail("must not release capture's connection")
+        owner.release = lambda *a, **k: self.fail(
+            "must not release capture's connection"
+        )
 
         self.assertTrue(flasher._answers_as_application(owner))
         self.assertEqual(owner.state, ports.ST_HELD)
@@ -711,14 +919,18 @@ class TestReconnectBudget(unittest.TestCase):
         up before the node returned, and the DUT produced no log lines for the rest of
         the run.
         """
-        from bench import observer as observer_mod, ports
+        from bench import observer as observer_mod
+        from bench import ports
 
         held = types.SimpleNamespace(
             node=types.SimpleNamespace(name="dut"),
             owner=types.SimpleNamespace(state=ports.ST_REBOOTING),
-            connected=False, dropped_at=None, last_attempt=0.0,
+            connected=False,
+            dropped_at=None,
+            last_attempt=0.0,
             attempts=observer_mod.RECONNECT_MAX_ATTEMPTS,
-            raw_mode=False, port=None,
+            raw_mode=False,
+            port=None,
         )
         obs = observer_mod.Observer.__new__(observer_mod.Observer)
         obs.held = {"dut": held}
@@ -765,10 +977,19 @@ class TestSettledStateComparison(unittest.TestCase):
         p = provision.Provisioner.__new__(provision.Provisioner)
         spec = provision.NodeSpec(region="EU_868", extra_config=spec_extra)
         state = provision.SettledState(
-            node="dut", serial_number="S", port="COM1", node_id="!a", node_num=1,
-            firmware_version="2.8.0", build_tag="t", region="EU_868",
-            modem_preset=None, role=None, tx_enabled=True,
-            extra_config=observed_extra)
+            node="dut",
+            serial_number="S",
+            port="COM1",
+            node_id="!a",
+            node_num=1,
+            firmware_version="2.8.0",
+            build_tag="t",
+            region="EU_868",
+            modem_preset=None,
+            role=None,
+            tx_enabled=True,
+            extra_config=observed_extra,
+        )
         return p._compare(state, spec)
 
     def test_a_spec_value_that_did_not_apply_is_caught(self):
@@ -778,11 +999,15 @@ class TestSettledStateComparison(unittest.TestCase):
         self.assertTrue(any("tx_enabled" in p for p in problems), problems)
 
     def test_a_spec_value_that_did_apply_is_accepted(self):
-        self.assertEqual(self.compare({"lora.tx_enabled": False}, {"lora.tx_enabled": False}), [])
+        self.assertEqual(
+            self.compare({"lora.tx_enabled": False}, {"lora.tx_enabled": False}), []
+        )
 
     def test_disabling_tx_is_not_itself_treated_as_a_fault(self):
         # Scenarios deliberately disable TX; that is the point of the control, not an error.
-        self.assertEqual(self.compare({"lora.tx_enabled": False}, {"lora.tx_enabled": False}), [])
+        self.assertEqual(
+            self.compare({"lora.tx_enabled": False}, {"lora.tx_enabled": False}), []
+        )
 
     def test_an_unreadable_value_is_a_problem_not_a_pass(self):
         problems = self.compare({"lora.tx_enabled": False}, {})
@@ -822,10 +1047,20 @@ class TestProvisionerReadBack(unittest.TestCase):
                 return StubOwner()
 
         p = provision.Provisioner(StubObserver())
-        p.read_settled_state = lambda node: calls.append(("read", node.name)) or provision.SettledState(
-            node=node.name, serial_number="S", port="C", node_id="!a", node_num=1,
-            firmware_version="v", build_tag="t", region="EU_868", modem_preset=None,
-            role=None)
+        p.read_settled_state = lambda node: calls.append(
+            ("read", node.name)
+        ) or provision.SettledState(
+            node=node.name,
+            serial_number="S",
+            port="C",
+            node_id="!a",
+            node_num=1,
+            firmware_version="v",
+            build_tag="t",
+            region="EU_868",
+            modem_preset=None,
+            role=None,
+        )
 
         node = BenchNode("dut", "SER", "dut")
         p.verify(node, provision.NodeSpec(region="EU_868"))
@@ -923,8 +1158,14 @@ class TestPortOwnership(unittest.TestCase):
         from bench import ports
 
         budget = ports.Budget(1.0)
-        for outcome in (ports.OK, ports.TIMED_OUT, ports.ABSENT,
-                        ports.BUSY, ports.REFUSED, ports.FAILED):
+        for outcome in (
+            ports.OK,
+            ports.TIMED_OUT,
+            ports.ABSENT,
+            ports.BUSY,
+            ports.REFUSED,
+            ports.FAILED,
+        ):
             self.assertIn(outcome, ports.TERMINAL)
             self.assertEqual(budget.result(outcome).outcome, outcome)
 
@@ -976,7 +1217,8 @@ class TestHardwareGuard(unittest.TestCase):
 
         self.assertEqual(
             hardware.hw_model_for_env(Path("."), "nrf52_promicro_diy_tcxo"),
-            "NRF52_PROMICRO_DIY")
+            "NRF52_PROMICRO_DIY",
+        )
 
     def test_a_mismatched_board_is_refused(self):
         from bench import hardware
@@ -984,7 +1226,9 @@ class TestHardwareGuard(unittest.TestCase):
         hardware.assert_compatible("dut", "NRF52_PROMICRO_DIY", "NRF52_PROMICRO_DIY")
         # The near-miss on this bench: a Heltec named as a promicro peer.
         with self.assertRaises(hardware.HardwareMismatch):
-            hardware.assert_compatible("peer", "HELTEC_MESH_POCKET", "NRF52_PROMICRO_DIY")
+            hardware.assert_compatible(
+                "peer", "HELTEC_MESH_POCKET", "NRF52_PROMICRO_DIY"
+            )
 
     def test_unknown_on_either_side_is_refused_not_assumed(self):
         from bench import hardware
@@ -1003,25 +1247,36 @@ class TestStatusServer(unittest.TestCase):
         rec = streams.Recorder(run)
         rec.heartbeat(component="runner", stage="4-execute")
         rec.close()
-        (run / "state.json").write_text(json.dumps({"stage": "4-execute", "started_at": time.time()}))
+        (run / "state.json").write_text(
+            json.dumps({"stage": "4-execute", "started_at": time.time()})
+        )
         self.assertEqual(server.read_state(run)["status"], server.RUNNING)
 
         raw = (run / "status.jsonl").read_text(encoding="utf-8").splitlines()
         rows = [json.loads(line) for line in raw if line.strip()]
         rows[-1]["ts"] = time.time() - 10_000
         (run / "status.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+        )
         self.assertEqual(server.read_state(run)["status"], server.DIED)
 
     def test_state_is_rebuilt_from_disk_with_no_memory(self):
         run = Path(tempfile.mkdtemp())
-        (run / "results.json").write_text(json.dumps({
-            "S1": {"verdict": "PASS", "outcomes": [{"name": "a", "verdict": "PASS",
-                                                    "evidence": "12 packets"}]}}))
+        (run / "results.json").write_text(
+            json.dumps(
+                {
+                    "S1": {
+                        "verdict": "PASS",
+                        "outcomes": [
+                            {"name": "a", "verdict": "PASS", "evidence": "12 packets"}
+                        ],
+                    }
+                }
+            )
+        )
         state = server.read_state(run)
         self.assertEqual(state["rows"][0]["verdict"], "PASS")
         self.assertIn("12 packets", state["rows"][0]["outcomes"][0]["evidence"])
-
 
 
 class TestDashboardScript(unittest.TestCase):
@@ -1046,7 +1301,8 @@ class TestDashboardScript(unittest.TestCase):
         is invisible except in a browser console, and cheap to keep watching for.
         """
         offenders = [
-            line for line in self._script().splitlines()
+            line
+            for line in self._script().splitlines()
             if line.rstrip().endswith('("') or line.rstrip().endswith("('")
         ]
         self.assertEqual(offenders, [], "string literal split across a newline")
@@ -1060,7 +1316,9 @@ class TestDashboardScript(unittest.TestCase):
         """
         from bench import server
 
-        self.assertTrue(server._PAGE_PATH.is_file(), "the dashboard must be its own file")
+        self.assertTrue(
+            server._PAGE_PATH.is_file(), "the dashboard must be its own file"
+        )
         self.assertEqual(server._PAGE_PATH.suffix, ".html")
         first = server.page()
         self.assertIn("<script>", first)
@@ -1083,15 +1341,18 @@ class TestDashboardScript(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("node not available to parse the dashboard script")
-        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as fh:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".js", delete=False, encoding="utf-8"
+        ) as fh:
             fh.write(self._script())
             path = fh.name
         try:
-            done = subprocess.run([node, "--check", path], capture_output=True, text=True)
+            done = subprocess.run(
+                [node, "--check", path], capture_output=True, text=True
+            )
             self.assertEqual(done.returncode, 0, done.stderr[:400])
         finally:
             Path(path).unlink(missing_ok=True)
-
 
 
 class TestDevicesView(unittest.TestCase):
@@ -1101,10 +1362,18 @@ class TestDevicesView(unittest.TestCase):
         from bench import server
 
         state = {
-            "nodes": nodes if nodes is not None else [
-                {"name": "dut", "serial_number": "NOPE-NOT-PLUGGED-IN",
-                 "role": "dut", "board": "NRF52_PROMICRO_DIY"},
-            ],
+            "nodes": (
+                nodes
+                if nodes is not None
+                else [
+                    {
+                        "name": "dut",
+                        "serial_number": "NOPE-NOT-PLUGGED-IN",
+                        "role": "dut",
+                        "board": "NRF52_PROMICRO_DIY",
+                    },
+                ]
+            ),
             "ports": ports or {},
         }
         return server.devices_view(state, run_status, beat_age=1300.0)
@@ -1146,7 +1415,6 @@ class TestDevicesView(unittest.TestCase):
         self.assertEqual(row["recorded_port"], "COM16")
 
 
-
 class TestPortLeaks(unittest.TestCase):
     """A port opened and never released is invisible until something else is denied it.
 
@@ -1185,8 +1453,7 @@ class TestPortLeaks(unittest.TestCase):
         # The interface must not be stranded by a failure - that is exactly when a port
         # gets left open, because nobody is around to tidy up.
         o.release("done")
-        self.assertEqual(
-            [p for p in ports.open_ports() if p["node"] == "dut"], [])
+        self.assertEqual([p for p in ports.open_ports() if p["node"] == "dut"], [])
 
     def test_a_rebooting_lease_leaves_nothing_open(self):
         from bench import ports
@@ -1225,14 +1492,19 @@ class TestPortLeaks(unittest.TestCase):
             if path.name == "ports.py":
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
-            for func in [n for n in ast.walk(tree)
-                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            for func in [
+                n
+                for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]:
                 if func.name == "__init__":
                     continue
                 builds = [
-                    n for n in ast.walk(func)
+                    n
+                    for n in ast.walk(func)
                     if isinstance(n, ast.Call)
-                    and getattr(n.func, "attr", getattr(n.func, "id", None)) == "PortOwner"
+                    and getattr(n.func, "attr", getattr(n.func, "id", None))
+                    == "PortOwner"
                 ]
                 if not builds:
                     continue
@@ -1240,12 +1512,15 @@ class TestPortLeaks(unittest.TestCase):
                 released = (
                     "attr='release'" in body
                     or "attr='expect_reboot'" in body
-                    or any(isinstance(n, (ast.With, ast.AsyncWith)) for n in ast.walk(func))
+                    or any(
+                        isinstance(n, (ast.With, ast.AsyncWith)) for n in ast.walk(func)
+                    )
                 )
                 if not released:
                     offenders.append(f"{path.name}:{func.name}")
         self.assertEqual(
-            offenders, [], "PortOwner built without a release, a with-block or a reboot")
+            offenders, [], "PortOwner built without a release, a with-block or a reboot"
+        )
 
     def test_stopping_the_observer_leaves_no_port_open(self):
         """The long-lived case the static check deliberately exempts.
@@ -1268,8 +1543,10 @@ class TestPortLeaks(unittest.TestCase):
         obs.stop()
         rec.close()
         self.assertEqual(
-            [p for p in ports.open_ports() if p["node"] == "leaky"], [],
-            "observer.stop() must release every port it held")
+            [p for p in ports.open_ports() if p["node"] == "leaky"],
+            [],
+            "observer.stop() must release every port it held",
+        )
 
 
 class TestLbtScenarioTable(unittest.TestCase):
@@ -1278,7 +1555,11 @@ class TestLbtScenarioTable(unittest.TestCase):
 
         self.assertEqual([p for s in SCENARIOS for p in s.validate()], [])
         pairs = [(s.id, r) for s in SCENARIOS for r in s.roles]
-        images = {rb.bake.content_hash("sha", False) for s in SCENARIOS for rb in s.roles.values()}
+        images = {
+            rb.bake.content_hash("sha", False)
+            for s in SCENARIOS
+            for rb in s.roles.values()
+        }
         self.assertGreater(len(pairs), len(images))
 
     def test_every_row_has_a_way_to_fail(self):
@@ -1302,7 +1583,8 @@ class TestLbtScenarioTable(unittest.TestCase):
         if not src_root.is_dir():  # running outside a firmware checkout
             self.skipTest("no src/ tree to check patterns against")
         source = "".join(
-            f.read_text(encoding="utf-8", errors="replace") for f in src_root.rglob("*.cpp")
+            f.read_text(encoding="utf-8", errors="replace")
+            for f in src_root.rglob("*.cpp")
         )
 
         missing = []
@@ -1311,7 +1593,9 @@ class TestLbtScenarioTable(unittest.TestCase):
                 for attr in ("patterns", "event_patterns", "trial_patterns"):
                     for pattern in getattr(assertion, attr, []) or []:
                         if not re.search(pattern, source):
-                            missing.append(f"{scenario_row.id}/{assertion.name}: {pattern!r}")
+                            missing.append(
+                                f"{scenario_row.id}/{assertion.name}: {pattern!r}"
+                            )
         self.assertEqual(missing, [], "patterns that match nothing in the firmware")
 
     def test_the_trace_gated_row_declares_its_requirement(self):
@@ -1344,7 +1628,8 @@ class TestReaderIsTheOnlyCloser(unittest.TestCase):
                 self.stream = Handle()
                 self._wantExit = False
                 self._rxThread = threading.Thread(
-                    target=self._reader, name="stream reader", daemon=True)
+                    target=self._reader, name="stream reader", daemon=True
+                )
                 self._rxThread.start()
 
             def _reader(self):
@@ -1375,7 +1660,9 @@ class TestSilentNode(unittest.TestCase):
         from bench import ports
 
         o = self.owner()
-        o.hold = lambda budget_s=60.0, by="capture": ports.Result(ports.TIMED_OUT, "open timed out")
+        o.hold = lambda budget_s=60.0, by="capture": ports.Result(
+            ports.TIMED_OUT, "open timed out"
+        )
         result = o.wait_answering(budget_s=0.3, spacing=0.05)
         self.assertEqual(result.outcome, ports.FAILED)
         self.assertIn("enumerated, not answering", result.detail)
@@ -1385,7 +1672,9 @@ class TestSilentNode(unittest.TestCase):
         from bench import ports
 
         o = self.owner()
-        o.hold = lambda budget_s=60.0, by="capture": ports.Result(ports.ABSENT, "not enumerated")
+        o.hold = lambda budget_s=60.0, by="capture": ports.Result(
+            ports.ABSENT, "not enumerated"
+        )
         result = o.wait_answering(budget_s=0.3, spacing=0.05)
         self.assertEqual(result.outcome, ports.TIMED_OUT)
 
@@ -1415,7 +1704,9 @@ class TestLendToAChild(unittest.TestCase):
 
         with o.lend("provision:provision", budget_s=5.0) as port:
             self.assertEqual(port, "COM9")
-            self.assertEqual(closes, [True], "a node staying put is closed, not abandoned")
+            self.assertEqual(
+                closes, [True], "a node staying put is closed, not abandoned"
+            )
             self.assertIsNone(o.iface)
             self.assertNotIn("dut", [p["node"] for p in ports.open_ports()])
             self.assertEqual(o.state, ports.ST_LEASED)
@@ -1423,7 +1714,9 @@ class TestLendToAChild(unittest.TestCase):
             with self.assertRaises(ports.PortBusy):
                 with o.lease("nosy", budget_s=1.0):
                     pass
-        self.assertEqual(o.state, ports.ST_IDLE, "free to be taken back once the child is gone")
+        self.assertEqual(
+            o.state, ports.ST_IDLE, "free to be taken back once the child is gone"
+        )
 
 
 class _StubOwner:
@@ -1480,10 +1773,20 @@ class TestIsolatedProvisioning(unittest.TestCase):
     """
 
     STATE = {
-        "node": "dut", "serial_number": "SER", "port": "COM9", "node_id": "!a",
-        "node_num": 1, "firmware_version": "2.7.26", "build_tag": None,
-        "region": "EU_868", "modem_preset": "LONG_SLOW", "role": "CLIENT",
-        "channels": [], "tx_enabled": True, "extra_config": {}, "errors": [],
+        "node": "dut",
+        "serial_number": "SER",
+        "port": "COM9",
+        "node_id": "!a",
+        "node_num": 1,
+        "firmware_version": "2.7.26",
+        "build_tag": None,
+        "region": "EU_868",
+        "modem_preset": "LONG_SLOW",
+        "role": "CLIENT",
+        "channels": [],
+        "tx_enabled": True,
+        "extra_config": {},
+        "errors": [],
     }
 
     def setUp(self):
@@ -1511,8 +1814,11 @@ class TestIsolatedProvisioning(unittest.TestCase):
         from bench import provision
 
         return provision.IsolatedProvisioner(
-            observer, on_event=lambda kind, data: events.append((kind, data)),
-            command=command, **kw)
+            observer,
+            on_event=lambda kind, data: events.append((kind, data)),
+            command=command,
+            **kw,
+        )
 
     def test_the_child_owns_the_port_and_the_parent_takes_it_back_after(self):
         from bench import provision
@@ -1531,19 +1837,29 @@ class TestIsolatedProvisioning(unittest.TestCase):
         events = []
         p = self.provisioner(obs, self.child(body), events)
         node = BenchNode("dut", "SER", "dut")
-        state = p.provision(node, provision.NodeSpec(region="EU_868", channel_url="https://x/#k"))
+        state = p.provision(
+            node, provision.NodeSpec(region="EU_868", channel_url="https://x/#k")
+        )
 
         self.assertEqual(state.region, "EU_868")
         self.assertEqual(
-            [c[0] for c in obs.calls], ["suspend", "lend", "returned", "resume"],
-            "suspend capture, lend the port, get it back, then resume capture")
-        self.assertEqual(obs.calls[2], ("returned", True), "the port came back before the child exited")
+            [c[0] for c in obs.calls],
+            ["suspend", "lend", "returned", "resume"],
+            "suspend capture, lend the port, get it back, then resume capture",
+        )
+        self.assertEqual(
+            obs.calls[2],
+            ("returned", True),
+            "the port came back before the child exited",
+        )
         self.assertEqual(obs.calls[3], ("resume", provision.READY_TIMEOUT_S))
         kinds = [k for k, _ in events]
         # The dashboard and the schedule read the same event kinds they always did.
         self.assertIn("provision_phase", kinds)
         phase = next(d for k, d in events if k == "provision_phase")
-        self.assertEqual((phase["phase"], phase["status"]), ("factory reset", "running"))
+        self.assertEqual(
+            (phase["phase"], phase["status"]), ("factory reset", "running")
+        )
         end = next(d for k, d in events if k == "provision_child_end")
         self.assertEqual(end["outcome"], "ok")
         self.assertEqual(obs.logs, [("dut", "INFO  | 12:00:00 5 BENCH: tag=abc")])
@@ -1557,7 +1873,9 @@ class TestIsolatedProvisioning(unittest.TestCase):
         )
         obs = _StubObserver(self.marker)
         p = self.provisioner(obs, self.child(body), [])
-        state, problems = p.verify(BenchNode("dut", "SER", "dut"), provision.NodeSpec(role="CLIENT"))
+        state, problems = p.verify(
+            BenchNode("dut", "SER", "dut"), provision.NodeSpec(role="CLIENT")
+        )
         self.assertEqual(problems, ["role is None, expected CLIENT"])
         self.assertEqual(state.node, "dut")
 
@@ -1577,16 +1895,20 @@ class TestIsolatedProvisioning(unittest.TestCase):
 
         obs = _StubObserver(self.marker)
         events = []
-        p = self.provisioner(obs, self.child("time.sleep(60)\n"), events,
-                             ceilings={"provision": 1.0})
+        p = self.provisioner(
+            obs, self.child("time.sleep(60)\n"), events, ceilings={"provision": 1.0}
+        )
         started = time.monotonic()
         with self.assertRaises(provision.ProvisionError):
             p.provision(BenchNode("dut", "SER", "dut"), provision.NodeSpec())
         self.assertLess(time.monotonic() - started, 20.0)
         end = next(d for k, d in events if k == "provision_child_end")
         self.assertEqual(end["outcome"], ports.TIMED_OUT)
-        self.assertEqual(obs.calls[-1], ("resume", provision.RECLAIM_AFTER_FAILURE_S),
-                         "a node that answered nobody gets one attempt, not a full wait")
+        self.assertEqual(
+            obs.calls[-1],
+            ("resume", provision.RECLAIM_AFTER_FAILURE_S),
+            "a node that answered nobody gets one attempt, not a full wait",
+        )
 
     def test_a_child_that_crashes_costs_the_step_not_the_run(self):
         """A segfault in a child is an exit code here, with its traceback kept."""
@@ -1602,7 +1924,9 @@ class TestIsolatedProvisioning(unittest.TestCase):
         end = next(d for k, d in events if k == "provision_child_end")
         self.assertEqual(end["outcome"], ports.FAILED)
         self.assertNotEqual(end["exit_code"], 0)
-        self.assertTrue(any("Fatal Python error" in line for line in end["stderr_tail"]))
+        self.assertTrue(
+            any("Fatal Python error" in line for line in end["stderr_tail"])
+        )
         self.assertEqual(obs.calls[-1][0], "resume")
 
     def test_provisioned_but_not_recaptured_is_still_a_failure(self):
@@ -1634,9 +1958,17 @@ class TestChildSide(unittest.TestCase):
 
             def _state(self, node):
                 return provision.SettledState(
-                    node=node.name, serial_number=node.serial_number, port="COM9",
-                    node_id="!a", node_num=1, firmware_version="v", build_tag=None,
-                    region="EU_868", modem_preset=None, role=None)
+                    node=node.name,
+                    serial_number=node.serial_number,
+                    port="COM9",
+                    node_id="!a",
+                    node_num=1,
+                    firmware_version="v",
+                    build_tag=None,
+                    region="EU_868",
+                    modem_preset=None,
+                    role=None,
+                )
 
             def provision(self, node, spec):
                 self.on_event("provision_start", {"node": node.name})
@@ -1645,10 +1977,16 @@ class TestChildSide(unittest.TestCase):
             def verify(self, node, spec):
                 return behaviour(self, node)
 
-        job = {"op": op, "node": provision.node_to_json(BenchNode("dut", "SER", "dut")),
-               "spec": provision.spec_to_json(provision.NodeSpec(region="EU_868"))}
+        job = {
+            "op": op,
+            "node": provision.node_to_json(BenchNode("dut", "SER", "dut")),
+            "spec": provision.spec_to_json(provision.NodeSpec(region="EU_868")),
+        }
         result = provision_child.run_job(job, emit, make_provisioner=FakeProvisioner)
-        lines = [json.loads(l[len(provision.CHILD_TAG):]) for l in out.getvalue().splitlines()]
+        lines = [
+            json.loads(l[len(provision.CHILD_TAG) :])
+            for l in out.getvalue().splitlines()
+        ]
         return result, lines
 
     def test_a_provision_reports_its_events_and_its_state(self):
@@ -1656,7 +1994,9 @@ class TestChildSide(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(result["state"]["region"], "EU_868")
         self.assertFalse(result["answered"], "nothing was open when the child finished")
-        self.assertIn({"t": "event", "kind": "provision_start", "data": {"node": "dut"}}, lines)
+        self.assertIn(
+            {"t": "event", "kind": "provision_start", "data": {"node": "dut"}}, lines
+        )
 
     def test_a_provision_error_becomes_a_result_not_a_crash(self):
         from bench import provision

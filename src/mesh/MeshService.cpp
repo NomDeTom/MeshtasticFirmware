@@ -308,7 +308,8 @@ void MeshService::handleToRadio(meshtastic_MeshPacket &p)
 #endif
 #ifdef BENCH_KNOBS
     // A local "!bench ..." text sets runtime radio knobs and is never transmitted.
-    if (p.which_payload_variant == meshtastic_MeshPacket_decoded_tag && p.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
+    if (p.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
+        p.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP &&
         benchKnobsHandleCommand((const char *)p.decoded.payload.bytes, p.decoded.payload.size))
         return;
 #endif

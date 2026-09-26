@@ -6,6 +6,7 @@ Dispatches "Build One Target" (build_one_target.yml) on BRANCH (default: the cur
 pushed), waits for it, and extracts the UF2 from the firmware artifact. --run skips the dispatch and fetches
 an existing run. The token comes from git's credential helper for github.com.
 """
+
 import argparse
 import io
 import json
@@ -21,16 +22,32 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def token():
-    out = subprocess.run(["git", "credential", "fill"], input="protocol=https\nhost=github.com\n\n", capture_output=True,
-                         text=True, cwd=REPO_ROOT).stdout
-    return next(line.split("=", 1)[1] for line in out.splitlines() if line.startswith("password="))
+    out = subprocess.run(
+        ["git", "credential", "fill"],
+        input="protocol=https\nhost=github.com\n\n",
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    ).stdout
+    return next(
+        line.split("=", 1)[1]
+        for line in out.splitlines()
+        if line.startswith("password=")
+    )
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("tag")
-    ap.add_argument("--ref", default=subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True,
-                                                    cwd=REPO_ROOT).stdout.strip())
+    ap.add_argument(
+        "--ref",
+        default=subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+        ).stdout.strip(),
+    )
     ap.add_argument("--target", default="nrf52_promicro_diy_tcxo")
     ap.add_argument("--repo", default="NomDeTom/MeshtasticFirmware")
     ap.add_argument("--run", type=int)
@@ -39,8 +56,14 @@ def main():
     api = f"https://api.github.com/repos/{a.repo}"
 
     def call(url, data=None, raw=False):
-        req = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None,
-                                     headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"})
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(data).encode() if data is not None else None,
+            headers={
+                "Authorization": f"Bearer {tok}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
         body = urllib.request.urlopen(req).read()
         return body if raw else (json.loads(body) if body else None)
 
@@ -61,13 +84,17 @@ def main():
     run_id = a.run
     if not run_id:
         started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 5))
-        call(f"{api}/actions/workflows/build_one_target.yml/dispatches",
-             {"ref": a.ref, "inputs": {"target": a.target, "arch": "all"}})
+        call(
+            f"{api}/actions/workflows/build_one_target.yml/dispatches",
+            {"ref": a.ref, "inputs": {"target": a.target, "arch": "all"}},
+        )
         print(f"dispatched {a.target} on {a.ref}")
         while not run_id:
             time.sleep(10)
-            runs = call(f"{api}/actions/workflows/build_one_target.yml/runs?branch={a.ref}&event=workflow_dispatch"
-                        f"&created=>={started}&per_page=1")["workflow_runs"]
+            runs = call(
+                f"{api}/actions/workflows/build_one_target.yml/runs?branch={a.ref}&event=workflow_dispatch"
+                f"&created=>={started}&per_page=1"
+            )["workflow_runs"]
             run_id = runs[0]["id"] if runs else None
         print(f"run {run_id}: https://github.com/{a.repo}/actions/runs/{run_id}")
 
@@ -76,8 +103,11 @@ def main():
         if r["status"] == "completed":
             if r["conclusion"] != "success":
                 sys.exit(f"run {run_id} finished {r['conclusion']}")
-            arts = [x for x in call(f"{api}/actions/runs/{run_id}/artifacts")["artifacts"]
-                    if x["name"].startswith("firmware-")]
+            arts = [
+                x
+                for x in call(f"{api}/actions/runs/{run_id}/artifacts")["artifacts"]
+                if x["name"].startswith("firmware-")
+            ]
             if arts:
                 break
         time.sleep(60)
@@ -94,7 +124,9 @@ def main():
 
     # The repackaged single zip is the largest firmware-* artifact; the per-build one is nested inside it anyway.
     art = max(arts, key=lambda x: x["size_in_bytes"])
-    for n, zf in walk(zipfile.ZipFile(io.BytesIO(download(art["archive_download_url"])))):
+    for n, zf in walk(
+        zipfile.ZipFile(io.BytesIO(download(art["archive_download_url"])))
+    ):
         name = Path(n).name
         if name.endswith("-ota.zip"):
             (out / f"{a.tag}-ota.zip").write_bytes(zf.read(n))

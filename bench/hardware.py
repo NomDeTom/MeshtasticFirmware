@@ -80,7 +80,9 @@ def normalize(slug: Any) -> str:
     return str(slug or "").strip().upper().replace("-", "_")
 
 
-def assert_compatible(node_name: str, device_model: str | None, image_model: str | None) -> None:
+def assert_compatible(
+    node_name: str, device_model: str | None, image_model: str | None
+) -> None:
     """Refuse a flash whose image targets a different board than the node is.
 
     An unknown model on either side is also refused. "I could not tell" is not a licence

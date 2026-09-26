@@ -322,6 +322,8 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
     if (benchKnobs.probeMs && !benchProbeThread)
         benchProbeThread = new BenchProbeThread();
     benchKnobsLog();
+    // Short, so a viewer that truncates the long knobs line still shows these.
+    LOG_INFO("BENCH txgap=%d txarm=%s", benchKnobs.txGap ? 1 : 0, TXARM_NAMES[benchKnobs.txArm]);
 
     if (radioChanged && RadioLibInterface::instance) {
         // reconfigure() reapplies modulation, sync word and IQ, then restarts RX.

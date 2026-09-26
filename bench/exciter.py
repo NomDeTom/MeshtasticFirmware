@@ -141,9 +141,7 @@ class Exciter:
 
     def status(self) -> ExciterStatus:
         line = self._command("STATUS")
-        fields = dict(
-            part.split("=", 1) for part in line.split() if "=" in part
-        )
+        fields = dict(part.split("=", 1) for part in line.split() if "=" in part)
         return ExciterStatus(
             build_tag=fields.get("tag"),
             state=fields.get("state", "unknown"),
@@ -153,7 +151,9 @@ class Exciter:
             raw=line,
         )
 
-    def burst(self, count: int, dwell_ms: int, gap_ms: int, mode: str = "carrier") -> dict:
+    def burst(
+        self, count: int, dwell_ms: int, gap_ms: int, mode: str = "carrier"
+    ) -> dict:
         """Repeated emissions - the shape a counting assertion needs.
 
         Returns what it actually did rather than what it was asked to do, so a row can

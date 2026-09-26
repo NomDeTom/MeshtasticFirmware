@@ -242,14 +242,18 @@ def bus_inventory(timeout: float = 20.0) -> dict:
         import serial.tools.list_ports as list_ports
 
         for port in list_ports.comports():
-            out["serial"].append({
-                "port": port.device,
-                "vid": f"{port.vid:04x}" if port.vid else None,
-                "pid": f"{port.pid:04x}" if port.pid else None,
-                "serial_number": port.serial_number,
-                "description": port.description,
-            })
-    except Exception as exc:  # noqa: BLE001 - an unreadable bus is a finding, not a crash
+            out["serial"].append(
+                {
+                    "port": port.device,
+                    "vid": f"{port.vid:04x}" if port.vid else None,
+                    "pid": f"{port.pid:04x}" if port.pid else None,
+                    "serial_number": port.serial_number,
+                    "description": port.description,
+                }
+            )
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 - an unreadable bus is a finding, not a crash
         out["serial_error"] = f"{type(exc).__name__}: {exc}"
 
     for root in _uf2_candidate_roots():
@@ -280,7 +284,9 @@ def _windows_bus(timeout: float) -> dict:
     try:
         done = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         parsed = _json.loads(done.stdout or "[]")
     except Exception as exc:  # noqa: BLE001

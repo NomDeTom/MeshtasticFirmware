@@ -31,12 +31,12 @@ from pathlib import Path
 from ..manifest import Bake
 from ..provision import NodeSpec
 from ..scenario import (
+    STIM_RF_PEER,
     LogCount,
     PacketCount,
     RoleBake,
     Scenario,
     SettledStateAssertion,
-    STIM_RF_PEER,
 )
 
 ENV = "nrf52_promicro_diy_tcxo"
@@ -89,10 +89,16 @@ def _row(img: str, air: tuple, senders=SENDERS, witnesses=WITNESSES) -> Scenario
     bake = IMAGES[img]
     rid = f"C-{short}-{img}"
     roles = {r: RoleBake(r, bake, _spec(region, preset, ch, True)) for r in senders}
-    roles.update({r: RoleBake(r, bake, _spec(region, preset, ch, False)) for r in witnesses})
+    roles.update(
+        {r: RoleBake(r, bake, _spec(region, preset, ch, False)) for r in witnesses}
+    )
     heard = [
         PacketCount(
-            f"{w}_heard_{s}", observer=w, from_role=s, portnum="TEXT_MESSAGE_APP", at_least=1
+            f"{w}_heard_{s}",
+            observer=w,
+            from_role=s,
+            portnum="TEXT_MESSAGE_APP",
+            at_least=1,
         )
         for w in witnesses
         for s in senders
@@ -115,7 +121,12 @@ def _row(img: str, air: tuple, senders=SENDERS, witnesses=WITNESSES) -> Scenario
         assertions=[
             *(SettledStateAssertion(name=f"settled_{r}", role=r) for r in roles),
             *(
-                LogCount(f"no_duty_cycle_abort_{s}", [r"Duty cycle limit exceeded"], node=s, at_most=0)
+                LogCount(
+                    f"no_duty_cycle_abort_{s}",
+                    [r"Duty cycle limit exceeded"],
+                    node=s,
+                    at_most=0,
+                )
                 for s in senders
             ),
             *heard,
@@ -129,14 +140,24 @@ def _row(img: str, air: tuple, senders=SENDERS, witnesses=WITNESSES) -> Scenario
 IDENTIFY = Scenario(
     id="I1-frequency-offsets",
     description="Traced image, all four send in turn on SHORT_FAST; read Corrected frequency offset per sender.",
-    roles={r: RoleBake(r, TRACED, _spec("EU_868", "SHORT_FAST", 0, True)) for r in SENDERS + WITNESSES},
+    roles={
+        r: RoleBake(r, TRACED, _spec("EU_868", "SHORT_FAST", 0, True))
+        for r in SENDERS + WITNESSES
+    },
     stimulus=STIM_RF_PEER,
-    stimulus_params={"sources": list(SENDERS + WITNESSES), "count": 8, "interval_s": 3.0, "text": "I1"},
+    stimulus_params={
+        "sources": list(SENDERS + WITNESSES),
+        "count": 8,
+        "interval_s": 3.0,
+        "text": "I1",
+    },
     senses_channel=True,
     duration_s=8 * 3.0 + 20.0,
     tags=["identify"],
     assertions=[
-        LogCount("offsets_logged", [r"Corrected frequency offset"], node="dut", at_least=3),
+        LogCount(
+            "offsets_logged", [r"Corrected frequency offset"], node="dut", at_least=3
+        ),
     ],
 )
 

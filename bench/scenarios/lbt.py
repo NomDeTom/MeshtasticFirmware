@@ -35,17 +35,17 @@ from __future__ import annotations
 from ..manifest import Bake
 from ..provision import NodeSpec
 from ..scenario import (
+    STIM_RF_EXCITER,
+    STIM_RF_PEER,
+    STIM_SELF,
     LogCount,
-    ObserverSilence,
     NoDecryptFailures,
+    ObserverSilence,
     PacketCount,
     RateAssertion,
     RoleBake,
     Scenario,
     SettledStateAssertion,
-    STIM_RF_EXCITER,
-    STIM_RF_PEER,
-    STIM_SELF,
 )
 
 # The bench's hardware and regulatory domain, read from the nodes themselves rather than
@@ -140,7 +140,12 @@ SCENARIOS = [
         # transmit, so a DUT left listening arms nothing and the row would score NOT
         # OBSERVED against firmware that is working perfectly.
         stimulus=STIM_RF_PEER,
-        stimulus_params={"sources": ["dut"], "count": 10, "interval_s": 5.0, "text": "L1-idle"},
+        stimulus_params={
+            "sources": ["dut"],
+            "count": 10,
+            "interval_s": 5.0,
+            "text": "L1-idle",
+        },
         senses_channel=True,
         duration_s=45.0,
         tags=["lbt", "baseline", "negative-control"],
@@ -171,7 +176,12 @@ SCENARIOS = [
         ),
         roles=_roles(dut_bake=TRACED),
         stimulus=STIM_RF_PEER,
-        stimulus_params={"sources": ["peer", "dut"], "count": 10, "interval_s": 5.0, "text": "L2-occupy"},
+        stimulus_params={
+            "sources": ["peer", "dut"],
+            "count": 10,
+            "interval_s": 5.0,
+            "text": "L2-occupy",
+        },
         senses_channel=True,
         duration_s=45.0,
         tags=["lbt", "core"],
@@ -205,7 +215,12 @@ SCENARIOS = [
         ),
         roles=_roles(dut_bake=TRACED),
         stimulus=STIM_RF_PEER,
-        stimulus_params={"sources": ["peer", "dut"], "count": 10, "interval_s": 6.0, "text": "L3-handoff"},
+        stimulus_params={
+            "sources": ["peer", "dut"],
+            "count": 10,
+            "interval_s": 6.0,
+            "text": "L3-handoff",
+        },
         senses_channel=True,
         duration_s=45.0,
         tags=["lbt", "handoff"],
@@ -238,7 +253,12 @@ SCENARIOS = [
         ),
         roles=_roles(dut_bake=TRACED),
         stimulus=STIM_RF_PEER,
-        stimulus_params={"sources": ["peer", "dut"], "count": 16, "interval_s": 5.0, "text": "L4-soak"},
+        stimulus_params={
+            "sources": ["peer", "dut"],
+            "count": 16,
+            "interval_s": 5.0,
+            "text": "L4-soak",
+        },
         senses_channel=True,
         duration_s=120.0,
         tags=["lbt", "soak", "regression"],
@@ -252,8 +272,12 @@ SCENARIOS = [
             ),
             LogCount("no_handoff_timeout", [r"CAD>RX timeout"], node="dut", at_most=0),
             LogCount("no_handoff_void", [r"CAD>RX void"], node="dut", at_most=0),
-            LogCount("no_missed_irq", [r"caught missed (RX|TX)_DONE"], node="dut", at_most=0),
-            LogCount("no_hardware_failure", [r"Hardware Failure"], node="dut", at_most=0),
+            LogCount(
+                "no_missed_irq", [r"caught missed (RX|TX)_DONE"], node="dut", at_most=0
+            ),
+            LogCount(
+                "no_hardware_failure", [r"Hardware Failure"], node="dut", at_most=0
+            ),
             NoDecryptFailures(),
         ],
     ),
@@ -269,7 +293,12 @@ SCENARIOS = [
         ),
         roles=_roles(dut_bake=TRACED),
         stimulus=STIM_RF_PEER,
-        stimulus_params={"sources": ["peer", "dut"], "count": 10, "interval_s": 5.0, "text": "L5-queue"},
+        stimulus_params={
+            "sources": ["peer", "dut"],
+            "count": 10,
+            "interval_s": 5.0,
+            "text": "L5-queue",
+        },
         senses_channel=True,
         duration_s=45.0,
         tags=["lbt", "capability-gate"],
@@ -302,7 +331,12 @@ SCENARIOS = [
         ),
         roles=_roles(dut_bake=TRACED, tx_enabled=False),
         stimulus=STIM_RF_PEER,
-        stimulus_params={"sources": ["peer", "dut"], "count": 8, "interval_s": 5.0, "text": "L6-control"},
+        stimulus_params={
+            "sources": ["peer", "dut"],
+            "count": 8,
+            "interval_s": 5.0,
+            "text": "L6-control",
+        },
         senses_channel=True,
         duration_s=45.0,
         tags=["lbt", "negative-control"],
@@ -316,7 +350,10 @@ SCENARIOS = [
             ),
             LogCount(
                 "tx_refused",
-                [r"Drop Tx packet: LoRa Tx disabled", r"send - !config\.lora\.tx_enabled"],
+                [
+                    r"Drop Tx packet: LoRa Tx disabled",
+                    r"send - !config\.lora\.tx_enabled",
+                ],
                 node="dut",
                 at_least=1,
             ),
@@ -347,7 +384,12 @@ EXCITER_SCENARIOS = [
         ),
         roles=_roles(peer=False),
         stimulus=STIM_RF_EXCITER,
-        stimulus_params={"source": "exciter", "mode": "carrier", "dwell_ms": 500, "count": 40},
+        stimulus_params={
+            "source": "exciter",
+            "mode": "carrier",
+            "dwell_ms": 500,
+            "count": 40,
+        },
         senses_channel=True,
         duration_s=120.0,
         tags=["lbt", "exciter", "calibration"],

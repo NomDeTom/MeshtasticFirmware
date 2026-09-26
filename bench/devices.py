@@ -122,7 +122,9 @@ def wait_for_port(serial_number: str, timeout: float = 90.0, poll: float = 1.0) 
     ) from last
 
 
-def wait_for_absence(serial_number: str, timeout: float = 30.0, poll: float = 0.5) -> bool:
+def wait_for_absence(
+    serial_number: str, timeout: float = 30.0, poll: float = 0.5
+) -> bool:
     """Block until a serial number disappears. True if it went, False on timeout.
 
     A DFU touch is only confirmed by the device leaving; polling for its return without

@@ -128,7 +128,9 @@ def summarize(
     encrypted_bytes = encrypted if isinstance(encrypted, (bytes, bytearray)) else None
 
     body = payload_bytes if payload_bytes is not None else encrypted_bytes
-    payload_size = len(body) if body is not None else _get(packet, "payloadSize", "payload_size")
+    payload_size = (
+        len(body) if body is not None else _get(packet, "payloadSize", "payload_size")
+    )
 
     public_key = _get(packet, "publicKey", "public_key")
     pk_bytes = public_key if isinstance(public_key, (bytes, bytearray)) else None
@@ -171,7 +173,9 @@ def summarize(
         # An RF statistic computed over via_mqtt rows is meaningless: they never
         # crossed the air, which is why they carry no RSSI.
         "via_mqtt": _get(packet, "viaMqtt", "via_mqtt", default=False),
-        "transport_mechanism": _get(packet, "transportMechanism", "transport_mechanism"),
+        "transport_mechanism": _get(
+            packet, "transportMechanism", "transport_mechanism"
+        ),
         # -- scheduling ---------------------------------------------------------
         "want_ack": _get(packet, "wantAck", "want_ack", default=False),
         "priority": packet.get("priority"),
@@ -262,7 +266,11 @@ def display_row(row: dict) -> str:
 
 
 def _lastbyte_args(d: dict) -> dict:
-    return {"raw": d.get("raw"), "status": d.get("status", NOT_SET), "node_num": d.get("node_num")}
+    return {
+        "raw": d.get("raw"),
+        "status": d.get("status", NOT_SET),
+        "node_num": d.get("node_num"),
+    }
 
 
 def _hexid(value: Any) -> str | None:

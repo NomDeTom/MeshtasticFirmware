@@ -28,16 +28,13 @@ from . import (
     builder,
     devices,
     flasher,
-    ledger as ledger_mod,
-    manifest as manifest_mod,
-    observer as observer_mod,
-    platform_probe,
-    ports,
-    preflight,
-    provision,
-    scenario as scenario_mod,
-    streams,
 )
+from . import ledger as ledger_mod
+from . import manifest as manifest_mod
+from . import observer as observer_mod
+from . import platform_probe, ports, preflight, provision
+from . import scenario as scenario_mod
+from . import streams
 
 STAGE_PREFLIGHT = "0-preflight"
 STAGE_BUILD = "1-build"
@@ -147,13 +144,18 @@ class Runner:
             node = next((n for n in self.config.nodes if n.name == name), None)
             if node is None or not node.present():
                 continue
-            if entry.get("serial_number") and entry["serial_number"] != node.serial_number:
+            if (
+                entry.get("serial_number")
+                and entry["serial_number"] != node.serial_number
+            ):
                 continue
             out[name] = entry
         return out
 
     def _save_results(self) -> None:
-        self.results_path.write_text(json.dumps(self.results, indent=2), encoding="utf-8")
+        self.results_path.write_text(
+            json.dumps(self.results, indent=2), encoding="utf-8"
+        )
 
     def event(self, kind: str, data: dict | None = None, **kw: Any) -> None:
         payload = {**(data or {}), **kw}
@@ -218,7 +220,9 @@ class Runner:
                 json.dumps(self.snapshot(), indent=2, default=str), encoding="utf-8"
             )
         except Exception as exc:  # noqa: BLE001
-            self.recorder.event("heartbeat_write_failed", error=f"{type(exc).__name__}: {exc}")
+            self.recorder.event(
+                "heartbeat_write_failed", error=f"{type(exc).__name__}: {exc}"
+            )
 
     def wait_note(self, what: str | None) -> None:
         """Report the wait, not just the work - the line a progress bar always omits."""
@@ -263,7 +267,8 @@ class Runner:
             "schedule": self._schedule.to_dict() if self._schedule else None,
             "ports": (
                 {n: h.owner.status() for n, h in self.observer.held.items() if h.owner}
-                if self.observer else None
+                if self.observer
+                else None
             ),
             "scenarios": [s.id for s in self._selected()],
             "stage": self.stage,
@@ -306,9 +311,13 @@ class Runner:
         the node already holds the required state.
         """
         plan = ports.Schedule()
-        step = plan.add("preflight", "preflight", preflight.PREFLIGHT_BUDGET_S,
-                        "checks that refuse a run which cannot prove anything",
-                        kind="preflight")
+        step = plan.add(
+            "preflight",
+            "preflight",
+            preflight.PREFLIGHT_BUDGET_S,
+            "checks that refuse a run which cannot prove anything",
+            kind="preflight",
+        )
         # Named by preflight itself, so the plan and the checks cannot drift apart.
         for name, budget in preflight.PHASES:
             step.add(f"preflight:{name}", name, budget)
@@ -316,10 +325,16 @@ class Runner:
         sha, dirty = manifest_mod.git_state(self.config.firmware_root)
         distinct = {
             rb.bake.content_hash(sha, dirty): rb.bake
-            for scen in self._selected() for rb in scen.roles.values()
+            for scen in self._selected()
+            for rb in scen.roles.values()
         }
-        build = plan.add("build", "build images", 0.0,
-                         f"{len(distinct)} distinct image(s)", kind="build")
+        build = plan.add(
+            "build",
+            "build images",
+            0.0,
+            f"{len(distinct)} distinct image(s)",
+            kind="build",
+        )
         for bake_hash, bake in sorted(distinct.items()):
             cached = self.manifest.has(bake_hash)
             # A prebuilt image is registered, not compiled. Budgeting a compiler run for
@@ -344,9 +359,14 @@ class Runner:
                 if node is None or node.never_flash or self.config.skip_flash:
                     continue
                 step_id = f"{scen.id}:flash:{node.name}"
-                step = plan.add(step_id, f"{scen.id}: flash {node.name}",
-                                flasher.FLASH_BUDGET_S, kind="flash", node=node.name,
-                                detail="skipped once the node runs this image")
+                step = plan.add(
+                    step_id,
+                    f"{scen.id}: flash {node.name}",
+                    flasher.FLASH_BUDGET_S,
+                    kind="flash",
+                    node=node.name,
+                    detail="skipped once the node runs this image",
+                )
                 # Named by the flasher itself, so the plan and the thing being planned
                 # cannot drift into calling the same work by different names.
                 for name, budget in flasher.PHASES:
@@ -362,23 +382,39 @@ class Runner:
                     if node is None or node.never_command:
                         continue
                     step_id = f"{scen.id}:provision:{node.name}"
-                    step = plan.add(step_id, f"{scen.id}: provision {node.name}",
-                                    provision.PROVISION_BUDGET_S, kind="provision",
-                                    node=node.name,
-                                    detail="verified instead when the state already matches")
+                    step = plan.add(
+                        step_id,
+                        f"{scen.id}: provision {node.name}",
+                        provision.PROVISION_BUDGET_S,
+                        kind="provision",
+                        node=node.name,
+                        detail="verified instead when the state already matches",
+                    )
                     for name, budget in provision.PHASES:
                         step.add(f"{step_id}:{name}", name, budget)
 
             stim = scen.stimulus_params
             stimulus_s = float(stim.get("count", 0)) * float(stim.get("interval_s", 0))
-            step = plan.add(f"{scen.id}:execute", f"{scen.id}: execute",
-                            stimulus_s + scen.duration_s, kind="execute",
-                            detail=f"{stim.get('count', 0)} sends, then a window")
-            step.add(f"{scen.id}:execute:stimulus", "stimulus", stimulus_s,
-                     f"{stim.get('count', 0)} x {stim.get('interval_s', 0)}s")
+            step = plan.add(
+                f"{scen.id}:execute",
+                f"{scen.id}: execute",
+                stimulus_s + scen.duration_s,
+                kind="execute",
+                detail=f"{stim.get('count', 0)} sends, then a window",
+            )
+            step.add(
+                f"{scen.id}:execute:stimulus",
+                "stimulus",
+                stimulus_s,
+                f"{stim.get('count', 0)} x {stim.get('interval_s', 0)}s",
+            )
             step.add(f"{scen.id}:execute:window", "capture window", scen.duration_s)
-            step.add(f"{scen.id}:execute:assert", "evaluate assertions", 0.0,
-                     f"{len(scen.assertions)} checks")
+            step.add(
+                f"{scen.id}:execute:assert",
+                "evaluate assertions",
+                0.0,
+                f"{len(scen.assertions)} checks",
+            )
         return plan
 
     def _begin(self, step_id: str) -> None:
@@ -386,7 +422,9 @@ class Runner:
             self._schedule.begin(step_id)
             self.heartbeat(force=False)
 
-    def _finish(self, step_id: str, status: str = ports.DONE, outcome: str | None = None) -> None:
+    def _finish(
+        self, step_id: str, status: str = ports.DONE, outcome: str | None = None
+    ) -> None:
         if self._schedule is not None:
             self._schedule.finish(step_id, status, outcome)
             self.heartbeat(force=False)
@@ -429,10 +467,14 @@ class Runner:
     def run(self) -> dict:
         self._schedule = self.schedule()
         streams.durable_write_text(
-            self.run_dir / "schedule.json", json.dumps(self._schedule.to_dict(), indent=2)
+            self.run_dir / "schedule.json",
+            json.dumps(self._schedule.to_dict(), indent=2),
         )
-        self.event("schedule", steps=len(self._schedule.steps),
-                   total_s=round(self._schedule.total_s, 1))
+        self.event(
+            "schedule",
+            steps=len(self._schedule.steps),
+            total_s=round(self._schedule.total_s, 1),
+        )
         self._stop_beating.clear()
         self._beat_thread = threading.Thread(
             target=self._beat_loop, daemon=True, name="bench-heartbeat"
@@ -461,11 +503,14 @@ class Runner:
         # A userPrefs left injected by a crashed build would silently become part of
         # every image this run produces.
         if builder.restore_userprefs(self.config.firmware_root):
-            self.event("userprefs_restored", note="a previous build left an injected file")
+            self.event(
+                "userprefs_restored", note="a previous build left an injected file"
+            )
 
         self._begin("preflight")
         report = preflight.run_preflight(
-            nodes=self.config.nodes, firmware_root=self.config.firmware_root,
+            nodes=self.config.nodes,
+            firmware_root=self.config.firmware_root,
             on_phase=lambda name, status: self.event(
                 "preflight_phase", phase=name, status=status
             ),
@@ -487,7 +532,9 @@ class Runner:
         self.stage = STAGE_BUILD
         self.heartbeat()
         wanted = [
-            (s.id, role, rb.bake) for s in self._selected() for role, rb in s.roles.items()
+            (s.id, role, rb.bake)
+            for s in self._selected()
+            for role, rb in s.roles.items()
         ]
         if not wanted:
             return
@@ -586,14 +633,22 @@ class Runner:
             self._finish(f"{scen.id}:execute", outcome=result.verdict)
             (self.run_dir / "rows").mkdir(exist_ok=True)
             (self.run_dir / "rows" / f"{scen.id}.json").write_text(
-                json.dumps({"result": result.to_dict(), "ledger": led.summary()}, indent=2, default=str),
+                json.dumps(
+                    {"result": result.to_dict(), "ledger": led.summary()},
+                    indent=2,
+                    default=str,
+                ),
                 encoding="utf-8",
             )
         except Exception as exc:  # noqa: BLE001 - a row must never kill the run
             result.verdict = scenario_mod.INVALID
             result.error = f"{type(exc).__name__}: {exc}"
-            self.event("row_error", scenario=scen.id, error=result.error,
-                       traceback=traceback.format_exc()[-2000:])
+            self.event(
+                "row_error",
+                scenario=scen.id,
+                error=result.error,
+                traceback=traceback.format_exc()[-2000:],
+            )
         finally:
             result.ended_at = time.time()
             self.stage = STAGE_CYCLE
@@ -623,11 +678,17 @@ class Runner:
                 detail = f"still on the bus but capture was {state}"
             else:
                 detail = f"left the bus during the row (capture was {state})"
-            result.exit.append(scenario_mod.Condition(
-                f"{node.name} captured to the end", captured, detail,
-            ))
+            result.exit.append(
+                scenario_mod.Condition(
+                    f"{node.name} captured to the end",
+                    captured,
+                    detail,
+                )
+            )
 
-    def _prepare_row(self, scen: scenario_mod.Scenario, result: scenario_mod.RowResult) -> dict:
+    def _prepare_row(
+        self, scen: scenario_mod.Scenario, result: scenario_mod.RowResult
+    ) -> dict:
         """Flash and provision every role, and record what actually ended up on them."""
         sha, dirty = manifest_mod.git_state(self.config.firmware_root)
         images: dict[str, manifest_mod.ImageEntry] = {}
@@ -659,16 +720,25 @@ class Runner:
                 carried = node.name in self._carried_images
                 why = (
                     "an earlier attempt at this run flashed this image"
-                    if carried else "node already runs this image"
+                    if carried
+                    else "node already runs this image"
                 )
                 self._skip(step_id, why)
                 self.event(
-                    "flash_skipped", node=node.name, bake_hash=entry.bake_hash,
-                    reason=why, from_earlier_attempt=carried,
+                    "flash_skipped",
+                    node=node.name,
+                    bake_hash=entry.bake_hash,
+                    reason=why,
+                    from_earlier_attempt=carried,
                 )
-                result.entry.append(scenario_mod.Condition(
-                    f"{node.name} runs {entry.bake_hash}", True, why, how="satisfied",
-                ))
+                result.entry.append(
+                    scenario_mod.Condition(
+                        f"{node.name} runs {entry.bake_hash}",
+                        True,
+                        why,
+                        how="satisfied",
+                    )
+                )
                 continue
             self._begin(step_id)
             self.stage = STAGE_FLASH
@@ -682,7 +752,9 @@ class Runner:
                 else (entry.uf2 or entry.hex_file)
             )
             if image is None:
-                raise flasher.FlashError(f"image {entry.bake_hash} has no flashable artifact")
+                raise flasher.FlashError(
+                    f"image {entry.bake_hash} has no flashable artifact"
+                )
             f = flasher.Flasher(
                 platform=self.platform,
                 on_event=lambda kind, data: self.event(kind, data),
@@ -695,10 +767,14 @@ class Runner:
                 raise
             self._running_image[node.name] = entry.bake_hash
             self._finish(step_id)
-            result.entry.append(scenario_mod.Condition(
-                f"{node.name} runs {entry.bake_hash}", True, "flashed for this row",
-                how="established",
-            ))
+            result.entry.append(
+                scenario_mod.Condition(
+                    f"{node.name} runs {entry.bake_hash}",
+                    True,
+                    "flashed for this row",
+                    how="established",
+                )
+            )
             self.wait_note(None)
 
         for role, role_bake in scen.roles.items():
@@ -729,9 +805,10 @@ class Runner:
 
         # The settled-state block goes into the capture as a preamble, so the log is
         # self-describing and a hollow pass cannot be mistaken for a real one.
-        self.recorder.mark(f"{scen.id}:preamble", settled=result.settled, images=result.images)
+        self.recorder.mark(
+            f"{scen.id}:preamble", settled=result.settled, images=result.images
+        )
         return images
-
 
     def _resolve_build_tags(
         self, result: scenario_mod.RowResult, images: dict[str, manifest_mod.ImageEntry]
@@ -754,11 +831,17 @@ class Runner:
             # detached, so whether the tag was caught is luck - one node got it and the
             # other did not, on the same run. Identity is too important to leave to that,
             # so ask again deterministically: reboot once with the observer attached.
-            if tag is None and entry is not None and manifest_mod.BUILD_TAG in entry.capabilities:
+            if (
+                tag is None
+                and entry is not None
+                and manifest_mod.BUILD_TAG in entry.capabilities
+            ):
                 tag = self._reboot_for_build_tag(name)
             state["build_tag"] = tag
 
-    def _reboot_for_build_tag(self, node_name: str, timeout: float = 60.0) -> str | None:
+    def _reboot_for_build_tag(
+        self, node_name: str, timeout: float = 60.0
+    ) -> str | None:
         """Reboot a node with the observer attached, to make it announce itself.
 
         Cheap and only used when the tag was missed. The row's evidence is already
@@ -767,7 +850,9 @@ class Runner:
         node = self._node_for(node_name)
         if node is None or node.never_command or self.observer is None:
             return None
-        self.event("build_tag_reboot", node=node_name, reason="tag not seen during prep")
+        self.event(
+            "build_tag_reboot", node=node_name, reason="tag not seen during prep"
+        )
         # Through the provisioner, so the reboot and the wait for the node run in a child
         # process like every other reboot. The child forwards the node's log lines into
         # the capture, and capture reattaches after it - either one hears the banner.
@@ -833,7 +918,8 @@ class Runner:
                         if child.name != "read back + verify":
                             self._schedule.skip(child.id, "state already matches")
                 self.event(
-                    "provision_skipped", node=node.name,
+                    "provision_skipped",
+                    node=node.name,
                     reason="already in this state, verified on device",
                 )
                 return state
@@ -895,7 +981,9 @@ class Runner:
             # assertion is judged against how the node was ACTUALLY captured.
             capture_modes={
                 name: info.get("mode", "api")
-                for name, info in (self.observer.status()["nodes"] if self.observer else {}).items()
+                for name, info in (
+                    self.observer.status()["nodes"] if self.observer else {}
+                ).items()
             },
         )
 
@@ -978,7 +1066,9 @@ class Runner:
             if concurrent:
                 barrier = threading.Barrier(len(sources))
                 threads = [
-                    threading.Thread(target=send_one, args=(name, i, barrier), daemon=True)
+                    threading.Thread(
+                        target=send_one, args=(name, i, barrier), daemon=True
+                    )
                     for name in sources
                 ]
                 for t in threads:
@@ -991,7 +1081,9 @@ class Runner:
             time.sleep(interval)
         # Report what was actually emitted, so a row can tell "the DUT did not defer"
         # from "the stimulus never ran".
-        self.event("stimulus_rf_peer_done", scenario=scen.id, sent=sent, failures=failures)
+        self.event(
+            "stimulus_rf_peer_done", scenario=scen.id, sent=sent, failures=failures
+        )
 
     def _stimulate_exciter(self, scen: scenario_mod.Scenario, params: dict) -> None:
         """Raw carrier or preamble from the exciter node.
@@ -1012,7 +1104,9 @@ class Runner:
         driver.open()
         try:
             if params.get("freq_hz"):
-                driver.configure(params["freq_hz"], params.get("sf", 11), params.get("bw_hz", 250000))
+                driver.configure(
+                    params["freq_hz"], params.get("sf", 11), params.get("bw_hz", 250000)
+                )
             outcome = driver.burst(
                 count=int(params.get("count", 20)),
                 dwell_ms=int(params.get("dwell_ms", 200)),

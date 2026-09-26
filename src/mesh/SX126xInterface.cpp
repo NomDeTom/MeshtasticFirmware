@@ -419,7 +419,15 @@ template <typename T> void SX126xInterface<T>::handleSoftwareLoraIrqPoll()
 
 template <typename T> int16_t SX126xInterface<T>::trySetStandby()
 {
+#ifdef BENCH_KNOBS
+    const bool wasSending = sendingPacket != NULL;
+#endif
     checkNotification(); // handle any pending interrupts before we force standby
+#ifdef BENCH_KNOBS
+    benchGapMarkArm(GAP_NOTIFIED);
+    if (sendingPacket != NULL)
+        LOG_WARN("BENCH standby aborts TX id=%08x started_in_notify=%d", sendingPacket->id, wasSending ? 0 : 1);
+#endif
 
     int16_t err = lora.standby();
 
@@ -506,6 +514,9 @@ template <typename T> void SX126xInterface<T>::startReceive()
     };
 
     int16_t err = trySetStandby();
+#ifdef BENCH_KNOBS
+    benchGapMarkArm(GAP_STANDBY);
+#endif
     if (err == RADIOLIB_ERR_NONE)
         err = tryStartRx();
 
@@ -578,20 +589,19 @@ template <typename T> bool SX126xInterface<T>::isChannelActive()
     if (benchKnobs.lbt == BenchKnobs::LBT_CAD || benchKnobs.lbt == BenchKnobs::LBT_CADTX)
         cadExitMode = RADIOLIB_SX126X_CAD_GOTO_STDBY;
 #endif
-    ChannelScanConfig_t cfg = {.cad = {.symNum = cadSymNum,
+    ChannelScanConfig_t cfg = {
+        .cad = {.symNum = cadSymNum,
 #ifdef BENCH_KNOBS
-                                       .detPeak = benchKnobs.detPeak >= 0 ? (uint8_t)benchKnobs.detPeak
-                                                                          : (uint8_t)RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
-                                       .detMin = benchKnobs.detMin >= 0 ? (uint8_t)benchKnobs.detMin
-                                                                        : (uint8_t)RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
+                .detPeak = benchKnobs.detPeak >= 0 ? (uint8_t)benchKnobs.detPeak : (uint8_t)RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
+                .detMin = benchKnobs.detMin >= 0 ? (uint8_t)benchKnobs.detMin : (uint8_t)RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
 #else
-                                       .detPeak = RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
-                                       .detMin = RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
+                .detPeak = RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
+                .detMin = RADIOLIB_SX126X_CAD_PARAM_DEFAULT,
 #endif
-                                       .exitMode = cadExitMode,
-                                       .timeout = cadRxTimeoutUsec,
-                                       .irqFlags = cadIrqFlags,
-                                       .irqMask = cadIrqMask}};
+                .exitMode = cadExitMode,
+                .timeout = cadRxTimeoutUsec,
+                .irqFlags = cadIrqFlags,
+                .irqMask = cadIrqMask}};
     setTransmitEnable(false);
     int16_t result = trySetStandby();
     if (result == RADIOLIB_ERR_NONE) {

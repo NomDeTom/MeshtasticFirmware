@@ -90,7 +90,9 @@ class NodeSpec:
     long_name: str | None = None
     short_name: str | None = None
     debug_log_api: bool = True
-    extra_config: dict[str, Any] = field(default_factory=dict)  # "lora.tx_enabled" -> value
+    extra_config: dict[str, Any] = field(
+        default_factory=dict
+    )  # "lora.tx_enabled" -> value
 
     def to_dict(self) -> dict:
         return {
@@ -203,7 +205,12 @@ class Provisioner:
 
         # 2. Factory reset, so the bake's userPrefs are actually applied.
         with phase(RESET):
-            self._step(node, "factory_reset", lambda n: n.localNode.factoryReset(), reboots=True)
+            self._step(
+                node,
+                "factory_reset",
+                lambda n: n.localNode.factoryReset(),
+                reboots=True,
+            )
             self._wait_ready(node, reconnect=True)
 
         # 3. Region and preset, in a write of their own.
@@ -265,7 +272,11 @@ class Provisioner:
         # 6. Channels LAST - before a reboot they are acknowledged and then lost.
         if spec.channel_url:
             with phase(CHANNELS):
-                self._step(node, "set_channel_url", lambda n: n.localNode.setURL(spec.channel_url))
+                self._step(
+                    node,
+                    "set_channel_url",
+                    lambda n: n.localNode.setURL(spec.channel_url),
+                )
                 self._wait_ready(node, reconnect=True)
 
         # 7. Verify on device, with one re-apply before failing.
@@ -292,7 +303,9 @@ class Provisioner:
         self._wait_ready(node)
         self._reboot(node)
 
-    def verify(self, node: devices.BenchNode, spec: NodeSpec) -> tuple[SettledState, list[str]]:
+    def verify(
+        self, node: devices.BenchNode, spec: NodeSpec
+    ) -> tuple[SettledState, list[str]]:
         """Read the device's state and say how it differs from the spec.
 
         The read-only half of provisioning, so a caller can ask "is it already right?"
@@ -331,7 +344,9 @@ class Provisioner:
         except Exception as exc:  # noqa: BLE001
             # Several of these reboot the node mid-call, so the library raises on the way
             # out of an operation that worked. The read-back at step 7 is the arbiter.
-            self._emit("provision_step_raised", node=node.name, step=name, error=str(exc))
+            self._emit(
+                "provision_step_raised", node=node.name, step=name, error=str(exc)
+            )
         time.sleep(SETTLE_AFTER_WRITE_S)
         if reboots:
             # The node is rebooting. expect_reboot abandons the handle rather than
@@ -339,13 +354,17 @@ class Provisioner:
             # the port against the reconnect immediately after it.
             self.observer.owner_for(node.name).expect_reboot(f"provision:{name}")
 
-    def _write_config(self, node: devices.BenchNode, section: str, values: dict) -> None:
+    def _write_config(
+        self, node: devices.BenchNode, section: str, values: dict
+    ) -> None:
         """Write one config section and commit it.
 
         A write is acknowledged before it reaches NVS, so this never trusts its own
         return - verification happens at step 7 and nowhere else.
         """
-        self._emit("provision_config", node=node.name, section=section, values=_safe(values))
+        self._emit(
+            "provision_config", node=node.name, section=section, values=_safe(values)
+        )
 
         def _apply(iface: Any) -> None:
             local = iface.localNode
@@ -369,7 +388,10 @@ class Provisioner:
         self._wait_ready(node, reconnect=True)
 
     def _wait_ready(
-        self, node: devices.BenchNode, timeout: float = READY_TIMEOUT_S, reconnect: bool = True
+        self,
+        node: devices.BenchNode,
+        timeout: float = READY_TIMEOUT_S,
+        reconnect: bool = True,
     ) -> None:
         """Block until the node is answering again, or fail with a named outcome.
 
@@ -381,8 +403,10 @@ class Provisioner:
         result = owner.wait_answering(budget_s=timeout)
         self._emit(
             "node_ready" if result.ok else "node_not_ready",
-            node=node.name, outcome=result.outcome,
-            waited_s=round(result.elapsed_s, 1), budget_s=result.budget_s,
+            node=node.name,
+            outcome=result.outcome,
+            waited_s=round(result.elapsed_s, 1),
+            budget_s=result.budget_s,
             detail=result.detail,
         )
         if not result.ok:
@@ -537,7 +561,9 @@ class Provisioner:
                 )
         return problems
 
-    def _reapply(self, node: devices.BenchNode, spec: NodeSpec, problems: list[str]) -> None:
+    def _reapply(
+        self, node: devices.BenchNode, spec: NodeSpec, problems: list[str]
+    ) -> None:
         """One re-apply. The write may simply not have reached NVS yet."""
         joined = " ".join(problems)
         if "region" in joined or "modem_preset" in joined or "tx_enabled" in joined:
@@ -551,12 +577,13 @@ class Provisioner:
         if "device role" in joined and spec.role:
             self._write_config(node, "device", {"role": spec.role})
         if "channel" in joined and spec.channel_url:
-            self._step(node, "set_channel_url", lambda n: n.localNode.setURL(spec.channel_url))
+            self._step(
+                node, "set_channel_url", lambda n: n.localNode.setURL(spec.channel_url)
+            )
             self._wait_ready(node, reconnect=True)
 
 
 # -- helpers --------------------------------------------------------------------
-
 
 
 _MISSING = object()
@@ -740,7 +767,9 @@ class IsolatedProvisioner:
         reply = self._run("provision", node, spec)
         return state_from_json(reply["state"])
 
-    def verify(self, node: devices.BenchNode, spec: NodeSpec) -> tuple[SettledState, list[str]]:
+    def verify(
+        self, node: devices.BenchNode, spec: NodeSpec
+    ) -> tuple[SettledState, list[str]]:
         reply = self._run("verify", node, spec)
         return state_from_json(reply["state"]), list(reply.get("problems") or [])
 
@@ -761,7 +790,11 @@ class IsolatedProvisioner:
             "node": node_to_json(node),
             "spec": spec_to_json(spec) if spec is not None else None,
         }
-        run: dict[str, Any] = {"outcome": ports.FAILED, "detail": "not started", "reply": None}
+        run: dict[str, Any] = {
+            "outcome": ports.FAILED,
+            "detail": "not started",
+            "reply": None,
+        }
         back = None
         self.observer.suspend(node.name, reason)
         try:
@@ -776,13 +809,18 @@ class IsolatedProvisioner:
             back = self.observer.resume(
                 node.name,
                 budget_s=(
-                    self.ready_timeout_s if reply.get("answered") else RECLAIM_AFTER_FAILURE_S
+                    self.ready_timeout_s
+                    if reply.get("answered")
+                    else RECLAIM_AFTER_FAILURE_S
                 ),
             )
             if back is not None:
                 self._emit(
-                    "capture_resumed", node=node.name, outcome=back.outcome,
-                    waited_s=round(back.elapsed_s, 1), budget_s=back.budget_s,
+                    "capture_resumed",
+                    node=node.name,
+                    outcome=back.outcome,
+                    waited_s=round(back.elapsed_s, 1),
+                    budget_s=back.budget_s,
                     detail=back.detail,
                 )
 
@@ -801,7 +839,9 @@ class IsolatedProvisioner:
             )
         return reply
 
-    def _spawn(self, node: devices.BenchNode, op: str, job: dict, ceiling_s: float) -> dict:
+    def _spawn(
+        self, node: devices.BenchNode, op: str, job: dict, ceiling_s: float
+    ) -> dict:
         """Start the child, forward what it reports, and never return while it lives."""
         import collections
         import json
@@ -816,18 +856,29 @@ class IsolatedProvisioner:
         budget = ports.Budget(ceiling_s)
         env = dict(os.environ)
         root = str(Path(__file__).resolve().parent.parent)
-        env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["PYTHONPATH"] = root + (
+            os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+        )
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.Popen(
             self.command or child_command(),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         self._emit(
-            "provision_child_start", node=node.name, op=op, pid=proc.pid,
-            port=job.get("port"), budget_s=ceiling_s,
+            "provision_child_start",
+            node=node.name,
+            op=op,
+            pid=proc.pid,
+            port=job.get("port"),
+            budget_s=ceiling_s,
         )
         lines: "queue.Queue[str | None]" = queue.Queue()
         stderr_tail: "collections.deque[str]" = collections.deque(maxlen=40)
@@ -841,9 +892,13 @@ class IsolatedProvisioner:
             for line in proc.stderr:
                 stderr_tail.append(line.rstrip())
 
-        out_thread = threading.Thread(target=_pump_out, daemon=True, name="bench-child-out")
+        out_thread = threading.Thread(
+            target=_pump_out, daemon=True, name="bench-child-out"
+        )
         out_thread.start()
-        err_thread = threading.Thread(target=_pump_err, daemon=True, name="bench-child-err")
+        err_thread = threading.Thread(
+            target=_pump_err, daemon=True, name="bench-child-err"
+        )
         err_thread.start()
 
         reply: dict | None = None
@@ -868,7 +923,7 @@ class IsolatedProvisioner:
                     stderr_tail.append(line.rstrip())
                     continue
                 try:
-                    msg = json.loads(line[len(CHILD_TAG):])
+                    msg = json.loads(line[len(CHILD_TAG) :])
                 except ValueError:
                     stderr_tail.append(line.rstrip())
                     continue
@@ -909,8 +964,14 @@ class IsolatedProvisioner:
         else:
             outcome, detail = ports.FAILED, f"exit {code} ({_exit_name(code)})"
         self._emit(
-            "provision_child_end", node=node.name, op=op, outcome=outcome, detail=detail,
-            exit_code=code, elapsed_s=round(budget.elapsed, 1), budget_s=ceiling_s,
+            "provision_child_end",
+            node=node.name,
+            op=op,
+            outcome=outcome,
+            detail=detail,
+            exit_code=code,
+            elapsed_s=round(budget.elapsed, 1),
+            budget_s=ceiling_s,
             stderr_tail=list(stderr_tail)[-15:] if outcome != ports.OK else [],
         )
         return {"outcome": outcome, "detail": detail, "reply": reply, "exit_code": code}

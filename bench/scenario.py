@@ -75,7 +75,9 @@ class Context:
     scenario_id: str
     nodes: dict[str, Any] = field(default_factory=dict)  # name -> BenchNode
     settled: dict[str, dict] = field(default_factory=dict)  # name -> SettledState dict
-    capabilities: dict[str, set[str]] = field(default_factory=dict)  # role -> capabilities
+    capabilities: dict[str, set[str]] = field(
+        default_factory=dict
+    )  # role -> capabilities
     params: dict[str, Any] = field(default_factory=dict)
     # node name -> "api" | "raw". A raw-captured node yields log lines only: the packet
     # lane is parsed from the protobuf link, which a never-commanded node does not have.
@@ -129,7 +131,9 @@ class Assertion:
             return Outcome(self.name, NOT_OBSERVED, self.precondition_reason)
         return self.check(led, ctx)
 
-    def check(self, led: ledger_mod.Ledger, ctx: Context) -> Outcome:  # pragma: no cover
+    def check(
+        self, led: ledger_mod.Ledger, ctx: Context
+    ) -> Outcome:  # pragma: no cover
         raise NotImplementedError
 
 
@@ -213,11 +217,19 @@ class PacketCount(Assertion):
             # Zero with a demonstrably live capture is a real negative; zero with a dead
             # stream is not, and the runner has already asserted liveness by here.
             verdict = NOT_OBSERVED if n == 0 else FAIL
-            return Outcome(self.name, verdict, f"{what}, expected at least {self.at_least}",
-                           {"count": n})
+            return Outcome(
+                self.name,
+                verdict,
+                f"{what}, expected at least {self.at_least}",
+                {"count": n},
+            )
         if self.at_most is not None and n > self.at_most:
-            return Outcome(self.name, FAIL, f"{what}, expected at most {self.at_most}",
-                           {"count": n})
+            return Outcome(
+                self.name,
+                FAIL,
+                f"{what}, expected at most {self.at_most}",
+                {"count": n},
+            )
         return Outcome(self.name, PASS, what, {"count": n})
 
 
@@ -253,21 +265,34 @@ class LogCount(Assertion):
             what += f" on {self.node}"
         if self.at_least is not None and n < self.at_least:
             verdict = NOT_OBSERVED if n == 0 else FAIL
-            return Outcome(self.name, verdict, f"{what}, expected at least {self.at_least}",
-                           {"count": n})
+            return Outcome(
+                self.name,
+                verdict,
+                f"{what}, expected at least {self.at_least}",
+                {"count": n},
+            )
         if self.at_most is not None:
             if n > self.at_most:
-                return Outcome(self.name, FAIL, f"{what}, expected at most {self.at_most}",
-                               {"count": n})
+                return Outcome(
+                    self.name,
+                    FAIL,
+                    f"{what}, expected at most {self.at_most}",
+                    {"count": n},
+                )
             # "I saw none" and "I saw nothing" are different claims. An at_most check on
             # a node that produced no log lines at all is the instrument being deaf, not
             # the firmware being quiet, and passing it green is the worst kind of wrong:
             # the row reports evidence it never had. Seen on a node that was in its
             # bootloader for the whole window.
-            heard = led.logs.by_node().get(self.node, 0) if self.node else len(led.logs.rows)
+            heard = (
+                led.logs.by_node().get(self.node, 0)
+                if self.node
+                else len(led.logs.rows)
+            )
             if heard == 0:
                 return Outcome(
-                    self.name, INVALID,
+                    self.name,
+                    INVALID,
                     f"no log lines at all from {self.node or 'any node'} during the window, "
                     "so 'at most' cannot be judged",
                     {"count": n, "lines_from_node": 0},
@@ -321,9 +346,16 @@ class RateAssertion(Assertion):
         what = f"{events}/{trials} = {rate:.2%}"
         detail = {"trials": trials, "events": events, "rate": round(rate, 4)}
         if rate < self.min_rate:
-            return Outcome(self.name, FAIL, f"{what}, expected at least {self.min_rate:.0%}", detail)
+            return Outcome(
+                self.name,
+                FAIL,
+                f"{what}, expected at least {self.min_rate:.0%}",
+                detail,
+            )
         if self.max_rate is not None and rate > self.max_rate:
-            return Outcome(self.name, FAIL, f"{what}, expected at most {self.max_rate:.0%}", detail)
+            return Outcome(
+                self.name, FAIL, f"{what}, expected at most {self.max_rate:.0%}", detail
+            )
         return Outcome(self.name, PASS, what, detail)
 
 
@@ -340,7 +372,9 @@ class ObserverSilence(Assertion):
     exactly like silence.
     """
 
-    def __init__(self, name: str, observer_node: str, from_role: str, **kw: Any) -> None:
+    def __init__(
+        self, name: str, observer_node: str, from_role: str, **kw: Any
+    ) -> None:
         super().__init__(name, **kw)
         self.observer_node = observer_node
         self.from_role = from_role
@@ -399,13 +433,17 @@ class SettledStateAssertion(Assertion):
     else.
     """
 
-    def __init__(self, name: str = "settled_state", role: str = "dut", **kw: Any) -> None:
+    def __init__(
+        self, name: str = "settled_state", role: str = "dut", **kw: Any
+    ) -> None:
         super().__init__(name, role=role, **kw)
 
     def check(self, led: ledger_mod.Ledger, ctx: Context) -> Outcome:
         state = ctx.settled.get(self.role)
         if state is None:
-            return Outcome(self.name, INVALID, f"no settled state recorded for {self.role!r}")
+            return Outcome(
+                self.name, INVALID, f"no settled state recorded for {self.role!r}"
+            )
         errors = state.get("errors") or []
         if errors:
             return Outcome(self.name, INVALID, "; ".join(errors), {"state": state})
@@ -414,7 +452,9 @@ class SettledStateAssertion(Assertion):
         # said so, is the failure the build tag exists to catch. Most likely the -D never
         # reached the compiler, in which case every row is asserting against firmware
         # nobody can identify - which is exactly the state the beacon run was in.
-        if ctx.has_capability(self.role, manifest.BUILD_TAG) and not state.get("build_tag"):
+        if ctx.has_capability(self.role, manifest.BUILD_TAG) and not state.get(
+            "build_tag"
+        ):
             return Outcome(
                 self.name,
                 INVALID,
@@ -440,14 +480,18 @@ class NoDecryptFailures(Assertion):
     packets arriving at -64 dBm with healthy SNR were read as a range problem.
     """
 
-    def __init__(self, name: str = "no_decrypt_failures", sources: Sequence[str] = (), **kw: Any):
+    def __init__(
+        self, name: str = "no_decrypt_failures", sources: Sequence[str] = (), **kw: Any
+    ):
         super().__init__(name, **kw)
         self.sources = list(sources)
 
     def check(self, led: ledger_mod.Ledger, ctx: Context) -> Outcome:
         failures = led.packets.decrypt_failures_by_source()
         relevant = (
-            {k: v for k, v in failures.items() if k in self.sources} if self.sources else failures
+            {k: v for k, v in failures.items() if k in self.sources}
+            if self.sources
+            else failures
         )
         total = sum(relevant.values())
         if total:
@@ -526,11 +570,15 @@ class Scenario:
             "duration_s": self.duration_s,
             "tags": list(self.tags),
             "roles": {
-                r: {"bake": rb.bake.fingerprint(), "spec": rb.spec.to_dict() if rb.spec else None}
+                r: {
+                    "bake": rb.bake.fingerprint(),
+                    "spec": rb.spec.to_dict() if rb.spec else None,
+                }
                 for r, rb in self.roles.items()
             },
             "assertions": [
-                {"name": a.name, "role": a.role, "requires": a.requires} for a in self.assertions
+                {"name": a.name, "role": a.role, "requires": a.requires}
+                for a in self.assertions
             ],
         }
 
@@ -557,7 +605,12 @@ class Condition:
     how: str = ""  # entry only: "satisfied" (found true) or "established" (made true)
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "met": self.met, "detail": self.detail, "how": self.how}
+        return {
+            "name": self.name,
+            "met": self.met,
+            "detail": self.detail,
+            "how": self.how,
+        }
 
 
 @dataclass

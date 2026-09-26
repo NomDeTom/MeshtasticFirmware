@@ -27,7 +27,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-
 # A bench writes continuously for hours, and its own USB activity can disturb the volume
 # it writes to. Flashing a node re-enumerates the bus, and on a bench whose artifacts live
 # on an external USB drive that surfaced mid-run as WinError 433 / Errno 22 and killed the
@@ -213,7 +212,9 @@ class Recorder:
             "streams": streams,
         }
 
-    def assert_live(self, max_age_s: float = 120.0, streams: tuple[str, ...] = (EVENTS,)) -> None:
+    def assert_live(
+        self, max_age_s: float = 120.0, streams: tuple[str, ...] = (EVENTS,)
+    ) -> None:
         """Raise if a stream that should be moving has gone quiet."""
         st = self.status()
         stale = []
@@ -272,7 +273,9 @@ def marks(run_dir: Path) -> list[dict]:
     return [r for r in read_stream(run_dir, EVENTS) if r.get("kind") == "mark"]
 
 
-def between_marks(run_dir: Path, start_label: str, end_label: str, stream: str) -> list[dict]:
+def between_marks(
+    run_dir: Path, start_label: str, end_label: str, stream: str
+) -> list[dict]:
     """Rows between two markers. The per-scenario slice of a continuous capture."""
     found = {m["label"]: m["ts"] for m in marks(run_dir)}
     start, end = found.get(start_label), found.get(end_label)
