@@ -1,54 +1,68 @@
 [
- {
-  "label": "Pk2pre",
-  "emitter": "peer",
-  "emits": [
-   {"tag": "foreign", "knobs": "esync=0x12 elen=64"},
-   {"tag": "implicit", "knobs": "ehdr=imp elen=64"},
-   {"tag": "own", "knobs": "elen=64"}
-  ],
-  "follow_ms": 150,
-  "obs_knobs": "pk=8 pksym=2 pkint=0 pktrig=pre",
-  "rounds": 30,
-  "interval": 3.0
- },
- {
-  "label": "Pk4pre",
-  "emitter": "peer",
-  "emits": [
-   {"tag": "foreign", "knobs": "esync=0x12 elen=64"},
-   {"tag": "implicit", "knobs": "ehdr=imp elen=64"},
-   {"tag": "own", "knobs": "elen=64"}
-  ],
-  "follow_ms": 150,
-  "obs_knobs": "pk=8 pksym=4 pkint=0 pktrig=pre",
-  "rounds": 30,
-  "interval": 3.0
- },
- {
-  "label": "Pk2deaf",
-  "emitter": "peer",
-  "emits": [
-   {"tag": "foreign", "knobs": "esync=0x12 elen=200"},
-   {"tag": "implicit", "knobs": "ehdr=imp elen=200"}
-  ],
-  "follow_ms": 150,
-  "deaf_fracs": [[-0.1, 0.0], [-0.1, 0.2], [-0.1, 0.4], [-0.1, 0.6], [-0.1, 0.8], [-0.1, 1.2]],
-  "obs_knobs": "pk=6 pksym=2 pkint=4 pktrig=undeaf",
-  "rounds": 48,
-  "interval": 3.0
- },
- {
-  "label": "Pk4deaf",
-  "emitter": "peer",
-  "emits": [
-   {"tag": "foreign", "knobs": "esync=0x12 elen=200"},
-   {"tag": "implicit", "knobs": "ehdr=imp elen=200"}
-  ],
-  "follow_ms": 150,
-  "deaf_fracs": [[-0.1, 0.0], [-0.1, 0.2], [-0.1, 0.4], [-0.1, 0.6], [-0.1, 0.8], [-0.1, 1.2]],
-  "obs_knobs": "pk=6 pksym=4 pkint=4 pktrig=undeaf",
-  "rounds": 48,
-  "interval": 3.0
- }
+  {
+    "label": "Pk2pre",
+    "emitter": "peer",
+    "emits": [
+      { "tag": "foreign", "knobs": "esync=0x12 elen=64" },
+      { "tag": "implicit", "knobs": "ehdr=imp elen=64" },
+      { "tag": "own", "knobs": "elen=64" }
+    ],
+    "follow_ms": 150,
+    "obs_knobs": "pk=8 pksym=2 pkint=0 pktrig=pre",
+    "rounds": 30,
+    "interval": 3.0
+  },
+  {
+    "label": "Pk4pre",
+    "emitter": "peer",
+    "emits": [
+      { "tag": "foreign", "knobs": "esync=0x12 elen=64" },
+      { "tag": "implicit", "knobs": "ehdr=imp elen=64" },
+      { "tag": "own", "knobs": "elen=64" }
+    ],
+    "follow_ms": 150,
+    "obs_knobs": "pk=8 pksym=4 pkint=0 pktrig=pre",
+    "rounds": 30,
+    "interval": 3.0
+  },
+  {
+    "label": "Pk2deaf",
+    "emitter": "peer",
+    "emits": [
+      { "tag": "foreign", "knobs": "esync=0x12 elen=200" },
+      { "tag": "implicit", "knobs": "ehdr=imp elen=200" }
+    ],
+    "follow_ms": 150,
+    "deaf_fracs": [
+      [-0.1, 0.0],
+      [-0.1, 0.2],
+      [-0.1, 0.4],
+      [-0.1, 0.6],
+      [-0.1, 0.8],
+      [-0.1, 1.2]
+    ],
+    "obs_knobs": "pk=6 pksym=2 pkint=4 pktrig=undeaf",
+    "rounds": 48,
+    "interval": 3.0
+  },
+  {
+    "label": "Pk4deaf",
+    "emitter": "peer",
+    "emits": [
+      { "tag": "foreign", "knobs": "esync=0x12 elen=200" },
+      { "tag": "implicit", "knobs": "ehdr=imp elen=200" }
+    ],
+    "follow_ms": 150,
+    "deaf_fracs": [
+      [-0.1, 0.0],
+      [-0.1, 0.2],
+      [-0.1, 0.4],
+      [-0.1, 0.6],
+      [-0.1, 0.8],
+      [-0.1, 1.2]
+    ],
+    "obs_knobs": "pk=6 pksym=4 pkint=4 pktrig=undeaf",
+    "rounds": 48,
+    "interval": 3.0
+  }
 ]

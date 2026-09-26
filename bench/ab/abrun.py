@@ -973,30 +973,62 @@ def peek_sweep(key: str, variants: list, settle: float = 15.0) -> Path:
     rec = OUT / f"P-{key}-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     rig = Rig(everyone, rec)
     try:
-        rig.write({"kind": "row", "key": key, "label": "peek", "air": AIR[key], "nodes": NODES, "variants": variants})
+        rig.write(
+            {
+                "kind": "row",
+                "key": key,
+                "label": "peek",
+                "air": AIR[key],
+                "nodes": NODES,
+                "variants": variants,
+            }
+        )
         time.sleep(settle)
         for v in variants:
             label, em = v["label"], v.get("emitter", "peer")
-            emits = v.get("emits") or [{"tag": "foreign", "knobs": "esync=0x12 elen=64"}]
+            emits = v.get("emits") or [
+                {"tag": "foreign", "knobs": "esync=0x12 elen=64"}
+            ]
             follow = int(v.get("follow_ms", 150))
-            elen = int(re.search(r"elen=(\d+)", emits[0]["knobs"]).group(1)) if "elen=" in emits[0]["knobs"] else 32
+            elen = (
+                int(re.search(r"elen=(\d+)", emits[0]["knobs"]).group(1))
+                if "elen=" in emits[0]["knobs"]
+                else 32
+            )
             air_ms = airtime_s(key, elen) * 1000
             if v.get("deaf_fracs"):
-                deaf = [[int(follow + a * air_ms), int(d * air_ms)] for a, d in v["deaf_fracs"]]
+                deaf = [
+                    [int(follow + a * air_ms), int(d * air_ms)]
+                    for a, d in v["deaf_fracs"]
+                ]
             else:
                 deaf = [[int(o), int(d)] for o, d in v.get("deaf", [])]
             deaf = deaf[:8]
             num = rig.ifaces[em].myInfo.my_node_num if rig.ifaces[em].myInfo else 0
             observers = [n for n in everyone if n != em]
-            mdeaf = f"mdeaf={','.join(f'{o}:{d}' for o, d in deaf)}" if deaf else "mdeaf=0"
+            mdeaf = (
+                f"mdeaf={','.join(f'{o}:{d}' for o, d in deaf)}" if deaf else "mdeaf=0"
+            )
             for n in observers:
-                cmd = " ".join(f"!bench reset {global_knobs} mark={num:#010x} {mdeaf} {v.get('obs_knobs', '')}".split())
+                cmd = " ".join(
+                    f"!bench reset {global_knobs} mark={num:#010x} {mdeaf} {v.get('obs_knobs', '')}".split()
+                )
                 if rig.send(n, cmd):
                     rig.write({"kind": "knob", "node": n, "label": label, "cmd": cmd})
             rig.send(em, " ".join(f"!bench reset {global_knobs}".split()))
-            rig.write({"kind": "variant", **v, "deaf_ms": deaf, "test_air_ms": air_ms, "emitter_num": num})
-            log(f"peek {label}: emitter={em} G={follow}ms air~{air_ms:.0f}ms deaf={deaf} emits={[e['tag'] for e in emits]} "
-                f"obs='{v.get('obs_knobs', '')}'")
+            rig.write(
+                {
+                    "kind": "variant",
+                    **v,
+                    "deaf_ms": deaf,
+                    "test_air_ms": air_ms,
+                    "emitter_num": num,
+                }
+            )
+            log(
+                f"peek {label}: emitter={em} G={follow}ms air~{air_ms:.0f}ms deaf={deaf} emits={[e['tag'] for e in emits]} "
+                f"obs='{v.get('obs_knobs', '')}'"
+            )
             time.sleep(2.2)
             n_rounds, gap = int(v.get("rounds", 24)), float(v.get("interval", 3.0))
             for i in range(n_rounds):
@@ -1004,9 +1036,18 @@ def peek_sweep(key: str, variants: list, settle: float = 15.0) -> Path:
                 rig.send(em, " ".join(f"!bench efollow={follow} {e['knobs']}".split()))
                 time.sleep(0.3)
                 m = f"M-{key}-{label}-{i}-{e['tag']}"
-                rig.write({"kind": "pround", "label": label, "i": i, "tag": e["tag"], "emit": e["knobs"],
-                           "deaf_entry": i % len(deaf) if deaf else None,
-                           "deaf": deaf[i % len(deaf)] if deaf else None, "follow_ms": follow})
+                rig.write(
+                    {
+                        "kind": "pround",
+                        "label": label,
+                        "i": i,
+                        "tag": e["tag"],
+                        "emit": e["knobs"],
+                        "deaf_entry": i % len(deaf) if deaf else None,
+                        "deaf": deaf[i % len(deaf)] if deaf else None,
+                        "follow_ms": follow,
+                    }
+                )
                 if rig.send(em, m, port="private"):
                     rig.write({"kind": "tx", "node": em, "text": m, "role": "marker"})
                 time.sleep(max(gap - 0.3, 2.1))
