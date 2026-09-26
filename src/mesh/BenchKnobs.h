@@ -62,22 +62,22 @@ struct BenchKnobs {
     uint16_t dcWakeMs = 0;
     uint8_t rxdcRxSym = 0;    // SX126x hardware RX duty cycle (sniff), in symbols: listen this long...
     uint8_t rxdcSleepSym = 0; // ...then sleep this long, repeating; staying in RX on a detected preamble. 0 = off
-    uint16_t probeMs = 0;    // passive LBT probe interval: CAD + RX-flag peek + RSSI, logged per second; 0 = off
-    uint8_t rxCont = 0;      // 1: continuous RX instead of the duty-cycled default (implied by the RSSI modes)
-    uint32_t trigNode = 0;   // hold queued TX until a frame from this node arrives, then decide at atMs; 0 = off
-    uint16_t atMs = 0;       // decision offset after the trigger frame's RX_DONE
-    bool atDeaf = false;     // deaf from the trigger until atMs, instead of listening
+    uint16_t probeMs = 0;     // passive LBT probe interval: CAD + RX-flag peek + RSSI, logged per second; 0 = off
+    uint8_t rxCont = 0;       // 1: continuous RX instead of the duty-cycled default (implied by the RSSI modes)
+    uint32_t trigNode = 0;    // hold queued TX until a frame from this node arrives, then decide at atMs; 0 = off
+    uint16_t atMs = 0;        // decision offset after the trigger frame's RX_DONE
+    bool atDeaf = false;      // deaf from the trigger until atMs, instead of listening
     // CAD peeks: a series of short CAD->RX scans after a trigger, to tell a foreign frame from a false preamble.
-    uint8_t pk = 0;         // peeks per series, 0 = watcher off
-    uint8_t pkSym = 2;      // CAD symbols per peek: 1, 2, 4, 8 or 16
-    uint16_t pkInt = 0;     // ms between peek starts; 0 = back to back
-    int16_t pkWait = -1;    // ms from the sighting to the first peek; -1 = auto, long enough for our own header
-    uint8_t pkPoll = 2;     // ms between the watcher's non-destructive IRQ-flag reads
+    uint8_t pk = 0;      // peeks per series, 0 = watcher off
+    uint8_t pkSym = 2;   // CAD symbols per peek: 1, 2, 4, 8 or 16
+    uint16_t pkInt = 0;  // ms between peek starts; 0 = back to back
+    int16_t pkWait = -1; // ms from the sighting to the first peek; -1 = auto, long enough for our own header
+    uint8_t pkPoll = 2;  // ms between the watcher's non-destructive IRQ-flag reads
     uint8_t pkTrig = PK_ON_PREAMBLE;
-    bool pkFree = false;    // a preamble-triggered series that is all free ends the TX preamble hold
+    bool pkFree = false; // a preamble-triggered series that is all free ends the TX preamble hold
     // Mark schedule: listen-only nodes go deaf at a fixed offset after a frame from markNode.
-    uint32_t markNode = 0;  // anchor sender; 0 = off
-    uint8_t mdeafN = 0;     // schedule entries, cycled per anchor frame; 0 = anchor logged only
+    uint32_t markNode = 0;           // anchor sender; 0 = off
+    uint8_t mdeafN = 0;              // schedule entries, cycled per anchor frame; 0 = anchor logged only
     uint16_t mdeafO[MDEAF_MAX] = {}; // ms from the anchor's RX_DONE to going deaf
     uint16_t mdeafD[MDEAF_MAX] = {}; // ms deaf
     // Emitter: a raw frame, outside the mesh stack, with its own sync word, header mode, preamble and length.
@@ -88,6 +88,10 @@ struct BenchKnobs {
     uint8_t eLen = 32;      // payload bytes
     uint32_t eSeed = 1;     // payload generator seed, advanced after every emission
     int16_t eFollow = -1;   // one-shot: emit this many ms after the node's next TX_DONE; -1 = off
+    // Deaf-gap levers (SX126x only).
+    bool xosc = false;   // standby and RX/TX fallback on STDBY_XOSC, so the TCXO stays powered between TX and RX
+    uint16_t tcxoUs = 0; // TCXO startup delay programmed into the chip, in us; 0 keeps RadioLib's 5000
+    bool agcQ = false;   // skip the periodic AGC reset while a TX is queued (its standby can abort a TX it started)
     // Not cleared by "!bench reset": a monitor, not an experiment variable.
     uint16_t nfMs = 0;       // noise-floor sample interval; 0 = sampler off
     int16_t floorDbm = -128; // latest one-second median from the sampler; -128 until it has run

@@ -163,12 +163,13 @@ void benchKnobsLog()
              "detpeak=%d detmin=%d agc=%ld li=%d nf=%u rssim=%d floor=%d dc=%u/%u rxdc=%u/%u rxcont=%u trig=%08lx at=%u "
              "atdeaf=%d txarm=%s txgap=%d",
              LBT_NAMES[k.lbt], k.cadSymbols, k.cwMin, k.cwMax, k.slotMs, k.fixedMs, k.noBackoff ? 1 : 0, PRE_NAMES[k.pre],
-             k.syncWord, k.iqInvert, k.txPower, k.detPeak, k.detMin, (long)k.agcMs, k.li, k.nfMs, k.rssiMargin, k.floorDbm, k.dcSleepMs, k.dcWakeMs, k.rxdcRxSym, k.rxdcSleepSym, k.rxCont,
-             (unsigned long)k.trigNode, k.atMs, k.atDeaf ? 1 : 0, TXARM_NAMES[k.txArm], k.txGap ? 1 : 0);
+             k.syncWord, k.iqInvert, k.txPower, k.detPeak, k.detMin, (long)k.agcMs, k.li, k.nfMs, k.rssiMargin, k.floorDbm,
+             k.dcSleepMs, k.dcWakeMs, k.rxdcRxSym, k.rxdcSleepSym, k.rxCont, (unsigned long)k.trigNode, k.atMs, k.atDeaf ? 1 : 0,
+             TXARM_NAMES[k.txArm], k.txGap ? 1 : 0);
     LOG_INFO("BENCH knobs pk: pk=%u pksym=%u pkint=%u pkwait=%d pkpoll=%u pktrig=%u pkfree=%d mark=%08lx mdeaf=%u "
              "esync=%d ehdr=%s epre=%u ecr=%u elen=%u eseed=%lu efollow=%d",
-             k.pk, k.pkSym, k.pkInt, k.pkWait, k.pkPoll, k.pkTrig, k.pkFree ? 1 : 0, (unsigned long)k.markNode, k.mdeafN,
-             k.eSync, k.eImplicit ? "imp" : "exp", k.ePre, k.eCr, k.eLen, (unsigned long)k.eSeed, k.eFollow);
+             k.pk, k.pkSym, k.pkInt, k.pkWait, k.pkPoll, k.pkTrig, k.pkFree ? 1 : 0, (unsigned long)k.markNode, k.mdeafN, k.eSync,
+             k.eImplicit ? "imp" : "exp", k.ePre, k.eCr, k.eLen, (unsigned long)k.eSeed, k.eFollow);
     for (uint8_t i = 0; i < k.mdeafN; i++)
         LOG_INFO("BENCH knobs mdeaf[%u]: +%u ms for %u ms", i, k.mdeafO[i], k.mdeafD[i]);
 }
@@ -189,8 +190,8 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
 
     BenchKnobs next = benchKnobs;
     bool radioChanged = false;
-    uint32_t jamMs = 0;  // actions, not settings: key a carrier once, now
-    uint32_t deafMs = 0; // drop RX now, hold any queued TX, rejoin and decide after this long
+    uint32_t jamMs = 0;   // actions, not settings: key a carrier once, now
+    uint32_t deafMs = 0;  // drop RX now, hold any queued TX, rejoin and decide after this long
     uint32_t emitLen = 0; // emit one raw frame of this many bytes now
     bool markSet = false; // mark= or mdeaf= given: restart the schedule at entry 0
     char *save = nullptr;
@@ -301,6 +302,12 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
                 LOG_WARN("BENCH: txarm=%s unknown", val);
             else
                 next.txArm = (uint8_t)i;
+        } else if (strcmp(key, "xosc") == 0) {
+            next.xosc = num != 0;
+        } else if (strcmp(key, "tcxo") == 0) {
+            next.tcxoUs = (uint16_t)(strcmp(val, "default") == 0 ? 0 : constrain(num, 0, 20000));
+        } else if (strcmp(key, "agcq") == 0) {
+            next.agcQ = num != 0;
         } else if (strcmp(key, "txgap") == 0) {
             next.txGap = num != 0;
         } else if (strcmp(key, "pk") == 0) {
@@ -386,7 +393,10 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
         dwt_disable();
 #endif
     const bool markChanged = markSet;
+    const bool oscChanged = next.xosc != benchKnobs.xosc || next.tcxoUs != benchKnobs.tcxoUs;
     benchKnobs = next;
+    if (oscChanged && RadioLibInterface::instance)
+        RadioLibInterface::instance->benchApplyOsc();
     if (trigChanged && RadioLibInterface::instance)
         RadioLibInterface::instance->benchTrigChanged();
     if (markChanged && RadioLibInterface::instance)
@@ -417,7 +427,8 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
         benchProbeThread = new BenchProbeThread();
     benchKnobsLog();
     // Short, so a viewer that truncates the long knobs line still shows these.
-    LOG_INFO("BENCH txgap=%d txarm=%s", benchKnobs.txGap ? 1 : 0, TXARM_NAMES[benchKnobs.txArm]);
+    LOG_INFO("BENCH txgap=%d txarm=%s xosc=%d tcxo=%u agcq=%d", benchKnobs.txGap ? 1 : 0, TXARM_NAMES[benchKnobs.txArm],
+             benchKnobs.xosc ? 1 : 0, benchKnobs.tcxoUs, benchKnobs.agcQ ? 1 : 0);
 
     if (radioChanged && RadioLibInterface::instance) {
         // reconfigure() reapplies modulation, sync word and IQ, then restarts RX.

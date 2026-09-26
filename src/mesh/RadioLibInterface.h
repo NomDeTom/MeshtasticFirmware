@@ -185,6 +185,8 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     bool benchSampleRssi(int16_t &rssi);
     /** Key an unmodulated carrier for ms on the current frequency, then return to RX. */
     virtual void benchJam(uint32_t ms);
+    /** Apply the xosc and tcxoUs knobs to the chip, then restart RX. Unsupported by default. */
+    virtual void benchApplyOsc();
     /** Drop RX for ms and hold any queued TX; on waking, restart RX and make the channel decision at once. */
     void benchDeaf(uint32_t ms, bool quiet = false);
     uint32_t benchDeafUntil = 0; // Time::getMillis() deadline, 0 when not deaf
@@ -262,27 +264,27 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
 
   protected:
     // pre=soft and pre=deadline: the two receiveDetected() rules #11968 replaced, kept for A/B on one image.
-    uint32_t benchSoftHoldStart = 0;   // soft: Time::getMillis() when a hold began, 0 when none
-    uint32_t benchActiveRxStart = 0;   // both: first look that saw a flag since standby, 0 when none
+    uint32_t benchSoftHoldStart = 0; // soft: Time::getMillis() when a hold began, 0 when none
+    uint32_t benchActiveRxStart = 0; // both: first look that saw a flag since standby, 0 when none
     bool benchLegacyReceiveDetected(uint16_t irq, unsigned long headerFlag, unsigned long preambleFlag);
     // Emitter follow: Time::getMillis() at which to emit, 0 when none, and the TX it follows.
     uint32_t benchEmitAt = 0;
     uint32_t benchEmitAfterId = 0;
     // Mark schedule: the anchor frame, and the deaf window it scheduled.
-    uint32_t benchMarkUs = 0;       // micros() at the last anchor's RX_DONE, 0 before the first
-    uint32_t benchMarkId = 0;       // its packet id
-    uint16_t benchMarkIdx = 0;      // anchor frames heard since the schedule was set
-    uint32_t benchMarkDeafAt = 0;   // Time::getMillis() to go deaf, 0 when none pending
+    uint32_t benchMarkUs = 0;     // micros() at the last anchor's RX_DONE, 0 before the first
+    uint32_t benchMarkId = 0;     // its packet id
+    uint16_t benchMarkIdx = 0;    // anchor frames heard since the schedule was set
+    uint32_t benchMarkDeafAt = 0; // Time::getMillis() to go deaf, 0 when none pending
     uint16_t benchMarkDeafMs = 0;
     bool benchMarkDeafActive = false; // the current deaf window is the schedule's: log and peek on waking
     void benchMarkRx(uint32_t rxUs, uint32_t id);
     // Peek watcher and series.
-    uint32_t benchPkSeenUs = 0;     // micros() of the trigger, 0 when idle
-    uint32_t benchPkNextAt = 0;     // Time::getMillis() of the next peek, 0 while waiting for a trigger
-    uint8_t benchPkSrc = 0;         // PeekTrig that started the series
-    uint8_t benchPkDone = 0;        // peeks made in this series
-    int32_t benchPkHdrMs = -1;      // ms from the trigger to a HEADER_VALID seen before the first peek, -1 if none
-    bool benchPkHerr = false;       // HEADER_ERR seen during the series
+    uint32_t benchPkSeenUs = 0;                 // micros() of the trigger, 0 when idle
+    uint32_t benchPkNextAt = 0;                 // Time::getMillis() of the next peek, 0 while waiting for a trigger
+    uint8_t benchPkSrc = 0;                     // PeekTrig that started the series
+    uint8_t benchPkDone = 0;                    // peeks made in this series
+    int32_t benchPkHdrMs = -1;                  // ms from the trigger to a HEADER_VALID seen before the first peek, -1 if none
+    bool benchPkHerr = false;                   // HEADER_ERR seen during the series
     char benchPkV[BenchKnobs::PK_MAX + 1] = {}; // one char per peek: B busy, F free
     uint16_t benchPkT[BenchKnobs::PK_MAX] = {}; // ms from the trigger
     int16_t benchPkRssi[BenchKnobs::PK_MAX] = {};

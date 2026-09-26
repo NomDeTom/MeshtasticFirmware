@@ -11,8 +11,8 @@
 #include "error.h"
 #include "main.h"
 #include "mesh-pb-constants.h"
-#include <pb_decode.h>
 #include <algorithm>
+#include <pb_decode.h>
 #include <pb_encode.h>
 
 #if ARCH_PORTDUINO
@@ -307,6 +307,11 @@ bool RadioLibInterface::benchSampleRssi(int16_t &rssi)
 void RadioLibInterface::benchJam(uint32_t ms)
 {
     LOG_WARN("BENCH jam unsupported on this radio (%u ms)", ms);
+}
+
+void RadioLibInterface::benchApplyOsc()
+{
+    LOG_WARN("BENCH xosc/tcxo unsupported on this radio");
 }
 
 bool RadioLibInterface::benchProbe(bool &cadBusy, bool &rxBusy, int16_t &rssi)

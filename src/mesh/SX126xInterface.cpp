@@ -426,7 +426,7 @@ template <typename T> int16_t SX126xInterface<T>::trySetStandby()
 #ifdef BENCH_KNOBS
     benchGapMarkArm(GAP_NOTIFIED);
     if (sendingPacket != NULL)
-        LOG_WARN("BENCH standby aborts TX id=%08x started_in_notify=%d", sendingPacket->id, wasSending ? 0 : 1);
+        LOG_WARN("BENCH standby aborts TX id=0x%08x started_in_notify=%d", sendingPacket->id, wasSending ? 0 : 1);
 #endif
 
     int16_t err = lora.standby();
@@ -666,6 +666,12 @@ template <typename T> void SX126xInterface<T>::resetAGC()
     // Safety: don't reset mid-packet
     if (sendingPacket != NULL || (isReceiving && isActivelyReceiving()))
         return;
+#ifdef BENCH_KNOBS
+    if (benchKnobs.agcQ && hasQueuedTx()) {
+        LOG_DEBUG("BENCH AGC reset skipped: TX queued");
+        return;
+    }
+#endif
 
     LOG_DEBUG("SX126x AGC reset: warm sleep + Calibrate(0x7F)");
 
@@ -730,6 +736,23 @@ template <typename T> void SX126xInterface<T>::resetAGC()
 }
 
 #ifdef BENCH_KNOBS
+template <typename T> void SX126xInterface<T>::benchApplyOsc()
+{
+    if (sendingPacket != NULL) {
+        LOG_WARN("BENCH xosc/tcxo skipped: TX in progress");
+        return;
+    }
+    // SetDIO3AsTCXOCtrl is only accepted in STDBY_RC.
+    lora.standby(RADIOLIB_SX126X_STANDBY_RC, true);
+    int16_t err = RADIOLIB_ERR_NONE;
+    if (tcxoVoltage > 0)
+        err = lora.setTCXO(tcxoVoltage, benchKnobs.tcxoUs ? benchKnobs.tcxoUs : 5000);
+    const int16_t xerr = lora.setStandbyXOSC(benchKnobs.xosc);
+    LOG_INFO("BENCH osc: xosc=%d tcxo=%uus (Vref %.1f) err=%d/%d", benchKnobs.xosc ? 1 : 0,
+             tcxoVoltage > 0 ? (benchKnobs.tcxoUs ? benchKnobs.tcxoUs : 5000) : 0, tcxoVoltage, err, xerr);
+    startReceive();
+}
+
 template <typename T> void SX126xInterface<T>::benchJam(uint32_t ms)
 {
     if (sendingPacket != NULL) {
