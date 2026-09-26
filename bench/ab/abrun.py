@@ -291,8 +291,11 @@ class Rig:
             or "busy" in line.lower()
             or "BENCH" in line
             or "RSSI look" in line
+            or "Ignore rx packet" in line
+            or "stale" in line
+            or "Preamble" in line
         ):
-            self.write({"kind": "log", "node": n, "line": line[:200]})
+            self.write({"kind": "log", "node": n, "line": line[:400]})
 
     def on_receive(self, packet, interface):
         n = self.name_of.get(id(interface))
@@ -941,6 +944,80 @@ def blast_sweep(key: str, phases: list, settle: float = 10.0) -> Path:
     return rec
 
 
+def peek_sweep(key: str, variants: list, settle: float = 15.0) -> Path:
+    """Foreign-frame and false-header peeks: an emitter alternates test frames behind a marker, on a schedule.
+
+    Each round the emitter is armed with "!bench efollow=G <that round's emission>" and then sends a marker
+    (PRIVATE_APP, a normal mesh frame). G ms after the marker's TX_DONE it emits one raw test frame outside the
+    mesh stack. Every other node is an observer: it anchors on the marker's RX_DONE (mark=), goes deaf at +O for
+    D ms from an on-device schedule (mdeaf=O:D,..., cycled per marker), rejoins, and runs CAD->RX peeks (pk*),
+    after a bare preamble, after rejoining, or both. Nothing is timed by the host except the round itself.
+
+    A variant is an object:
+      label      name (no '-')
+      emitter    node that emits (default peer)
+      emits      list of {"tag": name, "knobs": e-knobs}, cycled per round, e.g.
+                   {"tag": "foreign",  "knobs": "esync=0x12 elen=64"}     foreign sync word: bare preamble
+                   {"tag": "implicit", "knobs": "ehdr=imp elen=64"}       own sync, no header: HEADER_ERR, or a
+                                                                          false HEADER_VALID about 1 in 32
+                   {"tag": "own",      "knobs": "elen=64"}                control: a frame that demodulates
+      follow_ms  G, marker TX_DONE to test frame (default 150)
+      obs_knobs  observer settings, e.g. "pk=6 pksym=2 pkint=5 pktrig=both"
+      deaf       list of [O, D] in ms from the marker's RX_DONE, up to 8 (D=0 is the no-deaf control)
+      deaf_fracs list of [start, dur] as fractions of the test frame's airtime from its start, in place of deaf
+      rounds, interval (s, default 3.0; the emitter takes one text per round, so keep it > 2.1)
+    """
+    everyone = SENDERS + WITNESSES
+    global_knobs = os.environ.get("AB_GLOBAL", "").strip()
+    OUT.mkdir(parents=True, exist_ok=True)
+    rec = OUT / f"P-{key}-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
+    rig = Rig(everyone, rec)
+    try:
+        rig.write({"kind": "row", "key": key, "label": "peek", "air": AIR[key], "nodes": NODES, "variants": variants})
+        time.sleep(settle)
+        for v in variants:
+            label, em = v["label"], v.get("emitter", "peer")
+            emits = v.get("emits") or [{"tag": "foreign", "knobs": "esync=0x12 elen=64"}]
+            follow = int(v.get("follow_ms", 150))
+            elen = int(re.search(r"elen=(\d+)", emits[0]["knobs"]).group(1)) if "elen=" in emits[0]["knobs"] else 32
+            air_ms = airtime_s(key, elen) * 1000
+            if v.get("deaf_fracs"):
+                deaf = [[int(follow + a * air_ms), int(d * air_ms)] for a, d in v["deaf_fracs"]]
+            else:
+                deaf = [[int(o), int(d)] for o, d in v.get("deaf", [])]
+            deaf = deaf[:8]
+            num = rig.ifaces[em].myInfo.my_node_num if rig.ifaces[em].myInfo else 0
+            observers = [n for n in everyone if n != em]
+            mdeaf = f"mdeaf={','.join(f'{o}:{d}' for o, d in deaf)}" if deaf else "mdeaf=0"
+            for n in observers:
+                cmd = " ".join(f"!bench reset {global_knobs} mark={num:#010x} {mdeaf} {v.get('obs_knobs', '')}".split())
+                if rig.send(n, cmd):
+                    rig.write({"kind": "knob", "node": n, "label": label, "cmd": cmd})
+            rig.send(em, " ".join(f"!bench reset {global_knobs}".split()))
+            rig.write({"kind": "variant", **v, "deaf_ms": deaf, "test_air_ms": air_ms, "emitter_num": num})
+            log(f"peek {label}: emitter={em} G={follow}ms air~{air_ms:.0f}ms deaf={deaf} emits={[e['tag'] for e in emits]} "
+                f"obs='{v.get('obs_knobs', '')}'")
+            time.sleep(2.2)
+            n_rounds, gap = int(v.get("rounds", 24)), float(v.get("interval", 3.0))
+            for i in range(n_rounds):
+                e = emits[i % len(emits)]
+                rig.send(em, " ".join(f"!bench efollow={follow} {e['knobs']}".split()))
+                time.sleep(0.3)
+                m = f"M-{key}-{label}-{i}-{e['tag']}"
+                rig.write({"kind": "pround", "label": label, "i": i, "tag": e["tag"], "emit": e["knobs"],
+                           "deaf_entry": i % len(deaf) if deaf else None,
+                           "deaf": deaf[i % len(deaf)] if deaf else None, "follow_ms": follow})
+                if rig.send(em, m, port="private"):
+                    rig.write({"kind": "tx", "node": em, "text": m, "role": "marker"})
+                time.sleep(max(gap - 0.3, 2.1))
+        for n in everyone:
+            rig.send(n, "!bench reset")
+        time.sleep(3)
+    finally:
+        rig.close()
+    return rec
+
+
 def identify(count: int, interval: float) -> Path:
     OUT.mkdir(parents=True, exist_ok=True)
     rec = OUT / f"I1-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
@@ -986,6 +1063,9 @@ def main():
     bl = sub.add_parser("blast")
     bl.add_argument("key")
     bl.add_argument("phases", help="JSON file of blast phases")
+    pk = sub.add_parser("peek")
+    pk.add_argument("key")
+    pk.add_argument("variants", help="JSON file of peek variants")
     sub.add_parser("health")
     i = sub.add_parser("identify")
     i.add_argument("--count", type=int, default=6)
@@ -1007,6 +1087,8 @@ def main():
         print(late_sweep(a.key, json.loads(Path(a.variants).read_text())))
     elif a.cmd == "blast":
         print(blast_sweep(a.key, json.loads(Path(a.phases).read_text())))
+    elif a.cmd == "peek":
+        print(peek_sweep(a.key, json.loads(Path(a.variants).read_text())))
     elif a.cmd == "health":
         print(health())
     elif a.cmd == "identify":

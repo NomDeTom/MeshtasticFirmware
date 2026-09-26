@@ -2,7 +2,11 @@
 
 #include "BenchKnobs.h"
 #include "MeshPacketQueue.h"
+#ifdef BENCH_KNOBS
+#include "BenchKnobs.h"
+#endif
 #include "RadioInterface.h"
+#include "UptimeClock.h"
 #include "concurrency/NotifiedWorkerThread.h"
 
 #include <RadioLib.h>
@@ -21,6 +25,40 @@
 #define MESHTASTIC_RADIOLIB_IRQ_RX_FLAGS (RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1 << RADIOLIB_IRQ_PREAMBLE_DETECTED))
 
 #define AGC_RESET_INTERVAL_MS (60 * 1000) // 60 seconds
+
+/// What the radio's latched RX flags have shown since the last standby, stamped at each look at them.
+/// The owner must clear PREAMBLE_DETECTED whenever a look finds it, so every sighting is a new detection.
+class RxSighting
+{
+  public:
+    /// Record one look at the flags; returns whether a frame may be on air, so TX should wait.
+    bool observe(uint32_t nowMsec, bool preamble, bool header, uint32_t maxPacketMsec)
+    {
+        const uint32_t now = lastPeekMsec = Time::skipZero(nowMsec);
+        if (preamble)
+            preambleSeenMsec = now;
+        if (header && !headerSeenMsec)
+            headerSeenMsec = now;
+        // Neither flag says when its frame ends; only RX_DONE (via reset()) or one max packet from the sighting does.
+        if (preambleSeenMsec && now - preambleSeenMsec >= maxPacketMsec)
+            preambleSeenMsec = 0;
+        // A header is kept past expiry so that the same latch, left by a missed RX IRQ, cannot re-arm the hold.
+        const bool headerHolds = headerSeenMsec && now - headerSeenMsec < maxPacketMsec;
+        return headerHolds || preambleSeenMsec;
+    }
+
+    /// Standby and RX start clear the chip's flags, so they clear this too.
+    void reset() { lastPeekMsec = preambleSeenMsec = headerSeenMsec = 0; }
+
+    uint32_t lastPeek() const { return lastPeekMsec; }
+    uint32_t preambleSeen() const { return preambleSeenMsec; }
+    uint32_t headerSeen() const { return headerSeenMsec; }
+
+  private:
+    uint32_t lastPeekMsec = 0;     // last look at the flags, 0 if none since reset
+    uint32_t preambleSeenMsec = 0; // last look that found a fresh PREAMBLE_DETECTED, 0 once its hold ends
+    uint32_t headerSeenMsec = 0;   // first look that found HEADER_VALID, 0 if none since reset
+};
 
 /**
  * We need to override the RadioLib ArduinoHal class to add mutex protection for SPI bus access
@@ -211,6 +249,48 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     void benchGapBegin();
     /** After RX is re-armed: log and release a deferred packet, then report the gap. */
     void benchGapEnd();
+    /** One raw frame from the e* knobs, outside the mesh stack, then back to RX. Unsupported by default. */
+    virtual void benchEmit();
+    /** Restart the mark schedule at entry 0 and drop any pending deaf window; after mark= or mdeaf= change. */
+    void benchMarkChanged()
+    {
+        benchMarkIdx = 0;
+        benchMarkDeafAt = 0;
+    }
+    /** The bench RX thread's work: emitter follow, mark deaf windows, the peek watcher. Returns ms to next run. */
+    int32_t benchTick();
+
+  protected:
+    // pre=soft and pre=deadline: the two receiveDetected() rules #11968 replaced, kept for A/B on one image.
+    uint32_t benchSoftHoldStart = 0;   // soft: Time::getMillis() when a hold began, 0 when none
+    uint32_t benchActiveRxStart = 0;   // both: first look that saw a flag since standby, 0 when none
+    bool benchLegacyReceiveDetected(uint16_t irq, unsigned long headerFlag, unsigned long preambleFlag);
+    // Emitter follow: Time::getMillis() at which to emit, 0 when none, and the TX it follows.
+    uint32_t benchEmitAt = 0;
+    uint32_t benchEmitAfterId = 0;
+    // Mark schedule: the anchor frame, and the deaf window it scheduled.
+    uint32_t benchMarkUs = 0;       // micros() at the last anchor's RX_DONE, 0 before the first
+    uint32_t benchMarkId = 0;       // its packet id
+    uint16_t benchMarkIdx = 0;      // anchor frames heard since the schedule was set
+    uint32_t benchMarkDeafAt = 0;   // Time::getMillis() to go deaf, 0 when none pending
+    uint16_t benchMarkDeafMs = 0;
+    bool benchMarkDeafActive = false; // the current deaf window is the schedule's: log and peek on waking
+    void benchMarkRx(uint32_t rxUs, uint32_t id);
+    // Peek watcher and series.
+    uint32_t benchPkSeenUs = 0;     // micros() of the trigger, 0 when idle
+    uint32_t benchPkNextAt = 0;     // Time::getMillis() of the next peek, 0 while waiting for a trigger
+    uint8_t benchPkSrc = 0;         // PeekTrig that started the series
+    uint8_t benchPkDone = 0;        // peeks made in this series
+    int32_t benchPkHdrMs = -1;      // ms from the trigger to a HEADER_VALID seen before the first peek, -1 if none
+    bool benchPkHerr = false;       // HEADER_ERR seen during the series
+    char benchPkV[BenchKnobs::PK_MAX + 1] = {}; // one char per peek: B busy, F free
+    uint16_t benchPkT[BenchKnobs::PK_MAX] = {}; // ms from the trigger
+    int16_t benchPkRssi[BenchKnobs::PK_MAX] = {};
+    void benchPkStart(uint8_t src);
+    void benchPkEnd(const char *why);
+    void benchPkStep();
+
+  public:
 #endif
 
     /** Clear instance on destruction so stale pointer checks in loop() are safe */
@@ -424,19 +504,15 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     meshtastic_QueueStatus getQueueStatus();
 
   protected:
-    uint32_t activeReceiveStart = 0;
-    // Time::getMillis() when a look cleared PREAMBLE_DETECTED and began holding TX, or 0 if no hold.
-    uint32_t preambleHoldStart = 0;
+    RxSighting rxSighting;
 
-    /** True while a cleared preamble still holds TX; ends the hold once one max packet has passed. */
-    bool preambleHoldActive();
-
-    /** Clear a bare PREAMBLE_DETECTED and hold TX one max packet, unless a hold is already running. */
-    void holdOnPreamble();
+    /** Airtime of the longest frame we could be receiving: 255 bytes at CR 4/8 with CRC, whatever our own CR. */
+    uint32_t maxRxFrameMsec();
 
     /** Whether a packet is waiting to transmit; txQueue itself stays private. */
     bool hasQueuedTx() { return !txQueue.empty(); }
 
+    /** Record a look at the RX flags and clear a PREAMBLE_DETECTED it found; true while a frame may be on air. */
     bool receiveDetected(uint16_t irq, unsigned long syncWordHeaderValidFlag, unsigned long preambleDetectedFlag);
 
     /** Do any hardware setup needed on entry into send configuration for the radio.

@@ -395,10 +395,10 @@ template <typename T> void SX126xInterface<T>::handleSoftwareLoraIrqPoll()
     const uint16_t noisyRxMask = RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED | RADIOLIB_SX126X_IRQ_HEADER_VALID;
 
     // A bare PREAMBLE is mid-reception, not an RX event: readData() here would run on nothing. With a TX
-    // queued it goes through the same hold as the TX-path look; HEADER_VALID stays latched for readData().
+    // queued the look is recorded like the TX path's, which clears it; HEADER_VALID stays latched for readData().
     const bool preambleOnly = (irq & RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED) && !(irq & RADIOLIB_SX126X_IRQ_HEADER_VALID);
     if (!pollTxMode && hasQueuedTx() && preambleOnly && ((irq & ~noisyRxMask) == 0U)) {
-        holdOnPreamble();
+        receiveDetected(irq, RADIOLIB_SX126X_IRQ_HEADER_VALID, RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED);
         scheduleIrqPollTick();
         return;
     }
@@ -438,7 +438,7 @@ template <typename T> int16_t SX126xInterface<T>::trySetStandby()
         portduino_status.LoRa_in_error = true;
 #endif
     isReceiving = false; // If we were receiving, not any more
-    activeReceiveStart = 0;
+    rxSighting.reset();
     disableInterrupt();
     completeSending(); // If we were sending, not anymore
     RadioLibInterface::setStandby();
@@ -748,6 +748,44 @@ template <typename T> void SX126xInterface<T>::benchJam(uint32_t ms)
         LOG_INFO("BENCH jam %u ms done", ms);
     else
         LOG_ERROR("BENCH jam transmitDirect %s%d", radioLibErr, err);
+}
+
+template <typename T> void SX126xInterface<T>::benchEmit()
+{
+    if (sendingPacket != NULL) {
+        LOG_WARN("BENCH emit skipped: TX in progress");
+        return;
+    }
+    const BenchKnobs &k = benchKnobs;
+    // xorshift32 from the seed, so a payload that makes a false header can be replayed.
+    uint8_t buf[MAX_LORA_PAYLOAD_LEN];
+    uint32_t x = k.eSeed ? k.eSeed : 1;
+    for (uint8_t i = 0; i < k.eLen; i++) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        buf[i] = (uint8_t)x;
+    }
+    trySetStandby();
+    int16_t err = RADIOLIB_ERR_NONE;
+    if (k.eSync >= 0)
+        err |= lora.setSyncWord((uint8_t)k.eSync);
+    if (k.ePre)
+        err |= lora.setPreambleLength(k.ePre);
+    if (k.eCr)
+        err |= lora.setCodingRate(k.eCr);
+    if (k.eImplicit)
+        err |= lora.implicitHeader(k.eLen);
+    setTransmitEnable(true);
+    const uint32_t t0 = micros();
+    const int16_t txErr = lora.transmit(buf, k.eLen);
+    const uint32_t airUs = micros() - t0;
+    setTransmitEnable(false);
+    lora.explicitHeader();
+    LOG_INFO("BENCH e emit len=%u sync=%d hdr=%s pre=%u cr=%u seed=%lu air=%lu us err=%d/%d", k.eLen, k.eSync,
+             k.eImplicit ? "imp" : "exp", k.ePre, k.eCr, (unsigned long)k.eSeed, (unsigned long)airUs, err, txErr);
+    benchKnobs.eSeed = x; // the next emission carries a different payload
+    reconfigure();        // sync word, preamble, CR and header mode back to the node's own, then RX
 }
 #endif
 
