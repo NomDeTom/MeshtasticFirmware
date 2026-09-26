@@ -72,6 +72,11 @@ template <class T> class LR20x0Interface : public RadioLibInterface
 
     virtual void setStandby() override;
 
+#ifdef BENCH_KNOBS
+    void benchApplyRfSwitch() override;
+    void benchApplyFrontEnd() override;
+#endif
+
     /**
      * Apply the Semtech DCDC sensitivity workaround (opt-in, godmode-only). Must be called after the LoRa
      * modulation parameters have been set - i.e. after lora.begin() in init(), or after the

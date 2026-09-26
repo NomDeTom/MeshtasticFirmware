@@ -167,9 +167,9 @@ void benchKnobsLog()
              k.dcSleepMs, k.dcWakeMs, k.rxdcRxSym, k.rxdcSleepSym, k.rxCont, (unsigned long)k.trigNode, k.atMs, k.atDeaf ? 1 : 0,
              TXARM_NAMES[k.txArm], k.txGap ? 1 : 0);
     LOG_INFO("BENCH knobs pk: pk=%u pksym=%u pkint=%u pkwait=%d pkpoll=%u pktrig=%u pkfree=%d mark=%08lx mdeaf=%u "
-             "esync=%d ehdr=%s epre=%u ecr=%u elen=%u eseed=%lu efollow=%d",
+             "esync=%d ehdr=%s epre=%u ecr=%u elen=%u eseed=%lu efollow=%d eiq=%d",
              k.pk, k.pkSym, k.pkInt, k.pkWait, k.pkPoll, k.pkTrig, k.pkFree ? 1 : 0, (unsigned long)k.markNode, k.mdeafN, k.eSync,
-             k.eImplicit ? "imp" : "exp", k.ePre, k.eCr, k.eLen, (unsigned long)k.eSeed, k.eFollow);
+             k.eImplicit ? "imp" : "exp", k.ePre, k.eCr, k.eLen, (unsigned long)k.eSeed, k.eFollow, k.eIq ? 1 : 0);
     for (uint8_t i = 0; i < k.mdeafN; i++)
         LOG_INFO("BENCH knobs mdeaf[%u]: +%u ms for %u ms", i, k.mdeafO[i], k.mdeafD[i]);
 }
@@ -314,6 +314,29 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
             next.tcxoUs = (uint16_t)(strcmp(val, "default") == 0 ? 0 : constrain(num, 0, 20000));
         } else if (strcmp(key, "agcq") == 0) {
             next.agcQ = num != 0;
+        } else if (strcmp(key, "israrm") == 0) {
+            next.isrArm = (uint8_t)constrain(num, 0, 2);
+        } else if (strcmp(key, "rxboost") == 0) {
+            next.rxBoost = (int8_t)(strcmp(val, "default") == 0 ? -1 : constrain(num, 0, 7));
+        } else if (strcmp(key, "regmode") == 0) {
+            next.regMode = strcmp(val, "simo") == 0 ? 1 : 0;
+        } else if (strcmp(key, "patab") == 0) {
+            next.paTable = strcmp(val, "ds") == 0 ? 1 : strcmp(val, "rl") == 0 ? 2 : strcmp(val, "rak") == 0 ? 3 : 0;
+        } else if (strcmp(key, "txhold") == 0) {
+            next.txHold = (uint16_t)constrain(num, 0, 2000);
+        } else if (strcmp(key, "rfsw") == 0) {
+            // rfsw=default, or up to six comma-separated masks for DIO5,6,7,8,10,11 (missing ones 0), e.g. rfsw=6,4,0,6
+            next.rfswSet = strcmp(val, "default") != 0;
+            if (next.rfswSet) {
+                const char *p = val;
+                for (uint8_t &m : next.rfsw) {
+                    char *end = nullptr;
+                    m = *p ? (uint8_t)(strtol(p, &end, 0) & 0x1f) : 0;
+                    p = (end && *end == ',') ? end + 1 : (end ? end : p);
+                }
+            }
+        } else if (strcmp(key, "rfsw9") == 0) {
+            next.rfsw9 = (int8_t)constrain(num, -1, 0x1f);
         } else if (strcmp(key, "txgap") == 0) {
             next.txGap = num != 0;
         } else if (strcmp(key, "pk") == 0) {
@@ -359,6 +382,8 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
             }
         } else if (strcmp(key, "esync") == 0) {
             next.eSync = (int16_t)(strcmp(val, "own") == 0 ? -1 : constrain(num, -1, 255));
+        } else if (strcmp(key, "eiq") == 0) {
+            next.eIq = num != 0;
         } else if (strcmp(key, "ehdr") == 0) {
             next.eImplicit = strcmp(val, "imp") == 0;
         } else if (strcmp(key, "epre") == 0) {
@@ -400,9 +425,17 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
 #endif
     const bool markChanged = markSet;
     const bool oscChanged = next.xosc != benchKnobs.xosc || next.tcxoUs != benchKnobs.tcxoUs;
+    const bool frontChanged = next.rxBoost != benchKnobs.rxBoost || next.paTable != benchKnobs.paTable ||
+                              next.regMode != benchKnobs.regMode;
+    const bool rfswChanged =
+        next.rfswSet != benchKnobs.rfswSet || next.rfsw9 != benchKnobs.rfsw9 || memcmp(next.rfsw, benchKnobs.rfsw, sizeof(next.rfsw)) != 0;
     benchKnobs = next;
     if (oscChanged && RadioLibInterface::instance)
         RadioLibInterface::instance->benchApplyOsc();
+    if (rfswChanged && RadioLibInterface::instance)
+        RadioLibInterface::instance->benchApplyRfSwitch();
+    if (frontChanged && RadioLibInterface::instance)
+        RadioLibInterface::instance->benchApplyFrontEnd();
     if (trigChanged && RadioLibInterface::instance)
         RadioLibInterface::instance->benchTrigChanged();
     if (markChanged && RadioLibInterface::instance)
@@ -426,15 +459,16 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
         benchNoiseThread = new BenchNoiseThread();
     if (benchKnobs.dcSleepMs && !benchDutyThread)
         benchDutyThread = new BenchDutyThread();
-    if ((benchKnobs.pk || benchKnobs.markNode || benchKnobs.eFollow >= 0) && !benchRxThread)
+    if ((benchKnobs.pk || benchKnobs.markNode || benchKnobs.eFollow >= 0 || benchKnobs.txHold) && !benchRxThread)
         benchRxThread = new BenchRxThread();
     benchKick(0);
     if (benchKnobs.probeMs && !benchProbeThread)
         benchProbeThread = new BenchProbeThread();
     benchKnobsLog();
     // Short, so a viewer that truncates the long knobs line still shows these.
-    LOG_INFO("BENCH txgap=%d txarm=%s xosc=%d tcxo=%u agcq=%d", benchKnobs.txGap ? 1 : 0, TXARM_NAMES[benchKnobs.txArm],
-             benchKnobs.xosc ? 1 : 0, benchKnobs.tcxoUs, benchKnobs.agcQ ? 1 : 0);
+    LOG_INFO("BENCH txgap=%d txarm=%s xosc=%d tcxo=%u agcq=%d israrm=%d", benchKnobs.txGap ? 1 : 0,
+             TXARM_NAMES[benchKnobs.txArm], benchKnobs.xosc ? 1 : 0, benchKnobs.tcxoUs, benchKnobs.agcQ ? 1 : 0,
+             benchKnobs.isrArm);
 
     if (radioChanged && RadioLibInterface::instance) {
         // reconfigure() reapplies modulation, sync word and IQ, then restarts RX.

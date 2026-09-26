@@ -187,6 +187,10 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     virtual void benchJam(uint32_t ms);
     /** Apply the xosc and tcxoUs knobs to the chip, then restart RX. Unsupported by default. */
     virtual void benchApplyOsc();
+    /** Apply the rfsw knob (RF switch table override), then restart RX. Unsupported by default. */
+    virtual void benchApplyRfSwitch();
+    /** Apply the rxboost and patab knobs, then restart RX. Unsupported by default. */
+    virtual void benchApplyFrontEnd();
     /** Drop RX for ms and hold any queued TX; on waking, restart RX and make the channel decision at once. */
     void benchDeaf(uint32_t ms, bool quiet = false);
     uint32_t benchDeafUntil = 0; // Time::getMillis() deadline, 0 when not deaf
@@ -228,6 +232,12 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     };
     volatile uint32_t benchGapIsr = 0;     // benchTicks() in the TX ISR
     volatile bool benchGapHaveIsr = false; // false when TX_DONE came from the poll or a missed-edge catch
+    volatile uint32_t benchRxGapIsr = 0;     // benchTicks() in the RX ISR
+    volatile bool benchRxGapHaveIsr = false; // false when RX_DONE came from the poll or a missed-edge catch
+    uint32_t benchRxGapPrev = 0;             // rxStart of the previous RX_DONE
+    volatile uint32_t benchGapIsrArmed = 0; // benchTicks() when the TX_DONE interrupt had RX re-armed (israrm)
+    bool benchGapAdopted = false;           // the handler took over that RX instead of calling startReceive()
+    volatile uint32_t benchGapIsrReady = 0; // israrm=2: benchTicks() when BUSY fell after the ISR's SET_RX
     bool benchGapFromIsr = false;
     bool benchGapTiming = false;
     bool benchGapSplitArm = false;                    // the driver stamped GAP_NOTIFIED and GAP_STANDBY
@@ -267,6 +277,7 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     bool benchLegacyReceiveDetected(uint16_t irq, unsigned long headerFlag, unsigned long preambleFlag);
     // Emitter follow: Time::getMillis() at which to emit, 0 when none, and the TX it follows.
     uint32_t benchEmitAt = 0;
+    uint32_t benchHoldAt = 0; // txhold: when the next main-loop hold starts
     uint32_t benchEmitAfterId = 0;
     // Mark schedule: the anchor frame, and the deaf window it scheduled.
     uint32_t benchMarkUs = 0;     // micros() at the last anchor's RX_DONE, 0 before the first
@@ -622,6 +633,12 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
 
     void checkRxDoneIrqFlag();
     void checkTxDoneIrqFlag();
+
+    /** From the TX_DONE interrupt, put the chip straight back into RX; false if it did not */
+    virtual bool rearmReceiveFromIsr() { return false; }
+
+    /** After TX, take over the RX that rearmReceiveFromIsr() started instead of restarting it; false if there is none */
+    virtual bool adoptReceiveArmedFromIsr() { return false; }
 
     /** Software-poll substitute for a hardware DIO interrupt, for radios whose IRQ line sits behind
      * an I2C IO expander with no INT routed to the MCU (e.g. Meshnology W10, LORA_DIO1_SOFTWARE_POLL).

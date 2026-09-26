@@ -80,6 +80,12 @@ void INTERRUPT_ATTR RadioLibInterface::isrLevel0Common(PendingISR cause)
 
 void INTERRUPT_ATTR RadioLibInterface::isrRxLevel0()
 {
+#ifdef BENCH_KNOBS
+    if (benchKnobs.txGap) {
+        instance->benchRxGapIsr = benchTicks();
+        instance->benchRxGapHaveIsr = true;
+    }
+#endif
     isrLevel0Common(ISR_RX);
 }
 
@@ -90,6 +96,14 @@ void INTERRUPT_ATTR RadioLibInterface::isrTxLevel0()
         instance->benchGapIsr = benchTicks();
         instance->benchGapHaveIsr = true;
     }
+#endif
+    // Before the notify: the handler that would otherwise re-arm RX can wait behind a main-loop hold.
+#ifdef BENCH_KNOBS
+    instance->benchGapIsrArmed = 0;
+    if (instance->rearmReceiveFromIsr() && benchKnobs.txGap)
+        instance->benchGapIsrArmed = benchTicks() | 1; // | 1: 0 means not armed
+#else
+    instance->rearmReceiveFromIsr();
 #endif
     isrLevel0Common(ISR_TX);
 }
@@ -314,6 +328,16 @@ void RadioLibInterface::benchApplyOsc()
     LOG_WARN("BENCH xosc/tcxo unsupported on this radio");
 }
 
+void RadioLibInterface::benchApplyRfSwitch()
+{
+    LOG_WARN("BENCH rfsw unsupported on this radio");
+}
+
+void RadioLibInterface::benchApplyFrontEnd()
+{
+    LOG_WARN("BENCH rxboost/patab unsupported on this radio");
+}
+
 bool RadioLibInterface::benchProbe(bool &cadBusy, bool &rxBusy, int16_t &rssi)
 {
     if (!isReceiving || sendingPacket != NULL || isIRQPending())
@@ -397,6 +421,18 @@ int32_t RadioLibInterface::benchTick()
 {
     const uint32_t now = Time::getMillis();
     int32_t next = 500;
+    if (benchHoldAt) {
+        if (Throttle::deadlinePassedAt(now, benchHoldAt)) {
+            benchHoldAt = 0;
+            // A main-loop hold like a signature check or a GPS probe: spin without yielding to other OSThreads.
+            const uint32_t t0 = millis();
+            while (millis() - t0 < benchKnobs.txHold) {
+            }
+            LOG_INFO("BENCH hold %u ms", benchKnobs.txHold);
+        } else {
+            next = std::min<int32_t>(next, benchHoldAt - now);
+        }
+    }
     if (benchEmitAt) {
         if (Throttle::deadlinePassedAt(now, benchEmitAt)) {
             const int32_t lateMs = (int32_t)(now - benchEmitAt);
@@ -498,13 +534,14 @@ void RadioLibInterface::benchPkStep()
     const uint32_t hdrValid = iface->getIrqMapped(1UL << RADIOLIB_IRQ_HEADER_VALID);
     const uint32_t hdrErr = iface->getIrqMapped(1UL << RADIOLIB_IRQ_HEADER_ERR);
     const uint32_t pre = iface->getIrqMapped(1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED);
+    const uint32_t rxTimeout = iface->getIrqMapped(1UL << RADIOLIB_IRQ_TIMEOUT);
     if (!benchPkSeenUs) {
         // Watching: a non-destructive read, so the TX path and the stale-flag twin see the same flags.
-        if (!(benchKnobs.pkTrig & BenchKnobs::PK_ON_PREAMBLE) || !isReceiving || sendingPacket || benchDeafUntil ||
-            isIRQPending())
+        // Not isIRQPending(): on SX126x that is any flag set, including the PREAMBLE_DETECTED this waits for.
+        if (!(benchKnobs.pkTrig & BenchKnobs::PK_ON_PREAMBLE) || !isReceiving || sendingPacket || benchDeafUntil)
             return;
         const uint32_t irq = iface->getIrqFlags();
-        if ((irq & pre) && !(irq & (hdrValid | rxDone)))
+        if ((irq & pre) && !(irq & (hdrValid | rxDone | rxTimeout)))
             benchPkStart(BenchKnobs::PK_ON_PREAMBLE);
         return;
     }
@@ -516,7 +553,7 @@ void RadioLibInterface::benchPkStep()
         return;
     const uint32_t irq = iface->getIrqFlags();
     benchPkHerr |= (irq & hdrErr) != 0;
-    if ((irq & rxDone) || isIRQPending()) {
+    if (irq & (rxDone | rxTimeout)) {
         benchPkEnd("rxdone"); // a frame completed: it was ours to decode, not to peek at
         return;
     }
@@ -761,10 +798,13 @@ void RadioLibInterface::onNotify(uint32_t notification)
         (void)RadioTxHooks::beforeTransmit(this, txQueue.getFront());
 #ifdef BENCH_KNOBS
         benchGapMark(GAP_HOOK);
-#endif
-        startReceive();
-#ifdef BENCH_KNOBS
+        benchGapAdopted = adoptReceiveArmedFromIsr();
+        if (!benchGapAdopted)
+            startReceive();
         benchGapMark(GAP_ARMED);
+#else
+        if (!adoptReceiveArmedFromIsr())
+            startReceive();
 #endif
         setTransmitDelay();
         finishSentPacket(sent);
@@ -773,16 +813,40 @@ void RadioLibInterface::onNotify(uint32_t notification)
 #endif
         break;
     }
-    case ISR_RX:
+    case ISR_RX: {
+#ifdef BENCH_KNOBS
+        // RX_DONE -> RX re-armed, the deaf gap after every reception ("BENCH rxgap", logged once re-armed).
+        const bool rxGap = benchKnobs.txGap;
+        const uint32_t rxWake = benchTicks();
+        const bool rxFromIsr = benchRxGapHaveIsr;
+        benchRxGapHaveIsr = false;
+        const uint32_t rxStart = rxFromIsr ? benchRxGapIsr : rxWake;
+        const uint32_t goodBefore = rxGood;
+#endif
         handleReceiveInterrupt();
+#ifdef BENCH_KNOBS
+        const uint32_t rxHandled = benchTicks();
+#endif
         // Re-arm for the next packet. rearmReceive() avoids a standby where the chip is already in RX,
         // so a second packet that is already arriving is not aborted.
         rearmReceive();
+#ifdef BENCH_KNOBS
+        const uint32_t rxArmed = benchTicks();
+        // tx / prev: this RX_DONE against the last TX_DONE and the previous RX_DONE, in ms; how close the frame followed
+        if (rxGap)
+            LOG_INFO("BENCH rxgap ok=%d isr=%d wake=%lu handle=%lu arm=%lu total=%lu tx=%lu prev=%lu",
+                     rxGood != goodBefore ? 1 : 0, rxFromIsr ? 1 : 0, (unsigned long)benchTicksToUs(rxWake - rxStart),
+                     (unsigned long)benchTicksToUs(rxHandled - rxWake), (unsigned long)benchTicksToUs(rxArmed - rxHandled),
+                     (unsigned long)benchTicksToUs(rxArmed - rxStart), (unsigned long)(benchTicksToUs(rxStart - benchGapIsr) / 1000),
+                     (unsigned long)(benchTicksToUs(rxStart - benchRxGapPrev) / 1000));
+        benchRxGapPrev = rxStart;
+#endif
         setTransmitDelay();
 #ifdef BENCH_KNOBS
         benchTrigAct(); // after the re-arm and reschedule, which would otherwise undo it
 #endif
         break;
+    }
     case ISR_POLL_TICK:
         handleSoftwareLoraIrqPoll();
         break;
@@ -1124,12 +1188,16 @@ void RadioLibInterface::benchGapEnd()
     const long notifyUs = benchGapSplitArm ? (long)us(t[GAP_HOOK], t[GAP_NOTIFIED]) : -1;
     const long stbyUs = benchGapSplitArm ? (long)us(t[GAP_NOTIFIED], t[GAP_STANDBY]) : -1;
     const long rxUs = benchGapSplitArm ? (long)us(t[GAP_STANDBY], t[GAP_ARMED]) : -1;
+    // israrm: TX ISR until the ISR itself had RX armed (-1 when it did not); deaf: the real gap, whichever armed RX.
+    const long israrmUs = (benchGapAdopted && benchGapIsrArmed) ? (long)us(benchGapStart, benchGapIsrArmed) : -1;
+    const unsigned long totalUs = us(benchGapStart, t[GAP_ARMED]);
+    const long readyUs = (benchGapAdopted && benchGapIsrReady) ? (long)us(benchGapStart, benchGapIsrReady) : -1;
     LOG_INFO("BENCH txgap id=%08lx order=%s isr=%d wake=%lu air=%lu log=%lu rel=%lu hook=%lu arm=%lu (notify=%ld stby=%ld "
-             "rx=%ld) total=%lu",
+             "rx=%ld) total=%lu israrm=%ld ready=%ld adopt=%d deaf=%lu",
              (unsigned long)benchGapId, early ? "early" : "late", benchGapFromIsr ? 1 : 0, us(benchGapStart, t[GAP_WAKE]),
              us(t[GAP_AIR0], t[GAP_AIR]), us(t[GAP_LOG], t[GAP_LOGGED]), us(t[GAP_LOGGED], t[GAP_RELEASED]),
-             us(t[GAP_HOOK0], t[GAP_HOOK]), us(t[GAP_HOOK], t[GAP_ARMED]), notifyUs, stbyUs, rxUs,
-             us(benchGapStart, t[GAP_ARMED]));
+             us(t[GAP_HOOK0], t[GAP_HOOK]), us(t[GAP_HOOK], t[GAP_ARMED]), notifyUs, stbyUs, rxUs, totalUs, israrmUs,
+             readyUs, benchGapAdopted ? 1 : 0, israrmUs >= 0 ? (unsigned long)israrmUs : totalUs);
 }
 #endif
 
@@ -1520,6 +1588,10 @@ bool RadioLibInterface::startSend(meshtastic_MeshPacket *txp)
             lastTxStart = Time::getMillis();
             printPacket("Started Tx", txp);
 #ifdef BENCH_KNOBS
+            if (benchKnobs.txHold) {
+                benchHoldAt = Time::skipZero(Time::getMillis() + 2);
+                benchKick(2);
+            }
             if (benchTrigLogTx)
                 LOG_INFO("BENCH t txstart +%lu", (unsigned long)(benchTxUs - benchTrigUs));
 #endif

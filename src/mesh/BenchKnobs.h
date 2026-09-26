@@ -83,6 +83,7 @@ struct BenchKnobs {
     // Emitter: a raw frame, outside the mesh stack, with its own sync word, header mode, preamble and length.
     int16_t eSync = -1;     // -1 = the node's own
     bool eImplicit = false; // implicit header: an explicit-header receiver decodes payload as a header
+    bool eIq = false;       // invert IQ for the emitted frame only; the node's own polarity is restored after it
     uint16_t ePre = 0;      // preamble symbols; 0 = the node's own
     uint8_t eCr = 0;        // coding rate 5..8; 0 = the node's own
     uint8_t eLen = 32;      // payload bytes
@@ -92,6 +93,15 @@ struct BenchKnobs {
     bool xosc = true;    // standby and RX/TX fallback on STDBY_XOSC, so the TCXO stays powered between TX and RX
     uint16_t tcxoUs = 0; // TCXO startup delay programmed into the chip, in us; 0 keeps RadioLib's 5000
     bool agcQ = true;    // skip the periodic AGC reset while a TX is queued (its standby can abort a TX it started)
+    uint8_t isrArm = 0;  // SX126x: 1 re-arms RX from the TX_DONE interrupt (the rx-rearm PR), 2 also times BUSY in the ISR
+    int8_t rxBoost = -1; // LR2021 RX boost level 0..7; -1 = the firmware's (config boosted gain -> 7, else 0)
+    uint8_t regMode = 0; // LR2021 SetRegMode: 0 SIMO_OFF (LDO, chip default, what the firmware runs), 1 SIMO_NORMAL (DC-DC)
+    uint8_t paTable = 0; // LR2021 LF PA table: 0 board (pa_table.h, else RadioLib's), 1 DS Table 7-19, 2 RadioLib's, 3 RAK13700
+    uint16_t txHold = 0; // hold the main loop this many ms from 2 ms after each TX starts, so TX_DONE lands in it; 0 = off
+    // LR2021 RF switch override: per DIO5,6,7,8,10,11 a SetDioRfSwitchConfig mask (bit0 stby, 1 rx, 2 tx, 3 rx_hf, 4 tx_hf).
+    bool rfswSet = false; // false = the compiled table
+    uint8_t rfsw[6] = {};
+    int8_t rfsw9 = -1; // probe: DIO9 (the IRQ line) as an RF switch with this mask, read back on the MCU; -1 = IRQ
     // Not cleared by "!bench reset": a monitor, not an experiment variable.
     uint16_t nfMs = 0;       // noise-floor sample interval; 0 = sampler off
     int16_t floorDbm = -128; // latest one-second median from the sampler; -128 until it has run

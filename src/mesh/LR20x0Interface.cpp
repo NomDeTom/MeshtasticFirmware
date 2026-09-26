@@ -79,6 +79,35 @@ static float lr20x0LastFreqMHz = 0;
 #define LR2021_RX_GAIN_BOOST_LEVEL 7
 #endif
 
+static uint8_t lr20x0RxBoostLevel()
+{
+#ifdef BENCH_KNOBS
+    if (benchKnobs.rxBoost >= 0)
+        return (uint8_t)benchKnobs.rxBoost;
+#endif
+    return config.lora.sx126x_rx_boosted_gain ? LR2021_RX_GAIN_BOOST_LEVEL : 0;
+}
+
+#ifdef BENCH_KNOBS
+// patab=ds: LR20xx DS rev 2.2 Table 7-19 (915 MHz reference design) at the integer targets 10..22 dBm, RadioLib's own
+// entries below 10 dBm, where the table stops. paVal is SetTxParams tx_power in 0.5 dB steps.
+static const LR2021PaTableEntry_t benchPaTableDs[RADIOLIB_LR2021_PA_TABLE_LEN] = {
+    {1, 1, 8},   {2, 2, 1},   {2, 2, 3},   {2, 2, 5},   {1, 2, 13},  {2, 1, 13},  {2, 2, 11}, {2, 2, 13},  // -9..-2
+    {3, 1, 12},  {1, 1, 18},  {1, 1, 20},  {1, 1, 23},  {1, 1, 27},  {1, 1, 33},  {1, 2, 26}, {1, 2, 31},  // -1..6
+    {1, 3, 27},  {1, 1, 37},  {1, 2, 40},                                                                  // 7..9
+    {1, 2, 32},  {2, 4, 30},  {4, 2, 30},  {4, 2, 32},  {4, 2, 34},  {4, 5, 34},  {7, 3, 34}, {7, 3, 36},  // 10..17
+    {5, 7, 38},  {5, 7, 40},  {5, 6, 42},  {5, 6, 44},  {7, 7, 44},                                        // 18..22
+};
+// patab=rak: variants/nrf52840/rak3401_lr2021/pa_table.h (tuned on a RAK13700 with a power meter), for comparison.
+static const LR2021PaTableEntry_t benchPaTableRak[RADIOLIB_LR2021_PA_TABLE_LEN] = {
+    {1, 1, 8},   {2, 2, 1},   {2, 2, 3},   {2, 2, 5},   {1, 2, 13},  {2, 1, 13},  {2, 2, 11}, {2, 2, 13},  // -9..-2
+    {3, 1, 12},  {1, 1, 18},  {1, 1, 18},  {1, 1, 16},  {1, 1, 20},  {1, 1, 22},  {1, 2, 22}, {1, 2, 24},  // -1..6
+    {1, 3, 27},  {1, 2, 30},  {1, 2, 32},  {2, 2, 33},  {2, 2, 35},  {2, 3, 35},  {2, 5, 37}, {3, 2, 38},  // 7..14
+    {3, 3, 39},  {3, 6, 38},  {4, 4, 40},  {4, 5, 41},  {4, 7, 43},  {5, 4, 44},  {5, 6, 44}, {6, 7, 44},  // 15..22
+};
+static const char *const BENCH_PATAB_NAMES[] = {"board", "ds", "rl", "rak"};
+#endif
+
 template <typename T>
 LR20x0Interface<T>::LR20x0Interface(LockingArduinoHal *hal, RADIOLIB_PIN_TYPE cs, RADIOLIB_PIN_TYPE irq, RADIOLIB_PIN_TYPE rst,
                                     RADIOLIB_PIN_TYPE busy)
@@ -270,15 +299,16 @@ template <typename T> bool LR20x0Interface<T>::reconfigure()
     // base-class failure isn't masked as success.
     const bool reconfigureSuccess = RadioLibInterface::reconfigure();
 
-#ifdef BENCH_KNOBS
-    if (benchKnobs.txPower != -128)
-        power = benchKnobs.txPower;
-#endif
     if (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_LORA_24) {
         limitPower(LR2021_MAX_POWER_HF);
     } else {
         limitPower(LR2021_MAX_POWER);
     }
+#ifdef BENCH_KNOBS
+    // After limitPower(), which re-derives power from config and would discard the override.
+    if (benchKnobs.txPower != -128)
+        power = benchKnobs.txPower;
+#endif
 
     const float freq = getFreq();
     const bool bandHop = lr20x0ReconfigurePath(lr20x0LastFreqMHz, freq) == Lr20x0ReconfigurePath::FullBegin;
@@ -369,7 +399,7 @@ template <typename T> bool LR20x0Interface<T>::reconfigure()
 
         // Warn-only, as in LR11x0: a rejected gain mode is cosmetic and not a lost-state signature, so
         // it must not drag reconfigure() into a full chip reset.
-        err = lora.setRxBoostedGainMode(config.lora.sx126x_rx_boosted_gain ? LR2021_RX_GAIN_BOOST_LEVEL : 0);
+        err = lora.setRxBoostedGainMode(lr20x0RxBoostLevel());
         if (err != RADIOLIB_ERR_NONE)
             LOG_WARN("LR20x0 setRxBoostedGainMode %s%d", radioLibErr, err);
     }
@@ -467,7 +497,7 @@ template <typename T> bool LR20x0Interface<T>::fullBegin(float freq)
             lora.setRfSwitchTable(lr20x0_rfswitch_dio_pins, lr20x0_rfswitch_table);
 #endif
 
-        res = lora.setRxBoostedGainMode(config.lora.sx126x_rx_boosted_gain ? LR2021_RX_GAIN_BOOST_LEVEL : 0);
+        res = lora.setRxBoostedGainMode(lr20x0RxBoostLevel());
         if (res != RADIOLIB_ERR_NONE) {
             LOG_ERROR("LR20x0 band-hop setRxBoostedGainMode %s%d", radioLibErr, res);
             RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_INVALID_RADIO_SETTING);
@@ -584,6 +614,108 @@ template <typename T> int16_t LR20x0Interface<T>::trySetStandby()
     RadioLibInterface::setStandby();
     return err;
 }
+
+#ifdef BENCH_KNOBS
+template <typename T> void LR20x0Interface<T>::benchApplyRfSwitch()
+{
+    if (sendingPacket != NULL) {
+        LOG_WARN("BENCH rfsw skipped: TX in progress");
+        return;
+    }
+    static bool probing = false; // DIO9 was taken from the IRQ by rfsw9
+    const BenchKnobs &k = benchKnobs;
+    if (probing && k.rfsw9 < 0) {
+        probing = false;
+        fullBegin(getFreq()); // DIO9 back to its IRQ function; also reapplies the compiled table
+    }
+    trySetStandby(); // STDBY_RC: SetDioFunction is only accepted there
+    // Raw SetDioFunction + SetDioRfSwitchConfig per DIO, keeping the chip's status (RadioLib's setRfSwitchTable drops it).
+    static const uint8_t dios[6] = {5, 6, 7, 8, 10, 11};
+    int16_t fnErr[6] = {}, cfgErr[6] = {};
+    for (size_t d = 0; d < 6; d++) {
+        uint8_t mask = k.rfsw[d];
+        uint8_t func = RADIOLIB_LR2021_DIO_FUNCTION_RF_SWITCH;
+        if (!k.rfswSet) {
+            // The compiled table for DIO5..8; DIO10/11 back to no function, as after reset.
+            mask = 0;
+            if (d < 4) {
+                for (size_t j = 0; lr20x0_rfswitch_table[j].mode != LR20x0::MODE_END_OF_TABLE; j++)
+                    if (lr20x0_rfswitch_dio_pins[d] != RADIOLIB_NC && lr20x0_rfswitch_table[j].values[d] == HIGH)
+                        mask |= 1 << (lr20x0_rfswitch_table[j].mode - 1);
+                if (lr20x0_rfswitch_dio_pins[d] == RADIOLIB_NC)
+                    func = RADIOLIB_LR2021_DIO_FUNCTION_NONE;
+            } else {
+                func = RADIOLIB_LR2021_DIO_FUNCTION_NONE;
+            }
+        }
+        // DIO5 accepts only the sleep pull-up (RadioLib's note); the rest pull-auto.
+        uint8_t fn[2] = {dios[d], (uint8_t)(func | (dios[d] == 5 ? RADIOLIB_LR2021_DIO_SLEEP_PULL_UP
+                                                                  : RADIOLIB_LR2021_DIO_SLEEP_PULL_AUTO))};
+        fnErr[d] = module.SPIwriteStream(RADIOLIB_LR2021_CMD_SET_DIO_FUNCTION, fn, sizeof(fn), true, true);
+        uint8_t cfg[2] = {dios[d], mask};
+        cfgErr[d] = module.SPIwriteStream(RADIOLIB_LR2021_CMD_SET_DIO_RF_SWITCH_CONFIG, cfg, sizeof(cfg), true, true);
+        LOG_INFO("BENCH rfsw dio%u func=0x%02x mask=0x%02x err=%d/%d", dios[d], fn[1], mask, fnErr[d], cfgErr[d]);
+    }
+    LOG_INFO("BENCH rfsw=%s dio5,6,7,8,10,11=%u,%u,%u,%u,%u,%u", k.rfswSet ? "set" : "default", k.rfsw[0], k.rfsw[1],
+             k.rfsw[2], k.rfsw[3], k.rfsw[4], k.rfsw[5]);
+    if (k.rfsw9 < 0) {
+        startReceive();
+        return;
+    }
+    // Probe that a runtime table reaches the pins: DIO9 is wired to LR2021_IRQ_PIN, so the MCU can read the level
+    // the chip drives in standby and in RX. The IRQ is unusable until rfsw9=-1.
+    probing = true;
+    static const uint32_t pins9[Module::RFSWITCH_MAX_PINS] = {RADIOLIB_LR2021_DIO9, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC,
+                                                              RADIOLIB_NC};
+    Module::RfSwitchMode_t t9[3] = {};
+    t9[0].mode = LR20x0::MODE_STBY;
+    t9[0].values[0] = (k.rfsw9 & 1) ? HIGH : LOW;
+    t9[1].mode = LR20x0::MODE_RX;
+    t9[1].values[0] = (k.rfsw9 & 2) ? HIGH : LOW;
+    t9[2] = END_OF_MODE_TABLE;
+    lora.setRfSwitchTable(pins9, t9);
+    delay(2);
+    const int stby = digitalRead(LR2021_IRQ_PIN);
+    startReceive();
+    disableInterrupt();
+    delay(2);
+    const int rx = digitalRead(LR2021_IRQ_PIN);
+    LOG_INFO("BENCH rfsw9=%d pin: stby=%d rx=%d (expect %d/%d)", k.rfsw9, stby, rx, k.rfsw9 & 1, (k.rfsw9 >> 1) & 1);
+}
+#endif
+
+#ifdef BENCH_KNOBS
+template <typename T> void LR20x0Interface<T>::benchApplyFrontEnd()
+{
+    if (sendingPacket != NULL) {
+        LOG_WARN("BENCH rxboost/patab skipped: TX in progress");
+        return;
+    }
+    trySetStandby(); // STDBY_RC: SetRegMode is only accepted there
+    // SetRegMode (0x0121) as the datasheet documents it, one byte: 0x00 SIMO_OFF (LDO), 0x02 SIMO_NORMAL. SIMO needs the
+    // inductor on LXA/LXB; an LDO-only module has none, and a reset returns the chip to SIMO_OFF.
+    uint8_t reg[1] = {(uint8_t)(benchKnobs.regMode ? RADIOLIB_LR2021_REG_MODE_SIMO_NORMAL : RADIOLIB_LR2021_REG_MODE_SIMO_OFF)};
+    const int16_t regErr = module.SPIwriteStream(RADIOLIB_LR2021_CMD_SET_REG_MODE, reg, sizeof(reg), true, true);
+    const bool lf = !isLr20x0HighBand(getFreq());
+    if (lf) {
+        LR2021PaTableEntry_t *table = nullptr; // RadioLib's built-in
+        if (benchKnobs.paTable == 1)
+            table = const_cast<LR2021PaTableEntry_t *>(benchPaTableDs);
+        else if (benchKnobs.paTable == 3)
+            table = const_cast<LR2021PaTableEntry_t *>(benchPaTableRak);
+#ifdef LR2021_CUSTOM_PA_TABLE
+        else if (benchKnobs.paTable == 0)
+            table = lr2021_pa_table_lf;
+#endif
+        lora.setPaTable(table, false);
+    }
+    const int16_t paErr = lora.setOutputPower(power);
+    const int16_t boostErr = lora.setRxBoostedGainMode(lr20x0RxBoostLevel());
+    LOG_INFO("BENCH front: regmode=%s patab=%s pwr=%d rxboost=%u err=%d/%d/%d", benchKnobs.regMode ? "simo" : "ldo",
+             BENCH_PATAB_NAMES[benchKnobs.paTable], power, lr20x0RxBoostLevel(), regErr, paErr, boostErr);
+    startReceive();
+}
+#endif
 
 template <typename T> void LR20x0Interface<T>::setStandby()
 {
@@ -765,7 +897,7 @@ template <typename T> void LR20x0Interface<T>::resetAGC()
     lora.calibrateImageRejection(getFreq() - 4.0f, getFreq() + 4.0f);
 
     // 5. Re-apply RX boosted gain mode
-    lora.setRxBoostedGainMode(config.lora.sx126x_rx_boosted_gain ? LR2021_RX_GAIN_BOOST_LEVEL : 0);
+    lora.setRxBoostedGainMode(lr20x0RxBoostLevel());
 
     // 6. Resume receiving
     startReceive();

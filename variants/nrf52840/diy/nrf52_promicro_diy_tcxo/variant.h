@@ -228,6 +228,7 @@ https://github.com/brad112358/easy_E22
 #define LR2021_DIO3_TCXO_VOLTAGE 1.8
 #define LR2021_DIO_AS_RF_SWITCH
 #define LR2021_IRQ_DIO_NUM 9 // DIO9 → P0.10
+#define LR2021_CUSTOM_PA_TABLE // board LF PA table - see pa_table.h
 #endif
 
 // SX128X CONFIG - 2.4 GHz only, so off by default: it is a different module on the same footprint,
