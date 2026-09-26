@@ -37,8 +37,8 @@ struct BenchKnobs {
     static const uint8_t MDEAF_MAX = 8;
 
     enum TxArm : uint8_t {
-        TXARM_DEFAULT = 0, // the firmware as built: log and release the sent packet, then re-arm RX
-        TXARM_EARLY,       // re-arm RX first; log and release the sent packet afterwards
+        TXARM_LATE = 0, // develop's order: log and release the sent packet, then re-arm RX
+        TXARM_EARLY,    // re-arm RX first; log and release the sent packet afterwards (listening-now)
     };
 
     uint8_t lbt = LBT_DEFAULT;
@@ -49,7 +49,7 @@ struct BenchKnobs {
     uint16_t fixedMs = 0;   // added to every transmit-delay draw
     bool noBackoff = false; // random part of the transmit delay forced to 0
     uint8_t pre = PRE_DEFAULT;
-    uint8_t txArm = TXARM_DEFAULT;
+    uint8_t txArm = TXARM_EARLY;
     int16_t syncWord = -1;  // -1 keeps the firmware's
     int8_t iqInvert = -1;   // -1 keeps the firmware's (standard IQ)
     int16_t txPower = -128; // dBm; -128 keeps the configured power (the driver still clamps)
@@ -89,9 +89,9 @@ struct BenchKnobs {
     uint32_t eSeed = 1;     // payload generator seed, advanced after every emission
     int16_t eFollow = -1;   // one-shot: emit this many ms after the node's next TX_DONE; -1 = off
     // Deaf-gap levers (SX126x only).
-    bool xosc = false;   // standby and RX/TX fallback on STDBY_XOSC, so the TCXO stays powered between TX and RX
+    bool xosc = true;    // standby and RX/TX fallback on STDBY_XOSC, so the TCXO stays powered between TX and RX
     uint16_t tcxoUs = 0; // TCXO startup delay programmed into the chip, in us; 0 keeps RadioLib's 5000
-    bool agcQ = false;   // skip the periodic AGC reset while a TX is queued (its standby can abort a TX it started)
+    bool agcQ = true;    // skip the periodic AGC reset while a TX is queued (its standby can abort a TX it started)
     // Not cleared by "!bench reset": a monitor, not an experiment variable.
     uint16_t nfMs = 0;       // noise-floor sample interval; 0 = sampler off
     int16_t floorDbm = -128; // latest one-second median from the sampler; -128 until it has run

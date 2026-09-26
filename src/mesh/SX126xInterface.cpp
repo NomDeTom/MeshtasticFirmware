@@ -184,6 +184,15 @@ template <typename T> bool SX126xInterface<T>::reinitChip()
         res = lora.setDio2AsRfSwitch(dio2AsRfSwitch);
         LOG_DEBUG("Set DIO2 as %sRF switch, result: %d", dio2AsRfSwitch ? "" : "not ", res);
     }
+#ifdef BENCH_KNOBS
+    // The xosc/tcxo knobs, applied at every init so their defaults hold from boot and after a chip recovery.
+    if (res == RADIOLIB_ERR_NONE && tcxoVoltage > 0) {
+        if (benchKnobs.tcxoUs)
+            lora.setTCXO(tcxoVoltage, benchKnobs.tcxoUs);
+        const int16_t xoscRes = lora.setStandbyXOSC(benchKnobs.xosc);
+        LOG_DEBUG("BENCH osc at init: xosc=%d tcxo=%u, result: %d", benchKnobs.xosc ? 1 : 0, benchKnobs.tcxoUs, xoscRes);
+    }
+#endif
 
 // If a pin isn't defined, we set it to RADIOLIB_NC, it is safe to always do external RF switching with RADIOLIB_NC as it has
 // no effect

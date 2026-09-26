@@ -146,7 +146,7 @@ void benchKick(uint32_t ms)
 
 static const char *const LBT_NAMES[] = {"default", "off", "rx", "cad", "cadrx", "cadtx", "rssi", "rxrssi"};
 static const char *const PRE_NAMES[] = {"default", "hold", "ignore", "busy", "soft", "deadline"};
-static const char *const TXARM_NAMES[] = {"default", "early"};
+static const char *const TXARM_NAMES[] = {"late", "early"};
 
 static int indexOf(const char *const *names, size_t n, const char *v)
 {
@@ -197,7 +197,8 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
     char *save = nullptr;
     strtok_r(buf, " ", &save); // "!bench"
     for (char *tok = strtok_r(nullptr, " ", &save); tok; tok = strtok_r(nullptr, " ", &save)) {
-        if (strcmp(tok, "reset") == 0) {
+        // "develop": reset, then undo listening-now's deaf-gap fixes (the defaults above) to run develop's radio behaviour.
+        if (strcmp(tok, "reset") == 0 || strcmp(tok, "develop") == 0) {
             radioChanged |= next.syncWord != -1 || next.iqInvert != -1 || next.txPower != -128 || next.li != -1 ||
                             next.rxdcRxSym != 0 || next.rxCont != 0;
             const uint16_t keepNf = next.nfMs;
@@ -207,6 +208,11 @@ bool benchKnobsHandleCommand(const char *text, size_t len)
             next.nfMs = keepNf;
             next.floorDbm = keepFloor;
             next.txGap = keepTxGap;
+            if (strcmp(tok, "develop") == 0) {
+                next.txArm = BenchKnobs::TXARM_LATE;
+                next.xosc = false;
+                next.agcQ = false;
+            }
             continue;
         }
         char *eq = strchr(tok, '=');
