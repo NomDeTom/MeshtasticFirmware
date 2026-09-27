@@ -150,6 +150,13 @@ template <typename T> bool SX126xInterface<T>::reinitChip()
     }
 #endif
 
+    // RadioLib >= 7.5.0 retries on the XTAL inside begin() when the TCXO will not start, and reports success.
+    // Follow it, so nothing later re-arms DIO3 as TCXO control on a board that has a crystal.
+    if (res == RADIOLIB_ERR_NONE && tcxoVoltage > 0 && lora.tcxoVoltage == 0) {
+        LOG_WARN("SX126x TCXO Vref %f V did not start, running on the XTAL", tcxoVoltage);
+        tcxoVoltage = 0;
+    }
+
 #ifdef SX126X_PA_RAMP_US
     // Set custom PA ramp time for boards requiring longer stabilization (e.g., T-Beam 1W needs >800us)
     if (res == RADIOLIB_ERR_NONE) {
