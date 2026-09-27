@@ -650,12 +650,16 @@ void RadioLibInterface::benchTrigNote(char kind, uint32_t arg)
 
 void RadioLibInterface::benchTrigDumpEvents()
 {
-    char buf[BENCH_TRIG_EVENTS * 12 + 16];
+    // Worst entry " D4294967.2:65535" is 17 chars; snprintf's return is clamped so n never passes the buffer.
+    char buf[BENCH_TRIG_EVENTS * 18 + 1];
     size_t n = 0;
-    for (uint8_t i = 0; i < benchTrigEventCount && n < sizeof(buf) - 16; i++) {
+    for (uint8_t i = 0; i < benchTrigEventCount && n < sizeof(buf) - 1; i++) {
         const BenchTrigEvent &e = benchTrigEvents[i];
-        n += snprintf(buf + n, sizeof(buf) - n, e.kind == 'D' ? " %c%lu.%lu:%u" : " %c%lu.%lu", e.kind,
-                      (unsigned long)(e.us / 1000), (unsigned long)(e.us % 1000 / 100), e.arg);
+        const int w = snprintf(buf + n, sizeof(buf) - n, e.kind == 'D' ? " %c%lu.%lu:%u" : " %c%lu.%lu", e.kind,
+                               (unsigned long)(e.us / 1000), (unsigned long)(e.us % 1000 / 100), e.arg);
+        if (w < 0)
+            break;
+        n = min(n + (size_t)w, sizeof(buf) - 1);
     }
     buf[n] = 0;
     LOG_INFO("BENCH t ev n=%u lost=%u%s", benchTrigEventCount, benchTrigEventLost, buf);
