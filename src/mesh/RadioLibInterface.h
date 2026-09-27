@@ -212,6 +212,20 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     void benchTrigAct();
     /** Log the first decision after the trigger fired. */
     void benchTrigDecided(bool busy, uint32_t us);
+    // TX-path event ring for the trigger window (trigger RX until TX_DONE), dumped once with "t txdone" so that
+    // logging does not perturb the retry timing it records. kind: R rx handled, D delay drawn (arg ms),
+    // W timer wake, b busyRx, c CAD busy, f CAD free.
+    struct BenchTrigEvent {
+        uint32_t us;
+        uint16_t arg;
+        char kind;
+    };
+    static constexpr uint8_t BENCH_TRIG_EVENTS = 28;
+    BenchTrigEvent benchTrigEvents[BENCH_TRIG_EVENTS];
+    uint8_t benchTrigEventCount = 0;
+    uint8_t benchTrigEventLost = 0;
+    void benchTrigNote(char kind, uint32_t arg = 0);
+    void benchTrigDumpEvents();
     /** One passive channel reading, no TX: RX-flag peek (non-destructive), RSSI, then a CAD scan with the current
      *  knobs, after which RX is re-armed. False if the radio is not idling in RX. */
     bool benchProbe(bool &cadBusy, bool &rxBusy, int16_t &rssi);

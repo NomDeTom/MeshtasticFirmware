@@ -611,6 +611,7 @@ void RadioLibInterface::benchTrigAct()
         benchTrigOpen = true;
         benchTrigHoldStart = 0;
         benchTrigLogDecide = benchTrigLogTx = true;
+        benchTrigEventCount = benchTrigEventLost = 0;
         if (benchKnobs.atDeaf)
             benchDeaf(waitMs, true); // the undeaf path restarts RX and decides at once
         else
@@ -633,6 +634,32 @@ void RadioLibInterface::benchTrigDecided(bool busy, uint32_t us)
         return;
     benchTrigLogDecide = false;
     LOG_INFO("BENCH t decide +%lu busy=%d", (unsigned long)(us - benchTrigUs), busy ? 1 : 0);
+}
+
+void RadioLibInterface::benchTrigNote(char kind, uint32_t arg)
+{
+    if (!benchTrigLogTx)
+        return;
+    if (benchTrigEventCount >= BENCH_TRIG_EVENTS) {
+        if (benchTrigEventLost < 255)
+            benchTrigEventLost++;
+        return;
+    }
+    benchTrigEvents[benchTrigEventCount++] = {micros() - benchTrigUs, (uint16_t)min(arg, (uint32_t)65535), kind};
+}
+
+void RadioLibInterface::benchTrigDumpEvents()
+{
+    char buf[BENCH_TRIG_EVENTS * 12 + 16];
+    size_t n = 0;
+    for (uint8_t i = 0; i < benchTrigEventCount && n < sizeof(buf) - 16; i++) {
+        const BenchTrigEvent &e = benchTrigEvents[i];
+        n += snprintf(buf + n, sizeof(buf) - n, e.kind == 'D' ? " %c%lu.%lu:%u" : " %c%lu.%lu", e.kind,
+                      (unsigned long)(e.us / 1000), (unsigned long)(e.us % 1000 / 100), e.arg);
+    }
+    buf[n] = 0;
+    LOG_INFO("BENCH t ev n=%u lost=%u%s", benchTrigEventCount, benchTrigEventLost, buf);
+    benchTrigEventCount = benchTrigEventLost = 0;
 }
 #endif
 
@@ -825,6 +852,7 @@ void RadioLibInterface::onNotify(uint32_t notification)
 #endif
         handleReceiveInterrupt();
 #ifdef BENCH_KNOBS
+        benchTrigNote('R');
         const uint32_t rxHandled = benchTicks();
 #endif
         // Re-arm for the next packet. rearmReceive() avoids a standby where the chip is already in RX,
@@ -852,6 +880,7 @@ void RadioLibInterface::onNotify(uint32_t notification)
         break;
     case TRANSMIT_DELAY_COMPLETED:
 #ifdef BENCH_KNOBS
+        benchTrigNote('W');
         if (benchDeafUntil) {
             const uint32_t now = Time::getMillis();
             if (!Throttle::deadlinePassedAt(now, benchDeafUntil)) {
@@ -906,6 +935,7 @@ void RadioLibInterface::onNotify(uint32_t notification)
             if (!canSendImmediately()) {
 #ifdef BENCH_KNOBS
                 benchTrigDecided(true, micros());
+                benchTrigNote('b');
 #endif
                 setTransmitDelay(); // currently Rx/Tx-ing: reset random delay
             } else {
@@ -958,6 +988,7 @@ void RadioLibInterface::onNotify(uint32_t notification)
                     const uint32_t decideUs = micros();
                     if (channelBusy) {
                         benchTrigDecided(true, decideUs);
+                        benchTrigNote('c');
 #else
                     LOG_DEBUG("CAD arm");
                     if (isChannelActive()) { // currently traffic on the channel?
@@ -969,6 +1000,9 @@ void RadioLibInterface::onNotify(uint32_t notification)
                         setTransmitDelay();
                     } else {
                         LOG_DEBUG("CAD free");
+#ifdef BENCH_KNOBS
+                        benchTrigNote('f');
+#endif
                         // Send any outgoing packets we have ready as fast as possible to keep the time between channel scan and
                         // actual transmission as short as possible
                         txp = txQueue.dequeue();
@@ -1014,6 +1048,9 @@ void RadioLibInterface::setTransmitDelay()
         // back to the 0 being avoided.
         p->tx_after = Time::skipZero(
             (uint32_t)min(max(p->tx_after + add_delay, now + add_delay), now + 2 * getTxDelayMsecWeightedWorst(p->rx_snr)));
+#ifdef BENCH_KNOBS
+        benchTrigNote('D', p->tx_after - now);
+#endif
         notifyLater(p->tx_after - now, TRANSMIT_DELAY_COMPLETED, txTimerOverwrite);
     } else if (p->rx_snr == 0 && p->rx_rssi == 0) {
         /* We assume if rx_snr = 0 and rx_rssi = 0, the packet was generated locally.
@@ -1033,6 +1070,9 @@ void RadioLibInterface::startTransmitTimer(bool withDelay)
     // If we have work to do and the timer wasn't already scheduled, schedule it now
     if (!txQueue.empty()) {
         uint32_t delay = !withDelay ? 1 : getTxDelayMsec();
+#ifdef BENCH_KNOBS
+        benchTrigNote('D', delay);
+#endif
         notifyLater(delay, TRANSMIT_DELAY_COMPLETED, txTimerOverwrite); // This will implicitly enable
     }
 }
@@ -1042,6 +1082,9 @@ void RadioLibInterface::startTransmitTimerRebroadcast(meshtastic_MeshPacket *p)
     // If we have work to do and the timer wasn't already scheduled, schedule it now
     if (!txQueue.empty()) {
         uint32_t delay = getTxDelayMsecWeighted(p);
+#ifdef BENCH_KNOBS
+        benchTrigNote('D', delay);
+#endif
         notifyLater(delay, TRANSMIT_DELAY_COMPLETED, txTimerOverwrite); // This will implicitly enable
     }
 }
@@ -1088,8 +1131,10 @@ meshtastic_MeshPacket *RadioLibInterface::handleTransmitInterrupt()
 #ifdef BENCH_KNOBS
     if (sendingPacket) {
         const uint32_t us = micros();
-        if (benchTrigLogTx)
+        if (benchTrigLogTx) {
             LOG_INFO("BENCH t txdone +%lu", (unsigned long)(us - benchTrigUs));
+            benchTrigDumpEvents();
+        }
         benchTrigLogTx = false;
         benchTrigOpen = false; // the next queued packet waits for the next trigger
         if (benchKnobs.eFollow >= 0) {
