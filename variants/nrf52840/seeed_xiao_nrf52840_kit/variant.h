@@ -208,6 +208,21 @@ static const uint8_t SCK = PIN_SPI_SCK;
 
 #define BATTERY_SENSE_RESOLUTION_BITS (10)
 
+// Wake from low-battery System OFF: P0.31 = AIN7, VBAT * 510k/1.51M; ADC_CTRL stays LOW in System OFF.
+#define BATTERY_LPCOMP_INPUT NRF_LPCOMP_INPUT_7
+#define BATTERY_LPCOMP_THRESHOLD NRF_LPCOMP_REF_SUPPLY_3_8 // VDD=3.3V AIN7=1.24V VBAT=3.66V
+
+// Brownout: System OFF once VDD stays under the threshold this long without USB; LPCOMP wakes it.
+#ifndef LOW_VDD_SYSTEMOFF_DELAY_MS
+#define LOW_VDD_SYSTEMOFF_DELAY_MS 5000
+#endif
+#ifndef SAFE_VDD_VOLTAGE_THRESHOLD_MV
+#define SAFE_VDD_VOLTAGE_THRESHOLD_MV 2900
+#endif
+#ifndef SAFE_VDD_VOLTAGE_THRESHOLD_HYST_MV
+#define SAFE_VDD_VOLTAGE_THRESHOLD_HYST_MV 100
+#endif
+
 /*
  * Wire Interfaces
  * Keep this section after potentially conflicting pin definitions
