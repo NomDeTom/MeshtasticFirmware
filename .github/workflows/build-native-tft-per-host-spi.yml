@@ -1,0 +1,94 @@
+name: build-native-tft-per-host-spi
+
+# Dedicated build branch, not for main. The checkout pins the firmware commit
+# under test; PlatformIO resolves the framework-portduino and LovyanGFX pins
+# already present in variants/native/portduino.ini.
+#
+#   firmware:            NomDeTom/MeshtasticFirmware 4835a50d33313b0382006d9dbf24885e5a0179b6
+#   framework-portduino: NomDeTom/framework-portduino 3eef164d0d7a44a392cabdb6199b5689b6bffef6
+#   LovyanGFX:           NomDeTom/LovyanGFX 2fc7e2b7ca7747d0fe2c775fe588b1787e814285
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - build/native-tft-per-host-spi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4835a50d33313b0382006d9dbf24885e5a0179b6
+          fetch-depth: 1
+
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Build native-tft in armhf Debian trixie
+        run: |
+          docker run --rm --platform linux/arm/v7 \
+            -v "$GITHUB_WORKSPACE":/work -w /work \
+            -e DEBIAN_FRONTEND=noninteractive \
+            debian:trixie bash -euc '
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential ca-certificates git python3 python3-pip python3-venv \
+                pkg-config cmake lsb-release tar gzip openssl \
+                python3-protobuf python3-grpcio \
+                libgpiod-dev libyaml-cpp-dev libjsoncpp-dev libbluetooth-dev \
+                libsdbus-c++-dev libusb-1.0-0-dev libi2c-dev libuv1-dev \
+                libssl-dev libulfius-dev liborcania-dev libavahi-client-dev \
+                libx11-dev libinput-dev libxkbcommon-dev libxkbcommon-x11-dev \
+                libsqlite3-dev libsdl2-dev libcurl4-gnutls-dev libnotify-dev \
+                libbsd-dev libudev-dev
+
+              pip3 install --break-system-packages "platformio==6.1.18"
+              git config --global --add safe.directory /work
+
+              test "$(git rev-parse HEAD)" = "4835a50d33313b0382006d9dbf24885e5a0179b6"
+              grep -q "framework-portduino@https://github.com/NomDeTom/framework-portduino.git#3eef164d0d7a44a392cabdb6199b5689b6bffef6" variants/native/portduino.ini
+              grep -q "LovyanGFX/archive/2fc7e2b7ca7747d0fe2c775fe588b1787e814285.zip" variants/native/portduino.ini
+              grep -q -- "-DLGFX_PORTDUINO_PER_HOST_SPI" variants/native/portduino.ini
+
+              {
+                echo "firmware=4835a50d33313b0382006d9dbf24885e5a0179b6"
+                echo "framework-portduino=3eef164d0d7a44a392cabdb6199b5689b6bffef6"
+                echo "LovyanGFX=2fc7e2b7ca7747d0fe2c775fe588b1787e814285"
+                echo "macro=LGFX_PORTDUINO_PER_HOST_SPI"
+                echo "dlen_patch=applied (ILI9488 board patch, separate from SPI test)"
+              } | tee build-pins.txt
+              git rev-parse HEAD | tee firmware-commit.txt
+
+              # 3.5in ILI9488 needs dlen_16bit=false. This is a board patch, not
+              # part of the per-host SPI change under test.
+              python3 - <<"PY"
+          import re
+          p = "src/graphics/tftSetup.cpp"
+          s = open(p).read()
+          s2 = re.sub(
+              r"portduino_config\.displayPanel == ili9486\s*\|\|\s*portduino_config\.displayPanel == ili9488",
+              "portduino_config.displayPanel == ili9486",
+              s,
+          )
+          if s2 == s:
+              raise SystemExit("dlen patch did not apply")
+          open(p, "w").write(s2)
+          PY
+
+              pio run -e native-tft -j 1
+              pio pkg list -e native-tft | grep -Ei "framework-portduino|LovyanGFX" | tee -a build-pins.txt || true
+            '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshtasticd-armhf-per-host-spi
+          path: |
+            .pio/build/native-tft/meshtasticd
+            firmware-commit.txt
+            build-pins.txt
+          if-no-files-found: error
