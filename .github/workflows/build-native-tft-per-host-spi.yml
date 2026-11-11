@@ -4,10 +4,12 @@ name: build-native-tft-per-host-spi
 # under test; PlatformIO resolves the framework-portduino and LovyanGFX pins
 # already present in variants/native/portduino.ini.
 #
-#   firmware:            #12309 head 4ee69125719f69d060a26fa2079696a4fd644dc0
-#                        merged with #12311 head dee6041e6af1f3dc3ef63883025176a19d139e3c (Display.DataBits)
-#   framework-portduino: NomDeTom/framework-portduino e8ac5f4fc23623740d7883d2224b095608e02462
-#   LovyanGFX:           NomDeTom/LovyanGFX 3b246ff4491242b6f198321fe5101921803fdb99 (portduino-batch-write)
+#   firmware:            #12309 head c2259b4e71c827a7f0b9711254dc7f7b1431c67c (lgfx_borrow_spiclass)
+#                        merged with #12311 head 3fa32a866fb18559d826805407920ee882e47c67 (Display.DataBits)
+#   framework-portduino: NomDeTom/framework-portduino 248677084a8315a37e7762f763283f1dada23298 (#81)
+#   LovyanGFX:           NomDeTom/LovyanGFX 27a3803f838463263cc4c5d415ae3d4a30196ef8 (portduino-batch-borrow:
+#                        batching 3b246ff + the #998 borrow hook)
+#   device-ui:           NomDeTom/device-ui 29dc3ccf94fc3f4836124ea4352c5d973710ad00 (map missing-once)
 
 on:
   workflow_dispatch:
@@ -16,6 +18,7 @@ on:
       - build/native-tft-per-host-spi
       - build/native-tft-per-host-spi-batch
       - build/native-tft-per-host-spi-map-log
+      - build/native-tft-borrow
 
 permissions:
   contents: read
@@ -27,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4ee69125719f69d060a26fa2079696a4fd644dc0
+          ref: c2259b4e71c827a7f0b9711254dc7f7b1431c67c
           fetch-depth: 0
 
       - uses: docker/setup-qemu-action@v3
@@ -53,21 +56,22 @@ jobs:
               pip3 install --break-system-packages "platformio==6.1.18"
               git config --global --add safe.directory /work
 
-              test "$(git rev-parse HEAD)" = "4ee69125719f69d060a26fa2079696a4fd644dc0"
-              git -c user.name=build -c user.email=build@localhost merge --no-edit dee6041e6af1f3dc3ef63883025176a19d139e3c
-              grep -q "framework-portduino@https://github.com/NomDeTom/framework-portduino.git#e8ac5f4fc23623740d7883d2224b095608e02462" variants/native/portduino.ini
-              sed -i "s#LovyanGFX/archive/16ea078853516bcb49cba133fbfa6d7007fa15ef.zip#LovyanGFX/archive/3b246ff4491242b6f198321fe5101921803fdb99.zip#" variants/native/portduino.ini
-              grep -q "LovyanGFX/archive/3b246ff4491242b6f198321fe5101921803fdb99.zip" variants/native/portduino.ini
+              test "$(git rev-parse HEAD)" = "c2259b4e71c827a7f0b9711254dc7f7b1431c67c"
+              git -c user.name=build -c user.email=build@localhost merge --no-edit 3fa32a866fb18559d826805407920ee882e47c67
+              grep -q "framework-portduino@https://github.com/NomDeTom/framework-portduino.git#248677084a8315a37e7762f763283f1dada23298" variants/native/portduino.ini
+              sed -i "s#LovyanGFX/archive/5b13f8d328d5833ba8bcae381e8bc6a5db452703.zip#LovyanGFX/archive/27a3803f838463263cc4c5d415ae3d4a30196ef8.zip#" variants/native/portduino.ini
+              grep -q "LovyanGFX/archive/27a3803f838463263cc4c5d415ae3d4a30196ef8.zip" variants/native/portduino.ini
               sed -i "s#meshtastic/device-ui/archive/a5b80d4d5708d0563ea9e0c0277dc8984e2fb952.zip#NomDeTom/device-ui/archive/29dc3ccf94fc3f4836124ea4352c5d973710ad00.zip#" platformio.ini
               grep -q "NomDeTom/device-ui/archive/29dc3ccf94fc3f4836124ea4352c5d973710ad00.zip" platformio.ini
               grep -q "displayPanelUses16BitData" src/graphics/tftSetup.cpp
+              grep -q "lgfx_borrow_spiclass" src/platform/portduino/PortduinoGlue.cpp
 
               {
-                echo "firmware=#12309 4ee69125719f69d060a26fa2079696a4fd644dc0 + #12311 dee6041e6af1f3dc3ef63883025176a19d139e3c"
-                echo "framework-portduino=e8ac5f4fc23623740d7883d2224b095608e02462"
-                echo "LovyanGFX=3b246ff4491242b6f198321fe5101921803fdb99"
+                echo "firmware=#12309 c2259b4e71c827a7f0b9711254dc7f7b1431c67c + #12311 3fa32a866fb18559d826805407920ee882e47c67"
+                echo "framework-portduino=248677084a8315a37e7762f763283f1dada23298"
+                echo "LovyanGFX=27a3803f838463263cc4c5d415ae3d4a30196ef8"
                 echo "databits=Display.DataBits override available; ILI9488 default 18-bit"
-                echo "lovyangfx_branch=portduino-batch-write"
+                echo "lovyangfx_branch=portduino-batch-borrow (batching + lgfx_borrow_spiclass)"
                 echo "device-ui=29dc3ccf94fc3f4836124ea4352c5d973710ad00 (map missing-once)"
               } | tee build-pins.txt
               git rev-parse HEAD | tee firmware-commit.txt
@@ -78,7 +82,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: meshtasticd-armhf-per-host-spi-map-log
+          name: meshtasticd-armhf-borrow
           path: |
             .pio/build/native-tft/meshtasticd
             firmware-commit.txt
