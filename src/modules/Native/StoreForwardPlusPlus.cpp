@@ -27,7 +27,8 @@ static_assert(sfppframe::kMessageHashBytes == SFPP_HASH_SIZE, "frame and store m
 
 // A follower's chain rows carry the ciphertext but not the plaintext. Decrypt the primary channel's
 // copy and accept it only when it decodes as a text Data.
-static bool decodeStoredText(const uint8_t *encrypted, size_t encryptedLen, uint32_t from, uint32_t id, std::string &out)
+static bool decodeStoredText(const uint8_t *encrypted, size_t encryptedLen, uint32_t to, uint32_t from, uint32_t id,
+                             std::string &out)
 {
     if (encrypted == nullptr || encryptedLen == 0 || encryptedLen > MAX_BLOCKSIZE)
         return false;
@@ -36,16 +37,30 @@ static bool decodeStoredText(const uint8_t *encrypted, size_t encryptedLen, uint
     if (key.length <= 0)
         return false;
 
+    const bool aead = channels.isAEADEnabled(0);
+    size_t plainLen = encryptedLen;
     uint8_t plain[MAX_BLOCKSIZE];
-    memcpy(plain, encrypted, encryptedLen);
+    bool decrypted;
     {
         concurrency::LockGuard g(cryptLock);
-        crypto->setKey(key);
-        crypto->decrypt(from, id, encryptedLen, plain);
+        if (aead) {
+            // The stored AEAD row ends with the 12-byte tag, which is not part of the Data.
+            if (encryptedLen <= CryptoEngine::AEAD_TAG_SIZE)
+                return false;
+            plainLen = encryptedLen - CryptoEngine::AEAD_TAG_SIZE;
+            decrypted = crypto->decryptPacketCCM(key, from, to, id, encryptedLen, encrypted, plain);
+        } else {
+            memcpy(plain, encrypted, encryptedLen);
+            crypto->setKey(key);
+            crypto->decrypt(from, id, encryptedLen, plain);
+            decrypted = true;
+        }
     }
+    if (!decrypted)
+        return false;
 
     meshtastic_Data data;
-    if (!pb_decode_from_bytes(plain, encryptedLen, &meshtastic_Data_msg, &data))
+    if (!pb_decode_from_bytes(plain, plainLen, &meshtastic_Data_msg, &data))
         return false;
     if (data.portnum != meshtastic_PortNum_TEXT_MESSAGE_APP || data.payload.size == 0)
         return false;
@@ -1161,7 +1176,7 @@ void StoreForwardPlusPlusModule::handleLegacyClientHistory(const meshtastic_Mesh
             if (item.payload.empty()) {
                 const uint8_t *encrypted = (const uint8_t *)sqlite3_column_blob(legacyHistoryStmt, 5);
                 const int encryptedLen = sqlite3_column_bytes(legacyHistoryStmt, 5);
-                if (!decodeStoredText(encrypted, (size_t)encryptedLen, item.from, item.id, item.payload))
+                if (!decodeStoredText(encrypted, (size_t)encryptedLen, destination, item.from, item.id, item.payload))
                     continue;
             }
             item.to = requester;
