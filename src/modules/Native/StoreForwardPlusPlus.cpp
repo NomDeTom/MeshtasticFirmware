@@ -11,6 +11,7 @@
 #include "MeshService.h"
 #include "RTC.h"
 #include "SHA256.h"
+#include "SfppFrame.h"
 #include "meshUtils.h"
 #include "modules/RoutingModule.h"
 #if !MESHTASTIC_EXCLUDE_STOREFORWARD
@@ -19,6 +20,8 @@
 
 #include <utility>
 #include <vector>
+
+static_assert(sfppframe::kMessageHashBytes == SFPP_HASH_SIZE, "frame and store message-hash widths must agree");
 
 // The shim speaks the legacy StoreAndForward protobuf, which is not this module's template type,
 // so its packets are built by hand rather than with allocDataProtobuf().
@@ -1903,7 +1906,6 @@ StoreForwardPlusPlusModule::link_object
 StoreForwardPlusPlusModule::ingestTextPacket(const meshtastic_MeshPacket &mp, const meshtastic_MeshPacket *encrypted_meshpacket)
 {
     link_object lo;
-    SHA256 message_hash;
     lo.to = mp.to;
     lo.from = mp.from;
     lo.id = mp.id;
@@ -1913,12 +1915,8 @@ StoreForwardPlusPlusModule::ingestTextPacket(const meshtastic_MeshPacket &mp, co
     lo.encrypted_len = encrypted_meshpacket->encrypted.size;
     lo.payload = std::string((char *)mp.decoded.payload.bytes, mp.decoded.payload.size);
 
-    message_hash.reset();
-    message_hash.update(encrypted_meshpacket->encrypted.bytes, encrypted_meshpacket->encrypted.size);
-    message_hash.update(&mp.to, sizeof(mp.to));
-    message_hash.update(&mp.from, sizeof(mp.from));
-    message_hash.update(&mp.id, sizeof(mp.id));
-    message_hash.finalize(lo.message_hash, SFPP_HASH_SIZE);
+    sfppframe::messageHash(encrypted_meshpacket->encrypted.bytes, encrypted_meshpacket->encrypted.size, mp.to, mp.from, mp.id,
+                           lo.message_hash);
     lo.message_hash_len = SFPP_HASH_SIZE;
 
     lo.root_hash_len = getOrAddRootFromChannelHash(encrypted_meshpacket->channel, lo.root_hash);
@@ -2154,13 +2152,7 @@ void StoreForwardPlusPlusModule::clearChain(uint8_t *root_hash, size_t root_hash
 
 void StoreForwardPlusPlusModule::recalculateMessageHash(link_object &lo)
 {
-    SHA256 message_hash;
-    message_hash.reset();
-    message_hash.update(lo.encrypted_bytes, lo.encrypted_len);
-    message_hash.update(&lo.to, sizeof(lo.to));
-    message_hash.update(&lo.from, sizeof(lo.from));
-    message_hash.update(&lo.id, sizeof(lo.id));
-    message_hash.finalize(lo.message_hash, SFPP_HASH_SIZE);
+    sfppframe::messageHash(lo.encrypted_bytes, lo.encrypted_len, lo.to, lo.from, lo.id, lo.message_hash);
     lo.message_hash_len = SFPP_HASH_SIZE;
 }
 
