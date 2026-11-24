@@ -1751,6 +1751,17 @@ void Router::perhapsHandleReceived(meshtastic_MeshPacket *p)
         return;
     }
 
+#if ARCH_PORTDUINO
+    // Bench only: cut the radio link to a node by dropping every frame it transmitted, before dedup sees it.
+    if (p->transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA &&
+        std::find(portduino_config.bench_drop_relayers.begin(), portduino_config.bench_drop_relayers.end(), p->relay_node) !=
+            portduino_config.bench_drop_relayers.end()) {
+        LOG_DEBUG("Bench drop: frame from 0x%08x relayed by 0x%02x", p->from, p->relay_node);
+        packetPool.release(p);
+        return;
+    }
+#endif
+
     // assert(radioConfig.has_preferences);
     if (is_in_repeated(config.lora.ignore_incoming, p->from)) {
         clearRoutingAuthCache();

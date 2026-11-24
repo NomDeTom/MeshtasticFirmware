@@ -1184,6 +1184,10 @@ bool loadConfig(const char *configPath)
             }
 
             portduino_config.spiSpeed = yamlConfig["Lora"]["spiSpeed"].as<int>(2000000);
+            if (yamlConfig["Lora"]["BenchDropRelayers"]) {
+                for (auto relayer : yamlConfig["Lora"]["BenchDropRelayers"])
+                    portduino_config.bench_drop_relayers.push_back(relayer.as<uint32_t>() & 0xff);
+            }
             portduino_config.lora_usb_serial_num = yamlConfig["Lora"]["USB_Serialnum"].as<std::string>("");
             portduino_config.lora_usb_pid = yamlConfig["Lora"]["USB_PID"].as<int>(0x5512);
             portduino_config.lora_usb_vid = yamlConfig["Lora"]["USB_VID"].as<int>(0x1A86);

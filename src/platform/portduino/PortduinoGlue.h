@@ -354,9 +354,10 @@ extern struct portduino_config_struct {
     uint32_t sfpp_max_chain = 1000;
     uint32_t sfpp_backlog_limit = 100;
     sfpp_repair_mode sfpp_repair = SFPP_REPAIR_CHAIN;
-    uint32_t sfpp_enum_interval = 60;    // minutes between advert ticks, enum only
-    uint32_t sfpp_enum_drain_ms = 20000; // milliseconds between queued item frames, enum only
-    uint32_t sfpp_scratch_sweep = 5;     // minutes between writer-missed scratch sweeps, enum only
+    uint32_t sfpp_enum_interval = 60;              // minutes between advert ticks, enum only
+    uint32_t sfpp_enum_drain_ms = 20000;           // milliseconds between queued item frames, enum only
+    uint32_t sfpp_scratch_sweep = 5;               // minutes between writer-missed scratch sweeps, enum only
+    std::vector<uint8_t> bench_drop_relayers = {}; // bench only: relay_node bytes whose LoRa frames are dropped on receive
     sfpp_item_transport sfpp_item_transport = SFPP_ITEM_BROADCAST;
     bool sfpp_enum_listen_only = false;
     // allowed root hashes
