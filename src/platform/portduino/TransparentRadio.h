@@ -58,7 +58,9 @@ class TransparentRadio : public RadioInterface, protected concurrency::OSThread
     static constexpr uint32_t REFUSED_RETRY_MS = 5 * 60 * 1000;      // each push rewrites the device's flash
     static constexpr uint32_t HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // the device drops an API client silent for 15 minutes
     static constexpr uint32_t PARTIAL_FRAME_TIMEOUT_MS = 200;        // the longest frame takes 45 ms at 115200 baud
-    static constexpr uint32_t REVALIDATE_INTERVAL_MS = 60 * 1000;    // finds a device that reset without saying so
+    static constexpr uint32_t REVALIDATE_INTERVAL_MS = HEARTBEAT_INTERVAL_MS; // backstop for a reset that printed nothing
+    static constexpr uint32_t STRAY_TEXT_BYTES = 64;      // plain text on a Ready serial link: the device has rebooted
+    static constexpr uint32_t STRAY_TEXT_QUIET_MS = 2000; // let a `rebooted` frame that follows the boot text win
     static constexpr size_t FRAME_HEADER_LEN = 4;
 
     void setState(State next);
@@ -113,7 +115,9 @@ class TransparentRadio : public RadioInterface, protected concurrency::OSThread
 
     uint8_t rxBuf[FRAME_HEADER_LEN + MAX_TO_FROM_RADIO_SIZE];
     size_t rxPtr = 0;
-    uint32_t lastRxMs = 0; // when the last byte was read
+    uint32_t lastRxMs = 0;   // when the last byte was read
+    uint32_t strayBytes = 0; // plain-text bytes since the last decoded frame, while Ready
+    uint32_t strayAtMs = 0;  // when the last one arrived
     uint8_t txFrame[FRAME_HEADER_LEN + MAX_TO_FROM_RADIO_SIZE];
     meshtastic_FromRadio fromRadio = meshtastic_FromRadio_init_zero;
     meshtastic_ToRadio toRadio = meshtastic_ToRadio_init_zero;

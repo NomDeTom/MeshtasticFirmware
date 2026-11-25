@@ -42,8 +42,8 @@
 #include "mesh/NodeDB.h"
 #include "mesh/Router.h"
 #include "support/MockMeshService.h"
-#include <cstring>
 #include <algorithm>
+#include <cstring>
 #include <deque>
 #include <pb_decode.h>
 #include <pb_encode.h>
@@ -884,6 +884,33 @@ void test_boot_text_before_rebooted_still_restarts_the_handshake(void)
     TEST_ASSERT_EQUAL(meshtastic_ToRadio_want_config_id_tag, sent[0].which_payload_variant);
 }
 
+// A USB-UART device that resets keeps the port open and may never send `rebooted`; its boot log is plain text, which an
+// API client never otherwise sees. After a quiet spell the radio checks the device instead of waiting for the interval.
+void test_plain_text_on_a_ready_link_starts_a_config_check(void)
+{
+    bringReady();
+    deviceSendsText(BOOT_ROM_TEXT);
+    radio->runOnce();
+    TEST_ASSERT_EQUAL_MESSAGE(0, takeToRadio().size(), "wait for the line to go quiet first");
+    Time::advanceTestMillis(2000);
+    radio->runOnce();
+    std::vector<meshtastic_ToRadio> sent = takeToRadio();
+    TEST_ASSERT_EQUAL(1, sent.size());
+    TEST_ASSERT_EQUAL(meshtastic_ToRadio_want_config_id_tag, sent[0].which_payload_variant);
+    TEST_ASSERT_EQUAL_UINT32(SPECIAL_NONCE_ONLY_CONFIG, sent[0].want_config_id);
+}
+
+// The trigger needs a whole boot log, not a stray byte or two of line noise.
+void test_a_few_stray_bytes_do_not_start_a_config_check(void)
+{
+    bringReady();
+    deviceSendsText("\r\nok\r\n");
+    radio->runOnce();
+    Time::advanceTestMillis(2000);
+    radio->runOnce();
+    TEST_ASSERT_EQUAL(0, takeToRadio().size());
+}
+
 // A reset can cut a frame the device was sending. The bytes after it (boot text, then `rebooted`) belong to the
 // rebooted device, not to the cut frame's remaining length.
 void test_reset_in_the_middle_of_a_frame_still_restarts_the_handshake(void)
@@ -904,7 +931,7 @@ void test_reset_in_the_middle_of_a_frame_still_restarts_the_handshake(void)
     TEST_ASSERT_EQUAL(meshtastic_ToRadio_want_config_id_tag, sent[0].which_payload_variant);
 }
 
-static constexpr uint32_t CONFIG_CHECK_MS = 60 * 1000;
+static constexpr uint32_t CONFIG_CHECK_MS = 5 * 60 * 1000;
 static constexpr NodeNum SWAPPED_NODE = 0x0E0E0E0E;
 
 /// Ready, then the interval passes: the radio asks for the device's config again and stays Ready meanwhile.
@@ -1061,7 +1088,7 @@ void test_an_empty_poll_then_a_host_stall_never_cuts_a_frame(void)
     linkReceives(f, 0, f.size() / 2);
     radio->runOnce();
     Time::advanceTestMillis(10);
-    radio->runOnce(); // empty, well inside the timeout
+    radio->runOnce();             // empty, well inside the timeout
     Time::advanceTestMillis(300); // no poll meanwhile, the rest arrives
     linkReceives(f, f.size() / 2, f.size());
     radio->runOnce();
@@ -1159,6 +1186,8 @@ void setup()
     RUN_TEST(test_device_reboot_restarts_the_handshake);
     RUN_TEST(test_boot_text_before_rebooted_still_restarts_the_handshake);
     RUN_TEST(test_reset_in_the_middle_of_a_frame_still_restarts_the_handshake);
+    RUN_TEST(test_plain_text_on_a_ready_link_starts_a_config_check);
+    RUN_TEST(test_a_few_stray_bytes_do_not_start_a_config_check);
     RUN_TEST(test_a_silent_reboot_is_found_by_the_config_check_and_handshaked_again);
     RUN_TEST(test_a_swapped_device_is_found_by_the_config_check_and_handshaked_again);
     RUN_TEST(test_a_config_check_of_the_same_device_stays_ready_and_repeats);
