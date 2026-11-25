@@ -57,10 +57,15 @@ class TransparentRadio : public RadioInterface, protected concurrency::OSThread
     static constexpr uint32_t HANDSHAKE_TIMEOUT_MS = 15000;
     static constexpr uint32_t REFUSED_RETRY_MS = 5 * 60 * 1000;      // each push rewrites the device's flash
     static constexpr uint32_t HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // the device drops an API client silent for 15 minutes
+    static constexpr uint32_t PARTIAL_FRAME_TIMEOUT_MS = 200;        // the longest frame takes 45 ms at 115200 baud
+    static constexpr uint32_t REVALIDATE_INTERVAL_MS = 60 * 1000;    // finds a device that reset without saying so
     static constexpr size_t FRAME_HEADER_LEN = 4;
 
     void setState(State next);
     void startHandshake();
+    void beginHandshake();
+    void askForConfig();
+    void revalidate();
     void linkLost();
     bool pumpRx();
     void parseByte(uint8_t c);
@@ -95,6 +100,8 @@ class TransparentRadio : public RadioInterface, protected concurrency::OSThread
     uint32_t lastWriteMs = 0;
 
     NodeNum deviceNodeNum = 0;
+    uint32_t deviceRebootCount = 0; // MyNodeInfo.reboot_count at the handshake
+    bool revalidating = false;      // a config check is out, still Ready
     bool deviceFirmwareTooOld = false;
     bool deviceLocked = false;
     bool haveDeviceLora = false;
@@ -106,6 +113,7 @@ class TransparentRadio : public RadioInterface, protected concurrency::OSThread
 
     uint8_t rxBuf[FRAME_HEADER_LEN + MAX_TO_FROM_RADIO_SIZE];
     size_t rxPtr = 0;
+    uint32_t lastRxMs = 0; // when the last byte was read
     uint8_t txFrame[FRAME_HEADER_LEN + MAX_TO_FROM_RADIO_SIZE];
     meshtastic_FromRadio fromRadio = meshtastic_FromRadio_init_zero;
     meshtastic_ToRadio toRadio = meshtastic_ToRadio_init_zero;
