@@ -1,4 +1,4 @@
-name: build-sfpp-enum-bench8
+name: build-sfpp-enum-bench9
 
 # Bench build branch, never merged: sfpp-enum 2e9a83f75 (8h + BenchDropRelayers + SketchCapacity bench hooks) + #12299 (transparent-mode radio) as headless `native`
 # meshtasticd for the Lyras (armhf, Debian trixie) and the Pi (arm64, Debian trixie).
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - build/sfpp-enum-bench8
+      - build/sfpp-enum-bench9
 
 permissions:
   contents: read
@@ -65,7 +65,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: meshtasticd-sfpp-enum-bench8-${{ matrix.arch }}
+          name: meshtasticd-sfpp-enum-bench9-${{ matrix.arch }}
           path: |
             .pio/build/native/meshtasticd
             firmware-commit.txt
