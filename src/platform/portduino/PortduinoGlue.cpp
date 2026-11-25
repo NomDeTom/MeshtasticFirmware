@@ -1625,6 +1625,8 @@ bool loadConfig(const char *configPath)
             if (portduino_config.sfpp_enum_drain_ms < 100)
                 portduino_config.sfpp_enum_drain_ms = 100;
             portduino_config.sfpp_scratch_sweep = (yamlConfig["StoreAndForward"]["ScratchSweep"]).as<uint32_t>(5);
+            portduino_config.sfpp_sketch_capacity =
+                std::min<uint32_t>(32, std::max<uint32_t>(1, (yamlConfig["StoreAndForward"]["SketchCapacity"]).as<uint32_t>(4)));
             if (portduino_config.sfpp_scratch_sweep < 1)
                 portduino_config.sfpp_scratch_sweep = 1;
             std::string itemTransport = (yamlConfig["StoreAndForward"]["EnumItemTransport"]).as<std::string>("broadcast");

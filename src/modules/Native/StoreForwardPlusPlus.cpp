@@ -3117,7 +3117,7 @@ void StoreForwardPlusPlusModule::advertiseOneBucket(uint8_t *root_hash, size_t r
             return;
     }
 
-    sfppsr::BucketSummary summary(4);
+    sfppsr::BucketSummary summary(portduino_config.sfpp_sketch_capacity);
     if (!buildBucketSummary(root_hash, root_hash_len, bucket, summary) || summary.count() == 0)
         return;
 
@@ -3193,7 +3193,8 @@ void StoreForwardPlusPlusModule::handleEnumAdvert(const meshtastic_MeshPacket &m
 
     // The receiver of a mismatching advert always pulls. An empty local bucket is count 0 and
     // checksum 0, so it mismatches a non-empty peer and pulls too.
-    sfppsr::BucketSummary local(4);
+    // Match the advert's sketch capacity, or the merge in trySketchExchange cannot decode.
+    sfppsr::BucketSummary local(advert.sketch.capacity() ? advert.sketch.capacity() : 4);
     buildBucketSummary(root, SFPP_HASH_SIZE, advert.scope.bucket, local);
     const bool namedMismatch = !(local.count() == advert.count && local.checksum() == advert.checksum);
     const uint32_t knownTip = ownTip > enumKnownTip ? ownTip : enumKnownTip;
