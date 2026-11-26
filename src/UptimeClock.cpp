@@ -20,11 +20,13 @@ uint32_t Time::getMillis()
         return Time::testNowMs.load(std::memory_order_relaxed);
 #endif
 #if ARCH_PORTDUINO
-    // Linux millis() follows the wall clock, so an NTP or `date` step moved uptime by years; this one cannot.
+    // Linux millis() follows the wall clock, which NTP or `date` can step; advance monotonically from millis()'s
+    // value at first use, so the two agree until a step and callers that still mix them stay consistent.
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    static const uint64_t startMs = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-    return (uint32_t)((uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000 - startMs);
+    const uint64_t monoMs = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    static const uint64_t offset = monoMs - (uint64_t)millis();
+    return (uint32_t)(monoMs - offset);
 #else
     return millis();
 #endif
