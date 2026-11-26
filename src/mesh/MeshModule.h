@@ -77,8 +77,10 @@ class MeshModule
     /** For use only by MeshService
      * @param encrypted the still-encrypted copy of mp, published to modules as currentEncrypted
      *                  for the duration of this dispatch only. NULL when unavailable.
+     * The packet is const: modules must not rewrite a packet, so a relay can forward it as received.
+     * TraceRouteModule::updateRoute() is the one exception, called by the Router before dispatch.
      */
-    static void callModules(meshtastic_MeshPacket &mp, RxSource src = RX_SRC_RADIO,
+    static void callModules(const meshtastic_MeshPacket &mp, RxSource src = RX_SRC_RADIO,
                             const meshtastic_MeshPacket *encrypted = NULL);
 
     static std::vector<MeshModule *> GetMeshModulesWithUIFrames(int startIndex);
@@ -182,11 +184,6 @@ class MeshModule
     it
     */
     virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) { return ProcessMessage::CONTINUE; }
-
-    /** Called to change a particular incoming message
-        This allows the module to change the message before it is passed through the rest of the call-chain.
-    */
-    virtual void alterReceived(meshtastic_MeshPacket &mp) {}
 
     /** Messages can be received that have the want_response bit set.  If set, this callback will be invoked
      * so that subclasses can (optionally) send a response back to the original sender.
