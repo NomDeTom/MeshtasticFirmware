@@ -1,0 +1,73 @@
+name: build-sfpp-bench14
+
+# Bench build branch, never merged: sfpp-chain-on-g19 048caf385 (leaderless: authority + Stratum0 removed, listing fix, convergence tests, G3 pacing, bucketOf cleanup) as headless `native`; both arches on the arm64 runner, no QEMU (armhf ~9 min)
+# meshtasticd for the Lyras (armhf, Debian trixie) and the Pi (arm64, Debian trixie).
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - build/sfpp-bench14
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: armhf
+            platform: linux/arm/v7
+            runner: ubuntu-24.04-arm
+            qemu: false
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            qemu: false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.qemu
+
+      - name: Build native in ${{ matrix.arch }} Debian trixie
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "$GITHUB_WORKSPACE":/work -w /work \
+            -e DEBIAN_FRONTEND=noninteractive \
+            debian:trixie bash -euc '
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential ca-certificates git python3 python3-pip python3-venv \
+                pkg-config cmake lsb-release tar gzip openssl \
+                python3-protobuf python3-grpcio \
+                libgpiod-dev libyaml-cpp-dev libjsoncpp-dev libbluetooth-dev \
+                libsdbus-c++-dev libusb-1.0-0-dev libi2c-dev libuv1-dev \
+                libssl-dev libulfius-dev liborcania-dev libavahi-client-dev \
+                libx11-dev libinput-dev libxkbcommon-dev libxkbcommon-x11-dev \
+                libsqlite3-dev libsdl2-dev libcurl4-gnutls-dev libnotify-dev \
+                libbsd-dev libudev-dev
+
+              pip3 install --break-system-packages "platformio==6.1.18"
+              git config --global --add safe.directory "*"
+              git rev-parse HEAD | tee firmware-commit.txt
+
+              pio run -e native -j 2
+              nm -C .pio/build/native/meshtasticd | grep -c -E "StoreForwardPlusPlusModule::|TransparentRadio::" | tee symbol-count.txt
+            '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshtasticd-sfpp-bench14-${{ matrix.arch }}
+          path: |
+            .pio/build/native/meshtasticd
+            firmware-commit.txt
+            symbol-count.txt
+          if-no-files-found: error
