@@ -495,7 +495,7 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
     // Window and cursor are applied per row after ageing, because the two bases cannot be compared raw.
     sqlite3_prepare_v2(ppDb,
                        "select sender, packet_id, destination, rx_time, payload, encrypted_bytes, time_basis, boot_id, "
-                       "age_margin from channel_messages where substr(root_hash,1,?)=? and sender!=? "
+                       "age_margin, rowid from channel_messages where substr(root_hash,1,?)=? and sender!=? "
                        "and (destination=? or destination=?) order by rowid asc;",
                        -1, &legacyHistoryStmt, NULL);
 
@@ -763,6 +763,10 @@ uint32_t StoreForwardPlusPlusModule::estimateEpochNow() const
     const uint32_t proper = getValidTime(RTCQualityNTP, true);
     if (proper)
         return proper;
+    // Mesh/device time may age an existing epoch but never stamps a new row.
+    const uint32_t rough = getValidTime(RTCQualityDevice, true);
+    if (rough)
+        return rough;
     const uint32_t nowUptime = Time::getUptimeSecs();
     if (bootEpoch > 0)
         return bootEpoch + nowUptime;
@@ -1803,6 +1807,8 @@ void StoreForwardPlusPlusModule::handleLegacyClientHistory(const meshtastic_Mesh
 {
     constexpr uint32_t retentionS = 48 * 60 * 60; // D7
     constexpr uint32_t pageMax = 50;
+    // A row with no epoch cannot advance an epoch cursor, so page those by rowid with a tagged cursor.
+    constexpr uint32_t kRowidCursorBase = 0xF0000000;
 
     if (req->rr != meshtastic_StoreAndForward_RequestResponse_CLIENT_HISTORY)
         return;
@@ -1826,6 +1832,8 @@ void StoreForwardPlusPlusModule::handleLegacyClientHistory(const meshtastic_Mesh
     uint32_t cursor = 0;
     if (req->which_variant == meshtastic_StoreAndForward_history_tag)
         cursor = req->variant.history.last_request;
+    const bool rowidCursor = cursor >= kRowidCursorBase;
+    const uint32_t cursorRowid = rowidCursor ? cursor - kRowidCursorBase : 0;
     uint32_t lastServedRxTime = cursor;
     uint32_t count = 0;
 
@@ -1833,7 +1841,7 @@ void StoreForwardPlusPlusModule::handleLegacyClientHistory(const meshtastic_Mesh
         legacy_history_item item;
         uint32_t destination;
         uint32_t display;
-        uint32_t order;
+        sqlite3_int64 rowid;
     };
     std::vector<Candidate> page;
 
@@ -1846,7 +1854,6 @@ void StoreForwardPlusPlusModule::handleLegacyClientHistory(const meshtastic_Mesh
         sqlite3_bind_int64(legacyHistoryStmt, 4, (sqlite3_int64)NODENUM_BROADCAST);
         sqlite3_bind_int64(legacyHistoryStmt, 5, (sqlite3_int64)requester);
 
-        uint32_t order = 0;
         while (sqlite3_step(legacyHistoryStmt) == SQLITE_ROW) {
             RowTime stamp;
             stamp.stamp = (uint32_t)sqlite3_column_int64(legacyHistoryStmt, 3);
@@ -1862,9 +1869,13 @@ void StoreForwardPlusPlusModule::handleLegacyClientHistory(const meshtastic_Mesh
             candidate.item.id = (PacketId)sqlite3_column_int64(legacyHistoryStmt, 1);
             candidate.destination = (uint32_t)sqlite3_column_int64(legacyHistoryStmt, 2);
             candidate.display = age.has_epoch ? age.epoch : age.estimate_epoch;
-            candidate.order = order++;
-            if (cursor > 0 && candidate.display <= cursor)
+            candidate.rowid = sqlite3_column_int64(legacyHistoryStmt, 9);
+            if (rowidCursor) {
+                if (candidate.rowid <= (sqlite3_int64)cursorRowid)
+                    continue;
+            } else if (cursor > 0 && candidate.display <= cursor) {
                 continue;
+            }
             const unsigned char *text = sqlite3_column_text(legacyHistoryStmt, 4);
             if (text)
                 candidate.item.payload.assign((const char *)text, sqlite3_column_bytes(legacyHistoryStmt, 4));
@@ -1885,17 +1896,31 @@ void StoreForwardPlusPlusModule::handleLegacyClientHistory(const meshtastic_Mesh
     }
 
     std::stable_sort(page.begin(), page.end(), [](const Candidate &a, const Candidate &b) { return a.display < b.display; });
+    bool servedEpoch = false;
+    uint32_t maxDisplay = 0;
+    uint32_t maxRowid = 0;
     for (auto &candidate : page) {
         if (count >= pageMax)
             break;
         legacy_history_item item = std::move(candidate.item);
         item.rx_time = candidate.display;
-        if (item.rx_time > lastServedRxTime)
-            lastServedRxTime = item.rx_time;
+        if (candidate.display > 0) {
+            servedEpoch = true;
+            if (candidate.display > maxDisplay)
+                maxDisplay = candidate.display;
+        }
+        if ((uint32_t)candidate.rowid > maxRowid)
+            maxRowid = (uint32_t)candidate.rowid;
         item.to = requester;
         item.broadcast = candidate.destination == NODENUM_BROADCAST;
         legacyHistory.push_back(std::move(item));
         count++;
+    }
+    if (count > 0) {
+        if (servedEpoch)
+            lastServedRxTime = maxDisplay;
+        else
+            lastServedRxTime = kRowidCursorBase + maxRowid;
     }
 
     meshtastic_StoreAndForward response = meshtastic_StoreAndForward_init_zero;
@@ -2716,11 +2741,17 @@ StoreForwardPlusPlusModule::ingestTextPacket(const meshtastic_MeshPacket &mp, co
     lo.to = mp.to;
     lo.from = mp.from;
     lo.id = mp.id;
-    const RowTime live = nowTime();
-    lo.rx_time = live.stamp;
-    lo.time_basis = live.basis;
-    lo.boot_id = live.boot_id;
-    lo.age_margin = live.margin;
+    // Keep the age the packet arrived with; a live packet is normally zero, but a replay or a
+    // queued API packet can be older. rx_time is never trusted when it points into the future.
+    RowTime live = nowTime();
+    RowTime stamped;
+    const uint32_t heardAgo = (mp.rx_time != 0 && mp.rx_time <= live.stamp) ? live.stamp - mp.rx_time : 0;
+    if (!timeFromAge(heardAgo, stamped))
+        stamped = live;
+    lo.rx_time = stamped.stamp;
+    lo.time_basis = stamped.basis;
+    lo.boot_id = stamped.boot_id;
+    lo.age_margin = stamped.margin;
     lo.channel_hash = encrypted_meshpacket->channel;
     memcpy(lo.encrypted_bytes, encrypted_meshpacket->encrypted.bytes, encrypted_meshpacket->encrypted.size);
     lo.encrypted_len = encrypted_meshpacket->encrypted.size;
