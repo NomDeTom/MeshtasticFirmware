@@ -67,6 +67,13 @@ static constexpr uint8_t kServeWindowFrames = 30;
 // D7's retention applies to canon rows as well as to the legacy read window.
 static constexpr uint32_t kRetentionS = 48 * 60 * 60;
 
+// G19: a proper clock is NTP or better. Without one, a row's age carries an uncertainty at the newest
+// end; an unknown reboot gap widens it to the retention horizon, past which the row is already gone.
+static constexpr uint32_t kTimeMarginS = 300;
+static constexpr uint8_t kTimeBasisEpoch = 0;
+static constexpr uint8_t kTimeBasisUptime = 1;
+static constexpr uint8_t kTimeBasisAge = 2;
+
 // D19 proposes W = 24 h as the service window; unconfirmed, so holes past it are accepted as lost.
 static constexpr uint32_t kServiceWindowMs = 24 * 60 * 60 * 1000;
 // Failed pulls back off, and the backoff and attempt count cap a busy advert stream's retry cost.
@@ -294,6 +301,9 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
         counter INT DEFAULT 0,         \
         short_id INT,                  \
         checksum INT,                  \
+        time_basis INT NOT NULL DEFAULT 0, \
+        boot_id INT NOT NULL DEFAULT 0,    \
+        age_margin INT NOT NULL DEFAULT 0, \
         PRIMARY KEY (message_hash)     \
         );",
                        NULL, NULL, &err);
@@ -315,6 +325,9 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
         encrypted_bytes BLOB NOT NULL, \
         message_hash BLOB NOT NULL,    \
         payload TEXT,                  \
+        time_basis INT NOT NULL DEFAULT 0, \
+        boot_id INT NOT NULL DEFAULT 0,    \
+        age_margin INT NOT NULL DEFAULT 0, \
         PRIMARY KEY (message_hash)     \
         );",
                        NULL, NULL, &err);
@@ -338,6 +351,9 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
         encrypted_bytes BLOB NOT NULL, \
         message_hash BLOB NOT NULL,    \
         payload TEXT,                  \
+        time_basis INT NOT NULL DEFAULT 0, \
+        boot_id INT NOT NULL DEFAULT 0,    \
+        age_margin INT NOT NULL DEFAULT 0, \
         PRIMARY KEY (message_hash)     \
         );",
                        NULL, NULL, &err);
@@ -366,6 +382,9 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
         commit_hash BLOB NOT NULL,     \
         payload TEXT,                  \
         counter INT NOT NULL,          \
+        time_basis INT NOT NULL DEFAULT 0, \
+        boot_id INT NOT NULL DEFAULT 0,    \
+        age_margin INT NOT NULL DEFAULT 0, \
         PRIMARY KEY (message_hash)     \
         );",
                        NULL, NULL, &err);
@@ -419,12 +438,31 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
         LOG_ERROR("%s", err);
     sqlite3_free(err);
 
+    // One row of time state: the boot in progress and the last uptime/epoch seen in it, so a restart
+    // can age a previous boot's rows and add the downtime when both ends had a proper clock.
+    res = sqlite3_exec(ppDb, "         \
+        CREATE TABLE IF NOT EXISTS     \
+        time_state(                    \
+        id INT PRIMARY KEY,            \
+        boot_id INT NOT NULL DEFAULT 0,    \
+        boot_epoch INT NOT NULL DEFAULT 0, \
+        last_uptime INT NOT NULL DEFAULT 0,\
+        last_epoch INT NOT NULL DEFAULT 0  \
+        );",
+                       NULL, NULL, &err);
+    if (res != SQLITE_OK) {
+        LOG_ERROR("Failed to create table: %s", sqlite3_errmsg(ppDb));
+    }
+    if (err != nullptr)
+        LOG_ERROR("%s", err);
+    sqlite3_free(err);
+
     sqlite3_exec(ppDb, ("PRAGMA user_version = " + std::to_string(kSchemaVersion) + ";").c_str(), NULL, NULL, NULL);
 
     // prepared statements *should* make this faster.
     sqlite3_prepare_v2(ppDb, "INSERT INTO channel_messages (destination, sender, packet_id, root_hash, \
-        encrypted_bytes, message_hash, rx_time, commit_hash, payload, counter, short_id, checksum) \
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        encrypted_bytes, message_hash, rx_time, commit_hash, payload, counter, short_id, checksum, \
+        time_basis, boot_id, age_margin) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                        -1, &chain_insert_stmt, NULL);
 
     // Both identifiers are stored beside the object, so summarising a bucket never rehashes and a
@@ -446,29 +484,34 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
         where substr(root_hash,1,?)=? and counter>=? and counter<=? and short_id is not null order by counter;",
                        -1, &bucketIdsStmt, NULL);
 
-    sqlite3_prepare_v2(ppDb, "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, counter \
-        from channel_messages where substr(root_hash,1,?)=? and counter>=? and counter<=? and short_id=?;",
+    sqlite3_prepare_v2(ppDb, "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, counter, \
+        time_basis, boot_id, age_margin from channel_messages \
+        where substr(root_hash,1,?)=? and counter>=? and counter<=? and short_id=?;",
                        -1, &getLinkByShortIdStmt, NULL);
 
     sqlite3_prepare_v2(ppDb, "delete from channel_messages where message_hash=?;", -1, &deleteCanonStmt, NULL);
 
     // Legacy CLIENT_HISTORY reads the stored plaintext, or the ciphertext a follower holds instead.
-    sqlite3_prepare_v2(ppDb, "select sender, packet_id, destination, rx_time, payload, encrypted_bytes from channel_messages \
-        where substr(root_hash,1,?)=? and rx_time>=? and rx_time>? and sender!=? \
-        and (destination=? or destination=?) order by rx_time asc limit ?;",
+    // Window and cursor are applied per row after ageing, because the two bases cannot be compared raw.
+    sqlite3_prepare_v2(ppDb,
+                       "select sender, packet_id, destination, rx_time, payload, encrypted_bytes, time_basis, boot_id, "
+                       "age_margin from channel_messages where substr(root_hash,1,?)=? and sender!=? "
+                       "and (destination=? or destination=?) order by rowid asc;",
                        -1, &legacyHistoryStmt, NULL);
 
     sqlite3_prepare_v2(ppDb, "INSERT INTO local_messages (destination, sender, packet_id, root_hash, \
-        encrypted_bytes, message_hash, rx_time, payload) VALUES(?, ?, ?, ?, ?, ?, ?, ?);",
+        encrypted_bytes, message_hash, rx_time, payload, time_basis, boot_id, age_margin) \
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                        -1, &scratch_insert_stmt, NULL);
 
-    sqlite3_prepare_v2(ppDb, "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, root_hash \
-        from local_messages where root_hash=? order by rx_time asc;", // earliest first
+    sqlite3_prepare_v2(ppDb, "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, root_hash, \
+        time_basis, boot_id, age_margin from local_messages where root_hash=? order by rx_time asc;", // earliest first
                        -1, &fromScratchStmt, NULL);
 
     sqlite3_prepare_v2(ppDb,
-                       "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, root_hash, payload \
-        from local_messages where substr(message_hash,1,?)=? order by rx_time asc LIMIT 1;", // earliest first
+                       "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, root_hash, payload, \
+        time_basis, boot_id, age_margin from local_messages \
+        where substr(message_hash,1,?)=? order by rx_time asc LIMIT 1;", // earliest first
                        -1, &fromScratchByHashStmt, NULL);
 
     sqlite3_prepare_v2(ppDb, "SELECT COUNT(*) from channel_messages where substr(message_hash,1,?)=?", -1, &checkDupMessageHash,
@@ -494,14 +537,14 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
 
     sqlite3_prepare_v2(
         ppDb,
-        "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, commit_hash, root_hash, counter, payload \
-        from channel_messages where substr(commit_hash,1,?)=?;",
+        "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, commit_hash, root_hash, counter, payload, \
+        time_basis, boot_id, age_margin from channel_messages where substr(commit_hash,1,?)=?;",
         -1, &getLinkStmt, NULL);
 
     sqlite3_prepare_v2(
         ppDb,
-        "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, commit_hash, root_hash, counter, payload \
-        from channel_messages where substr(message_hash,1,?)=?;",
+        "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, commit_hash, root_hash, counter, payload, \
+        time_basis, boot_id, age_margin from channel_messages where substr(message_hash,1,?)=?;",
         -1, &getLinkFromMessageHashStmt, NULL);
 
     sqlite3_prepare_v2(ppDb, "select identifier from mappings where substr(root_hash,1,?)=?;", -1, &getHashFromRootStmt, NULL);
@@ -522,15 +565,22 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
     sqlite3_prepare_v2(ppDb, "SELECT count(*) FROM canon_scratch WHERE substr(root_hash,1,?)=?;", -1,
                        &getRootCanonScratchCountStmt, NULL);
 
-    sqlite3_prepare_v2(ppDb, "DELETE FROM local_messages WHERE rx_time < ?;", -1, &pruneScratchQueueStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "select rowid, rx_time, time_basis, boot_id, age_margin from local_messages;", -1,
+                       &scratchTimeRowsStmt, NULL);
+
+    sqlite3_prepare_v2(ppDb, "DELETE FROM local_messages WHERE rowid=?;", -1, &deleteScratchRowidStmt, NULL);
 
     sqlite3_prepare_v2(ppDb,
                        "DELETE FROM channel_messages WHERE commit_hash in ( select commit_hash from channel_messages where "
                        "substr(root_hash,1,?)=? ORDER BY rowid ASC LIMIT 1);",
                        -1, &trimOldestLinkStmt, NULL);
 
-    sqlite3_prepare_v2(ppDb, "DELETE FROM channel_messages WHERE substr(root_hash,1,?)=? AND rx_time < ?;", -1,
-                       &trimOldByTimeStmt, NULL);
+    sqlite3_prepare_v2(ppDb,
+                       "select rowid, rx_time, time_basis, boot_id, age_margin from channel_messages "
+                       "where substr(root_hash,1,?)=?;",
+                       -1, &canonTimeRowsStmt, NULL);
+
+    sqlite3_prepare_v2(ppDb, "DELETE FROM channel_messages WHERE rowid=?;", -1, &deleteCanonRowidStmt, NULL);
 
     sqlite3_prepare_v2(ppDb,
                        "INSERT INTO peers (nodenum, total_count, average_hops) VALUES(?, ?, ?) ON CONFLICT(nodenum) DO NOTHING;",
@@ -549,7 +599,8 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
     sqlite3_prepare_v2(ppDb, "DELETE FROM channel_messages WHERE substr(root_hash,1,?)=?;", -1, &clearChainStmt, NULL);
 
     sqlite3_prepare_v2(ppDb, "INSERT INTO canon_scratch (destination, sender, packet_id, root_hash, \
-        encrypted_bytes, message_hash, rx_time, commit_hash, payload, counter) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        encrypted_bytes, message_hash, rx_time, commit_hash, payload, counter, time_basis, boot_id, age_margin) \
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                        -1, &canon_scratch_insert_stmt, NULL);
 
     sqlite3_prepare_v2(ppDb, "SELECT count(*) FROM canon_scratch WHERE substr(message_hash,1,?)=?;", -1,
@@ -557,8 +608,8 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
 
     sqlite3_prepare_v2(
         ppDb,
-        "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, commit_hash, root_hash, counter, payload \
-        from canon_scratch where substr(root_hash,1,?)=? ORDER BY counter ASC;",
+        "select destination, sender, packet_id, encrypted_bytes, message_hash, rx_time, commit_hash, root_hash, counter, payload, \
+        time_basis, boot_id, age_margin from canon_scratch where substr(root_hash,1,?)=? ORDER BY counter ASC;",
         -1, &getCanonScratchStmt, NULL);
 
     sqlite3_prepare_v2(ppDb, "DELETE from canon_scratch where substr(message_hash,1,?)=?", -1, &removeCanonScratch, NULL);
@@ -566,8 +617,33 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
     sqlite3_prepare_v2(ppDb, "DELETE from canon_scratch where substr(root_hash,1,?)=? AND counter < ?;", -1,
                        &clearCanonScratchStmt, NULL);
 
+    sqlite3_prepare_v2(ppDb, "select boot_id, last_uptime, last_epoch from time_state where id=1;", -1, &timeStateReadStmt, NULL);
+    sqlite3_prepare_v2(ppDb,
+                       "INSERT OR REPLACE INTO time_state (id, boot_id, boot_epoch, last_uptime, last_epoch) "
+                       "VALUES(1, ?, ?, ?, ?);",
+                       -1, &timeStateWriteStmt, NULL);
+
+    sqlite3_prepare_v2(ppDb, "select rowid, rx_time, time_basis, boot_id, age_margin from channel_messages;", -1,
+                       &restampChannelStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "select rowid, rx_time, time_basis, boot_id, age_margin from local_messages;", -1,
+                       &restampScratchStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "select rowid, rx_time, time_basis, boot_id, age_margin from canon_scratch;", -1,
+                       &restampCanonScratchStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "select rowid, rx_time, time_basis, boot_id, age_margin from direct_messages;", -1,
+                       &restampDirectStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "update channel_messages set rx_time=?, time_basis=?, boot_id=?, age_margin=? where rowid=?;", -1,
+                       &updateChannelTimeStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "update local_messages set rx_time=?, time_basis=?, boot_id=?, age_margin=? where rowid=?;", -1,
+                       &updateScratchTimeStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "update canon_scratch set rx_time=?, time_basis=?, boot_id=?, age_margin=? where rowid=?;", -1,
+                       &updateCanonScratchTimeStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "update direct_messages set rx_time=?, time_basis=?, boot_id=?, age_margin=? where rowid=?;", -1,
+                       &updateDirectTimeStmt, NULL);
+
     encryptedOk = true;
 
+    initTimeState();
+    restampPreviousBoot();
     backfillSetIndex();
 
     this->setInterval(15 * 1000);
@@ -596,9 +672,11 @@ StoreForwardPlusPlusModule::~StoreForwardPlusPlusModule()
         getChainCountStmt,
         getScratchCountStmt,
         getRootCanonScratchCountStmt,
-        pruneScratchQueueStmt,
+        scratchTimeRowsStmt,
+        deleteScratchRowidStmt,
         trimOldestLinkStmt,
-        trimOldByTimeStmt,
+        canonTimeRowsStmt,
+        deleteCanonRowidStmt,
         maybeAddPeerStmt,
         getPeerStmt,
         updatePeerStmt,
@@ -616,6 +694,16 @@ StoreForwardPlusPlusModule::~StoreForwardPlusPlusModule()
         unindexedLinksStmt,
         setLinkSetIndexStmt,
         legacyHistoryStmt,
+        timeStateReadStmt,
+        timeStateWriteStmt,
+        restampChannelStmt,
+        restampScratchStmt,
+        restampCanonScratchStmt,
+        restampDirectStmt,
+        updateChannelTimeStmt,
+        updateScratchTimeStmt,
+        updateCanonScratchTimeStmt,
+        updateDirectTimeStmt,
     };
     for (sqlite3_stmt *stmt : statements) {
         if (stmt)
@@ -623,6 +711,295 @@ StoreForwardPlusPlusModule::~StoreForwardPlusPlusModule()
     }
     if (ppDb)
         sqlite3_close(ppDb);
+}
+
+void StoreForwardPlusPlusModule::initTimeState()
+{
+    prevBootId = prevLastUptime = prevLastEpoch = 0;
+    sqlite3_reset(timeStateReadStmt);
+    if (sqlite3_step(timeStateReadStmt) == SQLITE_ROW) {
+        prevBootId = (uint32_t)sqlite3_column_int64(timeStateReadStmt, 0);
+        prevLastUptime = (uint32_t)sqlite3_column_int64(timeStateReadStmt, 1);
+        prevLastEpoch = (uint32_t)sqlite3_column_int64(timeStateReadStmt, 2);
+    }
+    sqlite3_reset(timeStateReadStmt);
+
+    bootId = prevBootId == UINT32_MAX ? 1 : prevBootId + 1;
+    if (bootId == 0)
+        bootId = 1;
+    bootEpoch = getValidTime(RTCQualityNTP, true);
+    lastSeenUptime = Time::getUptimeSecs();
+    lastSeenEpoch = bootEpoch;
+    writeTimeState();
+}
+
+void StoreForwardPlusPlusModule::writeTimeState()
+{
+    sqlite3_reset(timeStateWriteStmt);
+    sqlite3_bind_int64(timeStateWriteStmt, 1, (sqlite3_int64)bootId);
+    sqlite3_bind_int64(timeStateWriteStmt, 2, (sqlite3_int64)bootEpoch);
+    sqlite3_bind_int64(timeStateWriteStmt, 3, (sqlite3_int64)lastSeenUptime);
+    sqlite3_bind_int64(timeStateWriteStmt, 4, (sqlite3_int64)lastSeenEpoch);
+    sqlite3_step(timeStateWriteStmt);
+    sqlite3_reset(timeStateWriteStmt);
+}
+
+void StoreForwardPlusPlusModule::updateTimeState()
+{
+    const uint32_t nowUptime = Time::getUptimeSecs();
+    const uint32_t nowEpoch = getValidTime(RTCQualityNTP, true);
+    if (nowEpoch) {
+        lastSeenEpoch = nowEpoch;
+        // A clock that arrived after boot still pins the boot start for ageing epoch rows.
+        if (bootEpoch == 0)
+            bootEpoch = nowEpoch > nowUptime ? nowEpoch - nowUptime : 0;
+    }
+    lastSeenUptime = nowUptime;
+    writeTimeState();
+}
+
+uint32_t StoreForwardPlusPlusModule::estimateEpochNow() const
+{
+    const uint32_t proper = getValidTime(RTCQualityNTP, true);
+    if (proper)
+        return proper;
+    const uint32_t nowUptime = Time::getUptimeSecs();
+    if (bootEpoch > 0)
+        return bootEpoch + nowUptime;
+    if (lastSeenEpoch > 0)
+        return lastSeenEpoch + (nowUptime - lastSeenUptime);
+    return 0;
+}
+
+StoreForwardPlusPlusModule::RowTime StoreForwardPlusPlusModule::nowTime() const
+{
+    RowTime t;
+    const uint32_t nowEpoch = getValidTime(RTCQualityNTP, true);
+    if (nowEpoch) {
+        t.basis = kTimeBasisEpoch;
+        t.stamp = nowEpoch;
+    } else {
+        t.basis = kTimeBasisUptime;
+        t.stamp = Time::getUptimeSecs();
+        t.boot_id = bootId;
+    }
+    return t;
+}
+
+bool StoreForwardPlusPlusModule::timeFromAge(uint32_t heardAgo, RowTime &out) const
+{
+    out = nowTime();
+    if (heardAgo > out.stamp)
+        return false; // an age that would put the object before its own basis is not plausible
+    out.stamp -= heardAgo;
+    out.margin = 0;
+    return true;
+}
+
+StoreForwardPlusPlusModule::RowAge StoreForwardPlusPlusModule::rowAge(const RowTime &t) const
+{
+    RowAge a;
+    a.margin = kTimeMarginS + t.margin;
+    const uint32_t nowUptime = Time::getUptimeSecs();
+
+    if (t.basis == kTimeBasisEpoch) {
+        a.has_epoch = true;
+        a.epoch = t.stamp;
+        a.estimate_epoch = t.stamp;
+        const uint32_t nowEpoch = estimateEpochNow();
+        if (nowEpoch == 0) {
+            a.margin = kRetentionS; // no reference to date against; keep the row out of every trim
+            return a;
+        }
+        if (t.stamp > nowEpoch + a.margin) {
+            a.margin += t.stamp - nowEpoch;
+        } else {
+            a.age = t.stamp < nowEpoch ? nowEpoch - t.stamp : 0;
+        }
+        return a;
+    }
+
+    if (t.basis == kTimeBasisUptime) {
+        if (t.boot_id == bootId) {
+            if (t.stamp > nowUptime + a.margin)
+                a.margin += t.stamp - nowUptime;
+            else
+                a.age = t.stamp < nowUptime ? nowUptime - t.stamp : 0;
+        } else {
+            // A row from a boot that was not restamped: age it to the previous end, add the gap we
+            // know about and the uptime since this boot started.
+            const uint32_t atEnd = (t.boot_id == prevBootId && prevLastUptime > t.stamp) ? prevLastUptime - t.stamp : 0;
+            const uint32_t down =
+                (bootEpoch > 0 && prevLastEpoch > 0 && bootEpoch >= prevLastEpoch) ? bootEpoch - prevLastEpoch : 0;
+            a.age = atEnd > UINT32_MAX - down ? UINT32_MAX : atEnd + down;
+            a.age = a.age > UINT32_MAX - nowUptime ? UINT32_MAX : a.age + nowUptime;
+        }
+    } else {
+        a.age = t.stamp > UINT32_MAX - nowUptime ? UINT32_MAX : t.stamp + nowUptime;
+    }
+
+    const uint32_t nowEpoch = estimateEpochNow();
+    if (nowEpoch == 0) {
+        a.margin = kRetentionS;
+    } else if (nowEpoch > a.age) {
+        a.estimate_epoch = nowEpoch - a.age;
+    }
+    return a;
+}
+
+// Restamps rows written by an earlier boot. The age at that boot's last observed second is kept;
+// a known gap is added, and an unknown one only widens the margin. A module restart in the same
+// boot (uptime did not go backwards) keeps its stamps as they are.
+void StoreForwardPlusPlusModule::restampPreviousBoot()
+{
+    const uint32_t nowUptime = Time::getUptimeSecs();
+    const bool continuousBoot = prevLastUptime > 0 && nowUptime >= prevLastUptime;
+    const bool downKnown = bootEpoch > 0 && prevLastEpoch > 0 && bootEpoch >= prevLastEpoch;
+    const uint32_t down = downKnown ? bootEpoch - prevLastEpoch : 0;
+
+    auto restamp = [&](sqlite3_stmt *sel, sqlite3_stmt *upd) {
+        if (!sel || !upd)
+            return;
+        std::vector<std::pair<sqlite3_int64, RowTime>> changes;
+        sqlite3_reset(sel);
+        while (sqlite3_step(sel) == SQLITE_ROW) {
+            RowTime old;
+            const sqlite3_int64 rowid = sqlite3_column_int64(sel, 0);
+            old.stamp = (uint32_t)sqlite3_column_int64(sel, 1);
+            old.basis = (uint8_t)sqlite3_column_int64(sel, 2);
+            old.boot_id = (uint32_t)sqlite3_column_int64(sel, 3);
+            old.margin = (uint32_t)sqlite3_column_int64(sel, 4);
+            if (old.basis == kTimeBasisEpoch)
+                continue; // an epoch needs no restamp: its age is now - stamp
+
+            RowTime next = old;
+            if (continuousBoot) {
+                if (old.basis == kTimeBasisUptime && old.boot_id == prevBootId) {
+                    next.boot_id = bootId; // same uptime base: keep the stamp, name the new module boot
+                    changes.emplace_back(rowid, next);
+                }
+                continue;
+            }
+
+            uint32_t ageAtEnd = 0;
+            if (old.basis == kTimeBasisUptime)
+                ageAtEnd = (old.boot_id == prevBootId && prevLastUptime > old.stamp) ? prevLastUptime - old.stamp : 0;
+            else
+                ageAtEnd = old.stamp > UINT32_MAX - prevLastUptime ? UINT32_MAX : old.stamp + prevLastUptime;
+            const uint32_t total = ageAtEnd > UINT32_MAX - down ? UINT32_MAX : ageAtEnd + down;
+
+            next.margin = old.margin + (downKnown ? 0 : kRetentionS);
+            next.boot_id = 0;
+            if (bootEpoch > 0) {
+                next.basis = kTimeBasisEpoch;
+                next.stamp = bootEpoch > total ? bootEpoch - total : 0;
+            } else {
+                next.basis = kTimeBasisAge;
+                next.stamp = total;
+            }
+            changes.emplace_back(rowid, next);
+        }
+        sqlite3_reset(sel);
+        for (const auto &change : changes) {
+            sqlite3_reset(upd);
+            sqlite3_bind_int64(upd, 1, (sqlite3_int64)change.second.stamp);
+            sqlite3_bind_int64(upd, 2, (sqlite3_int64)change.second.basis);
+            sqlite3_bind_int64(upd, 3, (sqlite3_int64)change.second.boot_id);
+            sqlite3_bind_int64(upd, 4, (sqlite3_int64)change.second.margin);
+            sqlite3_bind_int64(upd, 5, change.first);
+            sqlite3_step(upd);
+            sqlite3_reset(upd);
+        }
+    };
+
+    restamp(restampChannelStmt, updateChannelTimeStmt);
+    restamp(restampScratchStmt, updateScratchTimeStmt);
+    restamp(restampCanonScratchStmt, updateCanonScratchTimeStmt);
+    restamp(restampDirectStmt, updateDirectTimeStmt);
+}
+
+// On the first proper clock, every boot-relative row becomes an epoch with its age unchanged, so
+// the 48 h trim cannot mistake an uptime stamp for an ancient epoch.
+void StoreForwardPlusPlusModule::healBootRelativeTimestamps()
+{
+    const uint32_t nowEpoch = getValidTime(RTCQualityNTP, true);
+    if (nowEpoch == 0)
+        return;
+
+    auto heal = [&](sqlite3_stmt *sel, sqlite3_stmt *upd) {
+        if (!sel || !upd)
+            return;
+        std::vector<std::pair<sqlite3_int64, RowTime>> changes;
+        sqlite3_reset(sel);
+        while (sqlite3_step(sel) == SQLITE_ROW) {
+            RowTime old;
+            const sqlite3_int64 rowid = sqlite3_column_int64(sel, 0);
+            old.stamp = (uint32_t)sqlite3_column_int64(sel, 1);
+            old.basis = (uint8_t)sqlite3_column_int64(sel, 2);
+            old.boot_id = (uint32_t)sqlite3_column_int64(sel, 3);
+            old.margin = (uint32_t)sqlite3_column_int64(sel, 4);
+            if (old.basis == kTimeBasisEpoch)
+                continue;
+
+            const RowAge age = rowAge(old);
+            RowTime next;
+            next.basis = kTimeBasisEpoch;
+            next.stamp = age.age < nowEpoch ? nowEpoch - age.age : 0;
+            next.margin = old.margin;
+            changes.emplace_back(rowid, next);
+        }
+        sqlite3_reset(sel);
+        for (const auto &change : changes) {
+            sqlite3_reset(upd);
+            sqlite3_bind_int64(upd, 1, (sqlite3_int64)change.second.stamp);
+            sqlite3_bind_int64(upd, 2, (sqlite3_int64)change.second.basis);
+            sqlite3_bind_int64(upd, 3, (sqlite3_int64)change.second.boot_id);
+            sqlite3_bind_int64(upd, 4, (sqlite3_int64)change.second.margin);
+            sqlite3_bind_int64(upd, 5, change.first);
+            sqlite3_step(upd);
+            sqlite3_reset(upd);
+        }
+    };
+
+    heal(restampChannelStmt, updateChannelTimeStmt);
+    heal(restampScratchStmt, updateScratchTimeStmt);
+    heal(restampCanonScratchStmt, updateCanonScratchTimeStmt);
+    heal(restampDirectStmt, updateDirectTimeStmt);
+}
+
+void StoreForwardPlusPlusModule::trimCanonByRetention(uint8_t *root_hash, size_t root_hash_len)
+{
+    std::vector<sqlite3_int64> drop;
+    sqlite3_reset(canonTimeRowsStmt);
+    sqlite3_bind_int(canonTimeRowsStmt, 1, root_hash_len);
+    sqlite3_bind_blob(canonTimeRowsStmt, 2, root_hash, root_hash_len, SQLITE_STATIC);
+    while (sqlite3_step(canonTimeRowsStmt) == SQLITE_ROW) {
+        RowTime t;
+        const sqlite3_int64 rowid = sqlite3_column_int64(canonTimeRowsStmt, 0);
+        t.stamp = (uint32_t)sqlite3_column_int64(canonTimeRowsStmt, 1);
+        t.basis = (uint8_t)sqlite3_column_int64(canonTimeRowsStmt, 2);
+        t.boot_id = (uint32_t)sqlite3_column_int64(canonTimeRowsStmt, 3);
+        t.margin = (uint32_t)sqlite3_column_int64(canonTimeRowsStmt, 4);
+        if (rowAge(t).age >= kRetentionS)
+            drop.push_back(rowid);
+    }
+    sqlite3_reset(canonTimeRowsStmt);
+
+    for (sqlite3_int64 rowid : drop) {
+        sqlite3_reset(deleteCanonRowidStmt);
+        sqlite3_bind_int64(deleteCanonRowidStmt, 1, rowid);
+        sqlite3_step(deleteCanonRowidStmt);
+        sqlite3_reset(deleteCanonRowidStmt);
+    }
+}
+
+bool StoreForwardPlusPlusModule::linkIsFresh(const link_object &lo) const
+{
+    RowTime t;
+    t.stamp = lo.rx_time;
+    t.basis = kTimeBasisEpoch; // the wire's rxtime is an epoch claim; an unusable one counts as stale
+    const RowAge age = rowAge(t);
+    return age.age + age.margin <= rebroadcastTimeout;
 }
 
 void StoreForwardPlusPlusModule::backfillSetIndex()
@@ -735,22 +1112,19 @@ int32_t StoreForwardPlusPlusModule::runOnce()
         if (portduino_config.sfpp_repair == SFPP_REPAIR_CHAIN)
             setIntervalFromNow(portduino_config.sfpp_announce_interval * 60 * 1000 - 30 * 1000);
     }
+    // G19: promote the host's synchronized clock to NTP when we have no proper source yet, but never
+    // defer on it; a store without one works in boot-relative ages.
     if (getRTCQuality() < RTCQualityNTP) {
-        RTCQuality ourQuality = RTCQualityDevice;
-
         std::string timeCommandResult = exec("timedatectl status | grep synchronized | grep yes -c");
         if (timeCommandResult[0] == '1') {
-            ourQuality = RTCQualityNTP;
-
             struct timeval tv;
             tv.tv_sec = time(NULL);
             tv.tv_usec = 0;
-            perhapsSetRTC(ourQuality, &tv);
-        } else {
-            LOG_WARN("StoreForward++ deferred due to time quality %u result:%s", getRTCQuality(), timeCommandResult.c_str());
-            return portduino_config.sfpp_announce_interval * 60 * 1000;
+            perhapsSetRTC(RTCQualityNTP, &tv);
         }
     }
+    updateTimeState();
+    healBootRelativeTimestamps();
 
     uint8_t root_hash_bytes[SFPP_HASH_SIZE] = {0};
     ChannelHash hash = channels.getHash(0);
@@ -783,16 +1157,8 @@ int32_t StoreForwardPlusPlusModule::runOnce()
         chain_count--;
     }
 
-    // D7: canon rows outside the service window are gone even when the row cap is not reached.
-    const uint32_t nowS = getValidTime(RTCQuality::RTCQualityNTP, true);
-    if (nowS > kRetentionS) {
-        sqlite3_reset(trimOldByTimeStmt);
-        sqlite3_bind_int(trimOldByTimeStmt, 1, SFPP_HASH_SIZE);
-        sqlite3_bind_blob(trimOldByTimeStmt, 2, root_hash_bytes, SFPP_HASH_SIZE, SQLITE_STATIC);
-        sqlite3_bind_int64(trimOldByTimeStmt, 3, (sqlite3_int64)(nowS - kRetentionS));
-        sqlite3_step(trimOldByTimeStmt);
-        sqlite3_reset(trimOldByTimeStmt);
-    }
+    // D7: canon rows outside the retention window are gone even when the row cap is not reached.
+    trimCanonByRetention(root_hash_bytes, SFPP_HASH_SIZE);
     // evict old messages from scratch
     pruneScratchQueue();
 
@@ -924,11 +1290,6 @@ void StoreForwardPlusPlusModule::handleEncrypted(const meshtastic_MeshPacket *mp
 
 ProcessMessage StoreForwardPlusPlusModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
-    // To avoid terrible time problems, require NTP or GPS time
-    if (getRTCQuality() < RTCQualityNTP) {
-        return ProcessMessage::CONTINUE;
-    }
-
     // A legacy CLIENT_HISTORY from a phone connected to this archive. Checked before the from==0
     // guard below, because the phone sends the request as the local node.
     if (mp.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
@@ -1150,7 +1511,6 @@ bool StoreForwardPlusPlusModule::handleReceivedProtobuf(const meshtastic_MeshPac
             if (t->message_hash.size >= 8 && t->commit_hash.size >= 8 &&
                 checkCommitHash(scratch_object, t->commit_hash.bytes, t->message_hash.size)) {
                 LOG_INFO("StoreForwardpp Found announced message in scratch, adding to chain");
-                scratch_object.rx_time = t->encapsulated_rxtime;
                 if (addToChain(scratch_object))
                     links_from_scratch++;
                 removeFromScratch(scratch_object.message_hash, scratch_object.message_hash_len);
@@ -1166,7 +1526,6 @@ bool StoreForwardPlusPlusModule::handleReceivedProtobuf(const meshtastic_MeshPac
                 LOG_INFO("StoreForwardpp Could not speculate chain to announced commit hash. Moving from "
                          "local_messages to canon_scratch");
 
-                scratch_object.rx_time = t->encapsulated_rxtime;
                 scratch_object.counter = t->chain_count;
                 scratch_object.commit_hash_len = t->commit_hash.size;
                 memcpy(scratch_object.commit_hash, t->commit_hash.bytes, t->commit_hash.size);
@@ -1307,7 +1666,7 @@ bool StoreForwardPlusPlusModule::handleReceivedProtobuf(const meshtastic_MeshPac
                     pendingRun = true;
                 }
                 // timebox to no more than an hour old
-                if (incoming_link.rx_time > getValidTime(RTCQuality::RTCQualityNTP, true) - rebroadcastTimeout) {
+                if (linkIsFresh(incoming_link)) {
                     // if this packet is new to us, we rebroadcast it
                     rebroadcastLinkObject(incoming_link);
                 } else {
@@ -1330,7 +1689,7 @@ bool StoreForwardPlusPlusModule::handleReceivedProtobuf(const meshtastic_MeshPac
                     removeFromScratch(incoming_link.message_hash, incoming_link.message_hash_len);
                 } else {
                     // if this packet is new to us, we rebroadcast it, but only up to an hour old
-                    if (incoming_link.rx_time > getValidTime(RTCQuality::RTCQualityNTP, true) - rebroadcastTimeout) {
+                    if (linkIsFresh(incoming_link)) {
                         rebroadcastLinkObject(incoming_link);
                     } else {
                         LOG_DEBUG("StoreForwardpp Got previously unseen text, but not rebroadcasting because rxtime was %u",
@@ -1365,7 +1724,7 @@ bool StoreForwardPlusPlusModule::handleReceivedProtobuf(const meshtastic_MeshPac
                     !isInCanonScratch(incoming_link.message_hash, incoming_link.message_hash_len)) {
                     addToScratch(incoming_link);
                     LOG_INFO("StoreForwardpp added incoming non-canon message to scratch");
-                    if (incoming_link.rx_time > getValidTime(RTCQuality::RTCQualityNTP, true) - rebroadcastTimeout) {
+                    if (linkIsFresh(incoming_link)) {
                         rebroadcastLinkObject(incoming_link);
                     } else {
                         LOG_DEBUG("StoreForwardpp Got previously unseen text, but not rebroadcasting because rxtime was &u",
@@ -1464,49 +1823,79 @@ void StoreForwardPlusPlusModule::handleLegacyClientHistory(const meshtastic_Mesh
             windowS = requested;
     }
 
-    uint32_t now = getValidTime(RTCQualityNTP, true);
-    uint32_t since = now > windowS ? now - windowS : 0;
     uint32_t cursor = 0;
     if (req->which_variant == meshtastic_StoreAndForward_history_tag)
         cursor = req->variant.history.last_request;
     uint32_t lastServedRxTime = cursor;
     uint32_t count = 0;
 
+    struct Candidate {
+        legacy_history_item item;
+        uint32_t destination;
+        uint32_t display;
+        uint32_t order;
+    };
+    std::vector<Candidate> page;
+
     uint8_t root_hash[SFPP_HASH_SIZE] = {0};
     if (getOrDeriveRootFromChannel(channels.getHash(0), root_hash) != 0) {
         sqlite3_reset(legacyHistoryStmt);
         sqlite3_bind_int(legacyHistoryStmt, 1, SFPP_HASH_SIZE);
         sqlite3_bind_blob(legacyHistoryStmt, 2, root_hash, SFPP_HASH_SIZE, NULL);
-        sqlite3_bind_int64(legacyHistoryStmt, 3, (sqlite3_int64)since);
-        sqlite3_bind_int64(legacyHistoryStmt, 4, (sqlite3_int64)cursor);
+        sqlite3_bind_int64(legacyHistoryStmt, 3, (sqlite3_int64)requester);
+        sqlite3_bind_int64(legacyHistoryStmt, 4, (sqlite3_int64)NODENUM_BROADCAST);
         sqlite3_bind_int64(legacyHistoryStmt, 5, (sqlite3_int64)requester);
-        sqlite3_bind_int64(legacyHistoryStmt, 6, (sqlite3_int64)NODENUM_BROADCAST);
-        sqlite3_bind_int64(legacyHistoryStmt, 7, (sqlite3_int64)requester);
-        sqlite3_bind_int(legacyHistoryStmt, 8, pageMax);
 
+        uint32_t order = 0;
         while (sqlite3_step(legacyHistoryStmt) == SQLITE_ROW) {
-            legacy_history_item item;
-            item.from = (NodeNum)sqlite3_column_int64(legacyHistoryStmt, 0);
-            item.id = (PacketId)sqlite3_column_int64(legacyHistoryStmt, 1);
-            uint32_t destination = (uint32_t)sqlite3_column_int64(legacyHistoryStmt, 2);
-            item.rx_time = (uint32_t)sqlite3_column_int64(legacyHistoryStmt, 3);
-            if (item.rx_time > lastServedRxTime)
-                lastServedRxTime = item.rx_time;
+            RowTime stamp;
+            stamp.stamp = (uint32_t)sqlite3_column_int64(legacyHistoryStmt, 3);
+            stamp.basis = (uint8_t)sqlite3_column_int(legacyHistoryStmt, 6);
+            stamp.boot_id = (uint32_t)sqlite3_column_int64(legacyHistoryStmt, 7);
+            stamp.margin = (uint32_t)sqlite3_column_int64(legacyHistoryStmt, 8);
+            const RowAge age = rowAge(stamp);
+            if (age.age > windowS)
+                continue; // outside the requested window, by the best age we can give it
+
+            Candidate candidate;
+            candidate.item.from = (NodeNum)sqlite3_column_int64(legacyHistoryStmt, 0);
+            candidate.item.id = (PacketId)sqlite3_column_int64(legacyHistoryStmt, 1);
+            candidate.destination = (uint32_t)sqlite3_column_int64(legacyHistoryStmt, 2);
+            candidate.display = age.has_epoch ? age.epoch : age.estimate_epoch;
+            candidate.order = order++;
+            if (cursor > 0 && candidate.display <= cursor)
+                continue;
             const unsigned char *text = sqlite3_column_text(legacyHistoryStmt, 4);
             if (text)
-                item.payload.assign((const char *)text, sqlite3_column_bytes(legacyHistoryStmt, 4));
-            if (item.payload.empty()) {
+                candidate.item.payload.assign((const char *)text, sqlite3_column_bytes(legacyHistoryStmt, 4));
+            if (candidate.item.payload.empty()) {
                 const uint8_t *encrypted = (const uint8_t *)sqlite3_column_blob(legacyHistoryStmt, 5);
                 const int encryptedLen = sqlite3_column_bytes(legacyHistoryStmt, 5);
-                if (!decodeStoredText(encrypted, (size_t)encryptedLen, destination, item.from, item.id, item.payload))
+                if (!decodeStoredText(encrypted, (size_t)encryptedLen, candidate.destination, candidate.item.from,
+                                      candidate.item.id, candidate.item.payload))
                     continue;
             }
-            item.to = requester;
-            item.broadcast = destination == NODENUM_BROADCAST;
-            legacyHistory.push_back(std::move(item));
-            count++;
+            if (!age.has_epoch) {
+                LOG_INFO("SFPP legacy shim serves a boot-relative row age=%u margin=%u estimated_epoch=%u", age.age, age.margin,
+                         candidate.display);
+            }
+            page.push_back(std::move(candidate));
         }
         sqlite3_reset(legacyHistoryStmt);
+    }
+
+    std::stable_sort(page.begin(), page.end(), [](const Candidate &a, const Candidate &b) { return a.display < b.display; });
+    for (auto &candidate : page) {
+        if (count >= pageMax)
+            break;
+        legacy_history_item item = std::move(candidate.item);
+        item.rx_time = candidate.display;
+        if (item.rx_time > lastServedRxTime)
+            lastServedRxTime = item.rx_time;
+        item.to = requester;
+        item.broadcast = candidate.destination == NODENUM_BROADCAST;
+        legacyHistory.push_back(std::move(item));
+        count++;
     }
 
     meshtastic_StoreAndForward response = meshtastic_StoreAndForward_init_zero;
@@ -1881,6 +2270,9 @@ StoreForwardPlusPlusModule::link_object StoreForwardPlusPlusModule::getLink(uint
     lo.counter = sqlite3_column_int(getLinkStmt, 8);
 
     lo.payload = std::string((char *)sqlite3_column_text(getLinkStmt, 9));
+    lo.time_basis = (uint8_t)sqlite3_column_int(getLinkStmt, 10);
+    lo.boot_id = (uint32_t)sqlite3_column_int64(getLinkStmt, 11);
+    lo.age_margin = (uint32_t)sqlite3_column_int64(getLinkStmt, 12);
 
     lo.channel_hash = getChannelHashFromRoot(lo.root_hash, lo.root_hash_len);
 
@@ -1922,6 +2314,9 @@ StoreForwardPlusPlusModule::link_object StoreForwardPlusPlusModule::getLinkFromM
     lo.counter = sqlite3_column_int(getLinkFromMessageHashStmt, 8);
 
     lo.payload = std::string((char *)sqlite3_column_text(getLinkFromMessageHashStmt, 9));
+    lo.time_basis = (uint8_t)sqlite3_column_int(getLinkFromMessageHashStmt, 10);
+    lo.boot_id = (uint32_t)sqlite3_column_int64(getLinkFromMessageHashStmt, 11);
+    lo.age_margin = (uint32_t)sqlite3_column_int64(getLinkFromMessageHashStmt, 12);
 
     lo.channel_hash = getChannelHashFromRoot(lo.root_hash, lo.root_hash_len);
 
@@ -2012,6 +2407,9 @@ bool StoreForwardPlusPlusModule::addToChain(link_object &lo)
     // short_id and checksum, derived once here rather than on every advert
     sqlite3_bind_int64(chain_insert_stmt, 11, sfppsr::shortId(lo.message_hash, lo.message_hash_len));
     sqlite3_bind_int64(chain_insert_stmt, 12, (sqlite3_int64)sfppsr::checksumContribution(lo.message_hash, lo.message_hash_len));
+    sqlite3_bind_int64(chain_insert_stmt, 13, (sqlite3_int64)lo.time_basis);
+    sqlite3_bind_int64(chain_insert_stmt, 14, (sqlite3_int64)lo.boot_id);
+    sqlite3_bind_int64(chain_insert_stmt, 15, (sqlite3_int64)lo.age_margin);
     int res = sqlite3_step(chain_insert_stmt);
     if (res != SQLITE_OK && res != SQLITE_DONE) {
         LOG_ERROR("StoreForwardpp Cannot step: %s", sqlite3_errmsg(ppDb));
@@ -2042,6 +2440,9 @@ bool StoreForwardPlusPlusModule::addToScratch(link_object &lo)
     sqlite3_bind_int(scratch_insert_stmt, 7, lo.rx_time);
     // payload
     sqlite3_bind_text(scratch_insert_stmt, 8, lo.payload.c_str(), lo.payload.length(), NULL);
+    sqlite3_bind_int64(scratch_insert_stmt, 9, (sqlite3_int64)lo.time_basis);
+    sqlite3_bind_int64(scratch_insert_stmt, 10, (sqlite3_int64)lo.boot_id);
+    sqlite3_bind_int64(scratch_insert_stmt, 11, (sqlite3_int64)lo.age_margin);
 
     int res = sqlite3_step(scratch_insert_stmt);
     if (res != SQLITE_OK) {
@@ -2244,6 +2645,9 @@ StoreForwardPlusPlusModule::link_object StoreForwardPlusPlusModule::getNextScrat
     memcpy(lo.message_hash, _message_hash, lo.message_hash_len);
 
     lo.rx_time = sqlite3_column_int(fromScratchStmt, 5);
+    lo.time_basis = (uint8_t)sqlite3_column_int(fromScratchStmt, 7);
+    lo.boot_id = (uint32_t)sqlite3_column_int64(fromScratchStmt, 8);
+    lo.age_margin = (uint32_t)sqlite3_column_int64(fromScratchStmt, 9);
 
     lo.root_hash_len = SFPP_HASH_SIZE;
     memcpy(lo.root_hash, root_hash, lo.root_hash_len);
@@ -2297,6 +2701,9 @@ StoreForwardPlusPlusModule::link_object StoreForwardPlusPlusModule::getFromScrat
     memcpy(lo.root_hash, root_hash, SFPP_HASH_SIZE);
     lo.payload =
         std::string((char *)sqlite3_column_text(fromScratchByHashStmt, 7), sqlite3_column_bytes(fromScratchByHashStmt, 7));
+    lo.time_basis = (uint8_t)sqlite3_column_int(fromScratchByHashStmt, 8);
+    lo.boot_id = (uint32_t)sqlite3_column_int64(fromScratchByHashStmt, 9);
+    lo.age_margin = (uint32_t)sqlite3_column_int64(fromScratchByHashStmt, 10);
     sqlite3_reset(fromScratchByHashStmt);
     return lo;
 }
@@ -2309,7 +2716,11 @@ StoreForwardPlusPlusModule::ingestTextPacket(const meshtastic_MeshPacket &mp, co
     lo.to = mp.to;
     lo.from = mp.from;
     lo.id = mp.id;
-    lo.rx_time = mp.rx_time;
+    const RowTime live = nowTime();
+    lo.rx_time = live.stamp;
+    lo.time_basis = live.basis;
+    lo.boot_id = live.boot_id;
+    lo.age_margin = live.margin;
     lo.channel_hash = encrypted_meshpacket->channel;
     memcpy(lo.encrypted_bytes, encrypted_meshpacket->encrypted.bytes, encrypted_meshpacket->encrypted.size);
     lo.encrypted_len = encrypted_meshpacket->encrypted.size;
@@ -2333,7 +2744,18 @@ StoreForwardPlusPlusModule::link_object StoreForwardPlusPlusModule::ingestLinkMe
     }
     lo.from = t->encapsulated_from;
     lo.id = t->encapsulated_id;
-    lo.rx_time = t->encapsulated_rxtime;
+    // The wire carries an absolute rxtime; treat it as an epoch and fall back to our own stamp when
+    // the sender had none, so a clockless peer's uptime value is never filed as an ancient epoch.
+    if (t->encapsulated_rxtime != 0) {
+        lo.rx_time = t->encapsulated_rxtime;
+        lo.time_basis = kTimeBasisEpoch;
+    } else {
+        const RowTime live = nowTime();
+        lo.rx_time = live.stamp;
+        lo.time_basis = live.basis;
+        lo.boot_id = live.boot_id;
+        lo.age_margin = live.margin;
+    }
     lo.counter = t->chain_count; // Should this be skipped if stratum0?
 
     // What if we don't have this root hash? Should drop this packet before this point.
@@ -2516,14 +2938,29 @@ StoreForwardPlusPlusModule::getLinkFromPositionFromTip(uint32_t _count, uint8_t 
 
 void StoreForwardPlusPlusModule::pruneScratchQueue()
 {
-    // Very little utility in holding on to very old scratch messages
-    sqlite3_bind_int(pruneScratchQueueStmt, 1, time(nullptr) - 60 * 60 * 6);
-    int res = sqlite3_step(pruneScratchQueueStmt);
-    if (res != SQLITE_OK && res != SQLITE_DONE) {
-        LOG_ERROR("StoreForwardpp Prune Scratch sqlite error %u, %s", res, sqlite3_errmsg(ppDb));
+    // Very little utility in holding on to very old scratch messages.
+    constexpr uint32_t scratchMaxAgeS = 60 * 60 * 6;
+    std::vector<sqlite3_int64> drop;
+    sqlite3_reset(scratchTimeRowsStmt);
+    while (sqlite3_step(scratchTimeRowsStmt) == SQLITE_ROW) {
+        RowTime t;
+        const sqlite3_int64 rowid = sqlite3_column_int64(scratchTimeRowsStmt, 0);
+        t.stamp = (uint32_t)sqlite3_column_int64(scratchTimeRowsStmt, 1);
+        t.basis = (uint8_t)sqlite3_column_int(scratchTimeRowsStmt, 2);
+        t.boot_id = (uint32_t)sqlite3_column_int64(scratchTimeRowsStmt, 3);
+        t.margin = (uint32_t)sqlite3_column_int64(scratchTimeRowsStmt, 4);
+        if (rowAge(t).age >= scratchMaxAgeS)
+            drop.push_back(rowid);
     }
-    sqlite3_reset(pruneScratchQueueStmt);
-    scratch_timed_out += sqlite3_changes(ppDb);
+    sqlite3_reset(scratchTimeRowsStmt);
+
+    for (sqlite3_int64 rowid : drop) {
+        sqlite3_reset(deleteScratchRowidStmt);
+        sqlite3_bind_int64(deleteScratchRowidStmt, 1, rowid);
+        sqlite3_step(deleteScratchRowidStmt);
+        sqlite3_reset(deleteScratchRowidStmt);
+    }
+    scratch_timed_out += (uint32_t)drop.size();
 }
 
 void StoreForwardPlusPlusModule::trimOldestLink(uint8_t *root_hash, size_t root_hash_len)
@@ -2714,6 +3151,9 @@ void StoreForwardPlusPlusModule::addToCanonScratch(link_object &lo)
     sqlite3_bind_text(canon_scratch_insert_stmt, 9, lo.payload.c_str(), lo.payload.length(), NULL);
 
     sqlite3_bind_int(canon_scratch_insert_stmt, 10, lo.counter);
+    sqlite3_bind_int64(canon_scratch_insert_stmt, 11, (sqlite3_int64)lo.time_basis);
+    sqlite3_bind_int64(canon_scratch_insert_stmt, 12, (sqlite3_int64)lo.boot_id);
+    sqlite3_bind_int64(canon_scratch_insert_stmt, 13, (sqlite3_int64)lo.age_margin);
     int res = sqlite3_step(canon_scratch_insert_stmt);
     if (res != SQLITE_OK && res != SQLITE_DONE) {
         LOG_ERROR("StoreForwardpp canon_scratch_insert_stmt Cannot step %u: %s", res, sqlite3_errmsg(ppDb));
@@ -2760,6 +3200,9 @@ StoreForwardPlusPlusModule::link_object StoreForwardPlusPlusModule::getfromCanon
     lo.counter = sqlite3_column_int(getCanonScratchStmt, 8);
 
     lo.payload = std::string((char *)sqlite3_column_text(getCanonScratchStmt, 9));
+    lo.time_basis = (uint8_t)sqlite3_column_int(getCanonScratchStmt, 10);
+    lo.boot_id = (uint32_t)sqlite3_column_int64(getCanonScratchStmt, 11);
+    lo.age_margin = (uint32_t)sqlite3_column_int64(getCanonScratchStmt, 12);
 
     sqlite3_reset(getCanonScratchStmt);
 
@@ -3719,7 +4162,6 @@ void StoreForwardPlusPlusModule::handleItemRequest(const meshtastic_MeshPacket &
 
     const uint32_t first = list.scope.bucket * sfppsr::kBucketObjects + 1;
     const uint32_t last = first + sfppsr::kBucketObjects - 1;
-    const uint32_t now = getValidTime(RTCQuality::RTCQualityNTP, true);
 
     for (pinsketch::Element wanted : list.ids) {
         // Already queued for this requester: do not duplicate it, just refresh the entry.
@@ -3743,10 +4185,14 @@ void StoreForwardPlusPlusModule::handleItemRequest(const meshtastic_MeshPacket &
             const uint32_t id = (uint32_t)sqlite3_column_int64(getLinkByShortIdStmt, 2);
             const uint8_t *enc = (const uint8_t *)sqlite3_column_blob(getLinkByShortIdStmt, 3);
             const int encLen = sqlite3_column_bytes(getLinkByShortIdStmt, 3);
-            const uint32_t rxTime = (uint32_t)sqlite3_column_int64(getLinkByShortIdStmt, 5);
+            RowTime stamp;
+            stamp.stamp = (uint32_t)sqlite3_column_int64(getLinkByShortIdStmt, 5);
+            stamp.basis = (uint8_t)sqlite3_column_int(getLinkByShortIdStmt, 7);
+            stamp.boot_id = (uint32_t)sqlite3_column_int64(getLinkByShortIdStmt, 8);
+            stamp.margin = (uint32_t)sqlite3_column_int64(getLinkByShortIdStmt, 9);
             std::vector<uint8_t> cipher(enc, enc + encLen);
 
-            const uint32_t heardAgo = rxTime < now ? now - rxTime : 0;
+            const uint32_t heardAgo = rowAge(stamp).age;
             std::vector<meshtastic_StoreForwardPlusPlus> frames;
             if (!sfppframe::split(cipher.data(), cipher.size(), to, from, id, heardAgo, false, frames))
                 continue;
@@ -4087,7 +4533,6 @@ void StoreForwardPlusPlusModule::pushScratchRows()
             ++it;
     }
 
-    const uint32_t now = getValidTime(RTCQuality::RTCQualityNTP, true);
     sfppsr::Scope scope;
     copyScopeRoot(root, SFPP_HASH_SIZE, scope, 0, false);
 
@@ -4102,16 +4547,21 @@ void StoreForwardPlusPlusModule::pushScratchRows()
         const uint8_t *cipher = (const uint8_t *)sqlite3_column_blob(fromScratchStmt, 3);
         const int cipherLen = sqlite3_column_bytes(fromScratchStmt, 3);
         const uint8_t *hash = (const uint8_t *)sqlite3_column_blob(fromScratchStmt, 4);
-        const uint32_t rxTime = (uint32_t)sqlite3_column_int64(fromScratchStmt, 5);
+        RowTime stamp;
+        stamp.stamp = (uint32_t)sqlite3_column_int64(fromScratchStmt, 5);
+        stamp.basis = (uint8_t)sqlite3_column_int(fromScratchStmt, 7);
+        stamp.boot_id = (uint32_t)sqlite3_column_int64(fromScratchStmt, 8);
+        stamp.margin = (uint32_t)sqlite3_column_int64(fromScratchStmt, 9);
 
         if (cipher == nullptr || cipherLen <= 0 || hash == nullptr)
             continue;
-        if (rxTime > now || now - rxTime < kScratchPushMinAgeS)
+        const RowAge age = rowAge(stamp);
+        if (age.age < kScratchPushMinAgeS)
             continue; // too young: the authority may still hear it live and announce it
         if (enumAlreadyOffered(hash))
             continue;
 
-        const uint32_t heardAgo = now - rxTime;
+        const uint32_t heardAgo = age.age;
         std::vector<meshtastic_StoreForwardPlusPlus> frames;
         if (!sfppframe::split(cipher, (size_t)cipherLen, to, from, id, heardAgo, false, frames))
             continue;
@@ -4150,11 +4600,16 @@ bool StoreForwardPlusPlusModule::acceptPushedItemFrame(const meshtastic_MeshPack
     if (replay.ciphertext.size() > sizeof(lo.encrypted_bytes))
         return false;
 
+    RowTime lo_time;
     lo.to = replay.to;
     lo.from = replay.from;
     lo.id = replay.id;
-    const uint32_t now = getValidTime(RTCQuality::RTCQualityNTP, true);
-    lo.rx_time = replay.heardAgoS <= now ? now - replay.heardAgoS : now;
+    if (!timeFromAge(replay.heardAgoS, lo_time))
+        return false;
+    lo.rx_time = lo_time.stamp;
+    lo.time_basis = lo_time.basis;
+    lo.boot_id = lo_time.boot_id;
+    lo.age_margin = lo_time.margin;
     memcpy(lo.root_hash, root, SFPP_HASH_SIZE);
     lo.root_hash_len = SFPP_HASH_SIZE;
     lo.channel_hash = channels.getHash(0);
@@ -4310,7 +4765,7 @@ void StoreForwardPlusPlusModule::handleItemFrame(const meshtastic_MeshPacket &mp
 }
 
 bool StoreForwardPlusPlusModule::insertCanonObject(uint32_t to, uint32_t from, uint32_t packetId, const uint8_t *cipher,
-                                                   size_t cipherLen, const uint8_t *hash, uint32_t rxTime,
+                                                   size_t cipherLen, const uint8_t *hash, const RowTime &time,
                                                    const uint8_t *root_hash, uint32_t bucket)
 {
     if (isInDB(hash, SFPP_HASH_SIZE))
@@ -4325,13 +4780,16 @@ bool StoreForwardPlusPlusModule::insertCanonObject(uint32_t to, uint32_t from, u
     sqlite3_bind_blob(chain_insert_stmt, 4, root_hash, SFPP_HASH_SIZE, SQLITE_STATIC);
     sqlite3_bind_blob(chain_insert_stmt, 5, cipher, (int)cipherLen, SQLITE_STATIC);
     sqlite3_bind_blob(chain_insert_stmt, 6, hash, SFPP_HASH_SIZE, SQLITE_STATIC);
-    sqlite3_bind_int64(chain_insert_stmt, 7, (sqlite3_int64)rxTime);
+    sqlite3_bind_int64(chain_insert_stmt, 7, (sqlite3_int64)time.stamp);
     // A unique non-zero commit hash keeps trimOldestLink deleting one row rather than every zero row.
     sqlite3_bind_blob(chain_insert_stmt, 8, hash, SFPP_HASH_SIZE, SQLITE_STATIC);
     sqlite3_bind_text(chain_insert_stmt, 9, "", 0, SQLITE_STATIC);
     sqlite3_bind_int64(chain_insert_stmt, 10, (sqlite3_int64)counter);
     sqlite3_bind_int64(chain_insert_stmt, 11, (sqlite3_int64)sfppsr::shortId(hash, SFPP_HASH_SIZE));
     sqlite3_bind_int64(chain_insert_stmt, 12, (sqlite3_int64)sfppsr::checksumContribution(hash, SFPP_HASH_SIZE));
+    sqlite3_bind_int64(chain_insert_stmt, 13, (sqlite3_int64)time.basis);
+    sqlite3_bind_int64(chain_insert_stmt, 14, (sqlite3_int64)time.boot_id);
+    sqlite3_bind_int64(chain_insert_stmt, 15, (sqlite3_int64)time.margin);
 
     const int res = sqlite3_step(chain_insert_stmt);
     sqlite3_reset(chain_insert_stmt);
@@ -4351,9 +4809,10 @@ bool StoreForwardPlusPlusModule::storeRecoveredObject(const sfppframe::Replay &r
         return true;
     }
 
-    const uint32_t now = getValidTime(RTCQuality::RTCQualityNTP, true);
-    const uint32_t rxTime = replay.heardAgoS <= now ? now - replay.heardAgoS : now;
-    if (!insertCanonObject(replay.to, replay.from, replay.id, replay.ciphertext.data(), replay.ciphertext.size(), hash, rxTime,
+    RowTime time;
+    if (!timeFromAge(replay.heardAgoS, time))
+        return false;
+    if (!insertCanonObject(replay.to, replay.from, replay.id, replay.ciphertext.data(), replay.ciphertext.size(), hash, time,
                            root_hash, bucket))
         return false;
     // The object is canonical now, so a scratch copy (a writer-missed offer) is no longer needed.
@@ -4371,7 +4830,7 @@ void StoreForwardPlusPlusModule::promoteScratchMatches(const uint8_t *root_hash,
         uint32_t to;
         uint32_t from;
         uint32_t id;
-        uint32_t rxTime;
+        RowTime time;
         std::vector<uint8_t> cipher;
         uint8_t hash[SFPP_HASH_SIZE];
     };
@@ -4411,7 +4870,10 @@ void StoreForwardPlusPlusModule::promoteScratchMatches(const uint8_t *root_hash,
         row.id = id;
         row.cipher.assign(cipher, cipher + cipherLen);
         memcpy(row.hash, computed, SFPP_HASH_SIZE);
-        row.rxTime = (uint32_t)sqlite3_column_int64(fromScratchStmt, 5);
+        row.time.stamp = (uint32_t)sqlite3_column_int64(fromScratchStmt, 5);
+        row.time.basis = (uint8_t)sqlite3_column_int(fromScratchStmt, 7);
+        row.time.boot_id = (uint32_t)sqlite3_column_int64(fromScratchStmt, 8);
+        row.time.margin = (uint32_t)sqlite3_column_int64(fromScratchStmt, 9);
         matches.push_back(row);
     }
     sqlite3_reset(fromScratchStmt);
@@ -4420,8 +4882,7 @@ void StoreForwardPlusPlusModule::promoteScratchMatches(const uint8_t *root_hash,
         removeFromScratch(bad.data(), SFPP_HASH_SIZE);
 
     for (const auto &row : matches) {
-        insertCanonObject(row.to, row.from, row.id, row.cipher.data(), row.cipher.size(), row.hash, row.rxTime, root_hash,
-                          bucket);
+        insertCanonObject(row.to, row.from, row.id, row.cipher.data(), row.cipher.size(), row.hash, row.time, root_hash, bucket);
         removeFromScratch(row.hash, SFPP_HASH_SIZE);
         const pinsketch::Element sid = sfppsr::shortId(row.hash, SFPP_HASH_SIZE);
         enumPromoted.push_back({sid, {}});
