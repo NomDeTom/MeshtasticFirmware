@@ -9,6 +9,9 @@
 #elif defined(ARDUINO_NRF52_ADAFRUIT)
 #include <nrf.h>
 #endif
+#if ARCH_PORTDUINO
+#include <time.h>
+#endif
 
 uint32_t Time::getMillis()
 {
@@ -16,7 +19,15 @@ uint32_t Time::getMillis()
     if (Time::useTestClock.load(std::memory_order_relaxed))
         return Time::testNowMs.load(std::memory_order_relaxed);
 #endif
+#if ARCH_PORTDUINO
+    // Linux millis() follows the wall clock, so an NTP or `date` step moved uptime by years; this one cannot.
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    static const uint64_t startMs = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000 - startMs);
+#else
     return millis();
+#endif
 }
 
 namespace
