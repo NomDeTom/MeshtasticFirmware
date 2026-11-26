@@ -306,6 +306,7 @@ bool StoreForwardPlusPlusModule::addToChain(link_object &lo)
     // short_id and checksum, derived once here rather than on every advert
     sqlite3_bind_int64(chain_insert_stmt, 11, sfppsr::shortId(lo.message_hash, lo.message_hash_len));
     sqlite3_bind_int64(chain_insert_stmt, 12, (sqlite3_int64)sfppsr::checksumContribution(lo.message_hash, lo.message_hash_len));
+    sqlite3_bind_int(chain_insert_stmt, 13, (int)sfppsr::contentBucket(lo.message_hash, lo.message_hash_len));
     int res = sqlite3_step(chain_insert_stmt);
     if (res != SQLITE_OK && res != SQLITE_DONE) {
         LOG_ERROR("StoreForwardpp Cannot step: %s", sqlite3_errmsg(ppDb));

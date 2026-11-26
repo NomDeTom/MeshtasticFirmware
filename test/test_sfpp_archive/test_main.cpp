@@ -314,6 +314,28 @@ bool readStoredRow(PacketId id, StoredRow &row)
     return found;
 }
 
+uint32_t storedBucket(PacketId id)
+{
+    sqlite3 *db = nullptr;
+    if (sqlite3_open(dbFile().c_str(), &db) != SQLITE_OK) {
+        if (db)
+            sqlite3_close(db);
+        return 0;
+    }
+    sqlite3_stmt *stmt = nullptr;
+    uint32_t bucket = 0;
+    if (sqlite3_prepare_v2(db, "select bucket from channel_messages where packet_id=? limit 1;", -1, &stmt, nullptr) ==
+        SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, id);
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            bucket = (uint32_t)sqlite3_column_int64(stmt, 0);
+    }
+    if (stmt)
+        sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return bucket;
+}
+
 void setStoredRxTime(PacketId id, uint32_t rxTime)
 {
     sqlite3 *db = nullptr;
@@ -1209,6 +1231,16 @@ void test_two_channels_sharing_a_hash_keep_two_mappings()
 
 // The root rule changes the store's identity, so the schema stamp moves to 2 and a v1 store is
 // moved aside whole rather than served under the new root.
+// The row is filed under the first byte of its message hash, the content bucket.
+void test_stored_row_carries_the_content_bucket()
+{
+    TEST_ASSERT_TRUE(ingestOneText("bucket me"));
+
+    StoredRow row;
+    TEST_ASSERT_TRUE(readStoredRow(TEXT_ID, row));
+    TEST_ASSERT_EQUAL_UINT32(row.messageHash[0], storedBucket(TEXT_ID));
+}
+
 void test_versionOneStoreIsMovedAside()
 {
     TEST_ASSERT_TRUE(ingestOneText("from version one"));
@@ -1229,6 +1261,31 @@ void test_versionOneStoreIsMovedAside()
     const std::vector<std::string> aside = filesMovedAside();
     TEST_ASSERT_EQUAL_UINT(1, aside.size());
     TEST_ASSERT_NOT_NULL(strstr(aside[0].c_str(), "storeforwardpp.db.v1-"));
+    for (const std::string &f : aside)
+        std::remove(f.c_str());
+}
+
+// The content-bucket schema bumps the stamp again; a v3 store is served history and is moved aside.
+void test_v3StoreIsMovedAside()
+{
+    TEST_ASSERT_TRUE(ingestOneText("from version three"));
+    delete testSfpp;
+    testSfpp = nullptr;
+
+    sqlite3 *db = nullptr;
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_open(dbFile().c_str(), &db));
+    TEST_ASSERT_EQUAL_INT(SQLITE_OK, sqlite3_exec(db, "PRAGMA user_version = 3;", nullptr, nullptr, nullptr));
+    sqlite3_close(db);
+
+    testSfpp = new TestSfppModule();
+
+    StoredRow row;
+    TEST_ASSERT_FALSE(readStoredRow(TEXT_ID, row));
+    TEST_ASSERT_EQUAL_INT(StoreForwardPlusPlusModule::kSchemaVersion, storedSchemaVersion());
+
+    const std::vector<std::string> aside = filesMovedAside();
+    TEST_ASSERT_EQUAL_UINT(1, aside.size());
+    TEST_ASSERT_NOT_NULL(strstr(aside[0].c_str(), "storeforwardpp.db.v3-"));
     for (const std::string &f : aside)
         std::remove(f.c_str());
 }
@@ -1265,7 +1322,9 @@ void setup()
     RUN_TEST(test_stale_mapping_moves_the_store_aside);
     RUN_TEST(test_channel_change_moves_the_v2_store_aside);
     RUN_TEST(test_two_channels_sharing_a_hash_keep_two_mappings);
+    RUN_TEST(test_stored_row_carries_the_content_bucket);
     RUN_TEST(test_versionOneStoreIsMovedAside);
+    RUN_TEST(test_v3StoreIsMovedAside);
     UNITY_END();
 }
 
