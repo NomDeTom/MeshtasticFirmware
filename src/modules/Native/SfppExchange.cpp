@@ -361,7 +361,7 @@ void StoreForwardPlusPlusModule::startPendingPull()
         return;
 
     uint8_t root[SFPP_HASH_SIZE] = {0};
-    if (getOrDeriveRootFromChannel(channels.getHash(0), root) == 0)
+    if (getOrDeriveRootFromChannel(0, root) == 0)
         return;
     const uint32_t nowMs = Time::getMillis();
 
@@ -580,7 +580,7 @@ void StoreForwardPlusPlusModule::handleEnumAdvert(const meshtastic_MeshPacket &m
         return;
 
     uint8_t derived[SFPP_HASH_SIZE] = {0};
-    if (getOrDeriveRootFromChannel(channels.getHash(0), derived) == 0)
+    if (getOrDeriveRootFromChannel(0, derived) == 0)
         return;
 
     uint8_t root[SFPP_HASH_SIZE] = {0};
@@ -892,7 +892,7 @@ void StoreForwardPlusPlusModule::handleOverheardListing(NodeNum peer, const uint
     if (peer == 0 || peer == nodeDB->getNodeNum())
         return;
     uint8_t derived[SFPP_HASH_SIZE] = {0};
-    if (getOrDeriveRootFromChannel(channels.getHash(0), derived) == 0 || memcmp(derived, root_hash, SFPP_HASH_SIZE) != 0)
+    if (getOrDeriveRootFromChannel(0, derived) == 0 || memcmp(derived, root_hash, SFPP_HASH_SIZE) != 0)
         return;
     if (list.frameTotal == 0 || list.frameTotal > sizeof(EnumHeardListing::seen) || list.frameIndex >= list.frameTotal)
         return;
@@ -1203,7 +1203,7 @@ void StoreForwardPlusPlusModule::handleItemFrame(const meshtastic_MeshPacket &mp
         return;
 
     uint8_t root[SFPP_HASH_SIZE] = {0};
-    if (getOrDeriveRootFromChannel(channels.getHash(0), root) == 0)
+    if (getOrDeriveRootFromChannel(0, root) == 0)
         return;
 
     const bool fromActivePeer = enumExchangeActive && mp.from == enumExchangePeer;

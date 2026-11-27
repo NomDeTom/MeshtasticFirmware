@@ -27,7 +27,7 @@ class SfppStore
         uint8_t time_basis = 0;  // 0 epoch, 1 uptime seconds, 2 age at the restart that stamped it
         uint32_t boot_id = 0;    // the boot a basis-1 stamp belongs to
         uint32_t age_margin = 0; // extra uncertainty in seconds
-        ChannelHash channel_hash;
+        ChannelIndex channel_index = 0;
         uint8_t encrypted_bytes[256] = {0};
         size_t encrypted_len;
         uint8_t message_hash[SFPP_HASH_SIZE] = {0};
@@ -91,12 +91,12 @@ class SfppStore
     };
 
     // Stamped into PRAGMA user_version. A store with any other value is moved aside, never migrated.
-    static constexpr int kSchemaVersion = 5;
+    static constexpr int kSchemaVersion = 6;
 
     SfppStore() = default;
     ~SfppStore();
 
-    void openStore(const uint8_t *derivedRoot, bool haveDerived);
+    void openStore(ChannelIndex channelIndex, const uint8_t *derivedRoot, bool haveDerived);
 
     void updateTimeState();
     RowTime nowTime() const;
@@ -133,7 +133,7 @@ class SfppStore
     bool storeRecoveredObject(const sfppframe::Replay &replay, const uint8_t *root_hash, uint32_t bucket);
 
     ChannelHash getChannelHashFromRoot(uint8_t *_root_hash, size_t);
-    void addRootToMappings(ChannelHash, uint8_t *);
+    void addRootToMappings(ChannelIndex, ChannelHash, uint8_t *);
 
     void deleteCanon(const uint8_t *message_hash);
     bool bucketHoldsShortId(const uint8_t *root_hash, uint32_t bucket, pinsketch::Element id);
@@ -152,6 +152,8 @@ class SfppStore
     uint32_t estimateEpochNow() const;
     void restampPreviousBoot();
     void backfillSetIndex();
+    bool mappingRootForChannel(ChannelIndex, uint8_t *root);
+    void retireRootRows(ChannelIndex, const uint8_t *root_hash);
     bool findIdentityCopy(uint32_t to, uint32_t from, uint32_t id, const uint8_t *root_hash, IdentityHit &hit);
     bool replaceIdentityCopy(const IdentityHit &hit, const uint8_t *hash, const uint8_t *cipher, size_t cipherLen);
 

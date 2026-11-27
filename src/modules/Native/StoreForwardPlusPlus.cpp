@@ -34,8 +34,8 @@ StoreForwardPlusPlusModule::StoreForwardPlusPlusModule()
       concurrency::OSThread("StoreForwardpp")
 {
     uint8_t derived[SFPP_HASH_SIZE] = {0};
-    const bool haveDerived = deriveRootFromChannel(channels.getHash(0), derived);
-    store_.openStore(derived, haveDerived);
+    const bool haveDerived = deriveRootFromChannel(0, derived);
+    store_.openStore(0, derived, haveDerived);
     encryptedOk = true;
     this->setInterval(15 * 1000);
 }
@@ -61,9 +61,8 @@ int32_t StoreForwardPlusPlusModule::runOnce()
     store_.healBootRelativeTimestamps();
 
     uint8_t root_hash_bytes[SFPP_HASH_SIZE] = {0};
-    ChannelHash hash = channels.getHash(0);
 
-    if (getOrDeriveRootFromChannel(hash, root_hash_bytes) == 0) {
+    if (getOrDeriveRootFromChannel(0, root_hash_bytes) == 0) {
         LOG_WARN("No root hash found, not sending");
         return 10 * 1000;
     }
@@ -245,18 +244,20 @@ bool StoreForwardPlusPlusModule::handleReceivedProtobuf(const meshtastic_MeshPac
 
 // A root every archive on a channel derives identically: channel name and key, no node number and no
 // clock. The version tag makes a future rule change a clean break.
-bool StoreForwardPlusPlusModule::deriveRootFromChannel(ChannelHash _ch_hash, uint8_t *_root_hash)
+bool StoreForwardPlusPlusModule::deriveRootFromChannel(ChannelIndex chIndex, uint8_t *_root_hash)
 {
-    // The module is channel-0 only; a packet on another channel must not resolve to this root.
-    const int16_t primaryHash = channels.getHash(0);
-    if (primaryHash < 0 || static_cast<uint8_t>(primaryHash) != _ch_hash)
+    if (chIndex >= channels.getNumChannels())
         return false;
 
-    CryptoKey key = channels.getKey(0);
+    const int16_t channelHash = channels.getHash(chIndex);
+    if (channelHash < 0)
+        return false;
+
+    CryptoKey key = channels.getKey(chIndex);
     if (key.length < 0)
         return false;
 
-    const char *name = channels.getName(0);
+    const char *name = channels.getName(chIndex);
     const std::string channelName = name ? name : "";
     const uint32_t keyLength = static_cast<uint32_t>(key.length);
 
@@ -264,7 +265,7 @@ bool StoreForwardPlusPlusModule::deriveRootFromChannel(ChannelHash _ch_hash, uin
     SHA256 root;
     root.update(kRootDomain, sizeof(kRootDomain) - 1);
 
-    const uint8_t hashByte = static_cast<uint8_t>(_ch_hash);
+    const uint8_t hashByte = static_cast<uint8_t>(channelHash);
     root.update(&hashByte, sizeof(hashByte));
 
     uint8_t lengthBytes[4];
@@ -287,18 +288,18 @@ bool StoreForwardPlusPlusModule::deriveRootFromChannel(ChannelHash _ch_hash, uin
     return true;
 }
 
-// Returns the derived root, adding it on first use. The mapping is keyed by the root, so a second
+// Returns the derived root, adding it on first use. The mapping names the channel slot, so a second
 // channel that happens to share the 1-byte hash keeps its own row instead of replacing this one.
-size_t StoreForwardPlusPlusModule::getOrDeriveRootFromChannel(ChannelHash _ch_hash, uint8_t *_root_hash)
+size_t StoreForwardPlusPlusModule::getOrDeriveRootFromChannel(ChannelIndex chIndex, uint8_t *_root_hash)
 {
     uint8_t derived[SFPP_HASH_SIZE] = {0};
-    if (!deriveRootFromChannel(_ch_hash, derived))
+    if (!deriveRootFromChannel(chIndex, derived))
         return 0;
 
     uint8_t mapped[SFPP_HASH_SIZE] = {0};
     if (!store_.lookUpFullRootHash(derived, SFPP_HASH_SIZE, mapped)) {
         LOG_INFO("StoreForwardpp Deriving root hash from the channel");
-        store_.addRootToMappings(_ch_hash, derived);
+        store_.addRootToMappings(chIndex, channels.getHash(chIndex), derived);
     }
 
     memcpy(_root_hash, derived, SFPP_HASH_SIZE);
@@ -324,14 +325,16 @@ StoreForwardPlusPlusModule::ingestTextPacket(const meshtastic_MeshPacket &mp, co
     lo.time_basis = stamped.basis;
     lo.boot_id = stamped.boot_id;
     lo.age_margin = stamped.margin;
-    lo.channel_hash = encrypted_meshpacket->channel;
+    lo.channel_index = mp.channel;
+    if (mp.channel != 0)
+        return lo; // only the primary channel is archived
     memcpy(lo.encrypted_bytes, encrypted_meshpacket->encrypted.bytes, encrypted_meshpacket->encrypted.size);
     lo.encrypted_len = encrypted_meshpacket->encrypted.size;
     lo.payload = std::string((char *)mp.decoded.payload.bytes, mp.decoded.payload.size);
     sfppframe::messageHash(encrypted_meshpacket->encrypted.bytes, encrypted_meshpacket->encrypted.size, mp.to, mp.from, mp.id,
                            lo.message_hash);
     lo.message_hash_len = SFPP_HASH_SIZE;
-    lo.root_hash_len = getOrDeriveRootFromChannel(encrypted_meshpacket->channel, lo.root_hash);
+    lo.root_hash_len = getOrDeriveRootFromChannel(mp.channel, lo.root_hash);
     return lo;
 }
 

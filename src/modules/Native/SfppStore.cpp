@@ -81,7 +81,7 @@ SfppStore::~SfppStore()
         sqlite3_close(ppDb);
 }
 
-void SfppStore::openStore(const uint8_t *derivedRoot, bool haveDerived)
+void SfppStore::openStore(ChannelIndex channelIndex, const uint8_t *derivedRoot, bool haveDerived)
 {
     std::string db_path = portduino_config.sfpp_db_path + "storeforwardpp.db";
     LOG_INFO("Opening StoreForwardpp DB at %s", db_path.c_str());
@@ -121,46 +121,6 @@ void SfppStore::openStore(const uint8_t *derivedRoot, bool haveDerived)
         }
     }
 
-    // A v2 store belongs to the channel root it was built under. If it has channel mappings and none
-    // is our derived root, the channel name or key changed: move it aside and start a fresh store.
-    {
-        bool hasChannelMapping = false;
-        bool matchesDerived = false;
-        if (haveDerived) {
-            sqlite3_stmt *stmt = nullptr;
-            // A fresh file has no mappings table yet, so this simply finds nothing.
-            if (sqlite3_prepare_v2(ppDb, "select root_hash from mappings where chain_type=?;", -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_int(stmt, 1, chain_types::channel_chain);
-                while (sqlite3_step(stmt) == SQLITE_ROW) {
-                    hasChannelMapping = true;
-                    const uint8_t *root = (const uint8_t *)sqlite3_column_blob(stmt, 0);
-                    const int len = sqlite3_column_bytes(stmt, 0);
-                    if (root && len == (int)SFPP_HASH_SIZE && memcmp(root, derivedRoot, SFPP_HASH_SIZE) == 0)
-                        matchesDerived = true;
-                }
-            }
-            if (stmt)
-                sqlite3_finalize(stmt);
-        }
-        if (haveDerived && hasChannelMapping && !matchesDerived) {
-            const std::string aside = db_path + ".root-" + std::to_string(getTime());
-            LOG_WARN("StoreForwardpp channel root changed: moving %s aside and starting empty", aside.c_str());
-            sqlite3_close(ppDb);
-            ppDb = nullptr;
-            if (std::rename(db_path.c_str(), aside.c_str()) != 0) {
-                LOG_ERROR("Cannot move the old StoreForwardpp DB aside");
-                exit(EXIT_FAILURE);
-            }
-            std::rename((db_path + "-journal").c_str(), (aside + "-journal").c_str());
-            res = sqlite3_open(db_path.c_str(), &ppDb);
-            if (res != SQLITE_OK) {
-                LOG_ERROR("Cannot open database: %s", sqlite3_errmsg(ppDb));
-                sqlite3_close(ppDb);
-                ppDb = nullptr;
-                exit(EXIT_FAILURE);
-            }
-        }
-    }
     char *err = nullptr;
 
     res = sqlite3_exec(ppDb, "         \
@@ -181,6 +141,35 @@ void SfppStore::openStore(const uint8_t *derivedRoot, bool haveDerived)
         age_margin INT NOT NULL DEFAULT 0, \
         bucket INT DEFAULT 0,          \
         PRIMARY KEY (message_hash)     \
+        );",
+                       NULL, NULL, &err);
+    if (res != SQLITE_OK) {
+        LOG_ERROR("Failed to create table: %s", sqlite3_errmsg(ppDb));
+    }
+    if (err != nullptr)
+        LOG_ERROR("%s", err);
+    sqlite3_free(err);
+
+    // Rows retired when a channel's name or key changed. Kept out of the active tables so an old
+    // root is never served, without discarding another channel's data.
+    res = sqlite3_exec(ppDb, "         \
+        CREATE TABLE IF NOT EXISTS     \
+        retired_channel_messages(      \
+        destination INT NOT NULL,      \
+        sender INT NOT NULL,           \
+        packet_id INT NOT NULL,        \
+        rx_time INT NOT NULL,          \
+        root_hash BLOB NOT NULL,       \
+        encrypted_bytes BLOB NOT NULL, \
+        message_hash BLOB NOT NULL,    \
+        payload TEXT,                  \
+        short_id INT,                  \
+        checksum INT,                  \
+        time_basis INT NOT NULL DEFAULT 0, \
+        boot_id INT NOT NULL DEFAULT 0,    \
+        age_margin INT NOT NULL DEFAULT 0, \
+        bucket INT DEFAULT 0,          \
+        retired_at INT NOT NULL        \
         );",
                        NULL, NULL, &err);
     if (res != SQLITE_OK) {
@@ -240,15 +229,16 @@ void SfppStore::openStore(const uint8_t *derivedRoot, bool haveDerived)
         LOG_ERROR("%s", err);
     sqlite3_free(err);
 
-    // mappings table -- connects the root hashes to channel hashes and DM identifiers. Keyed by the
-    // root, not the 1-byte identifier, so two channels that share a hash keep separate stores.
+    // mappings table -- one row per channel slot, naming the full root and the channel's 1-byte
+    // hash. Keyed by index so two slots that share a hash keep separate rows.
     res = sqlite3_exec(ppDb, "         \
         CREATE TABLE IF NOT EXISTS     \
         mappings(                      \
         chain_type INT NOT NULL,       \
+        channel_index INT NOT NULL,    \
         identifier INT NOT NULL,       \
         root_hash BLOB NOT NULL,       \
-        PRIMARY KEY (root_hash)        \
+        PRIMARY KEY (chain_type, channel_index) \
         );",
                        NULL, NULL, &err);
 
@@ -258,6 +248,16 @@ void SfppStore::openStore(const uint8_t *derivedRoot, bool haveDerived)
     if (err != nullptr)
         LOG_ERROR("%s", err);
     sqlite3_free(err);
+
+    // A changed name or key gives this channel a new root. Retire the old root's rows only; the
+    // store is not moved aside and other channels keep their data.
+    if (haveDerived) {
+        uint8_t mapped[SFPP_HASH_SIZE] = {0};
+        if (mappingRootForChannel(channelIndex, mapped) && memcmp(mapped, derivedRoot, SFPP_HASH_SIZE) != 0) {
+            LOG_WARN("StoreForwardpp channel root changed: retiring the old root's rows");
+            retireRootRows(channelIndex, mapped);
+        }
+    }
 
     // One row of time state: the boot in progress and the last uptime/epoch seen in it, so a restart
     // can age a previous boot's rows and add the downtime when both ends had a proper clock.
@@ -379,12 +379,15 @@ void SfppStore::openStore(const uint8_t *derivedRoot, bool haveDerived)
     sqlite3_prepare_v2(ppDb, "select payload from channel_messages where substr(message_hash,1,?)=? limit 1;", -1,
                        &payloadForHashStmt, NULL);
 
-    sqlite3_prepare_v2(ppDb, "select identifier from mappings where substr(root_hash,1,?)=?;", -1, &getHashFromRootStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "select identifier from mappings where substr(root_hash,1,?)=? limit 1;", -1, &getHashFromRootStmt,
+                       NULL);
 
-    sqlite3_prepare_v2(ppDb, "INSERT OR REPLACE INTO mappings (chain_type, identifier, root_hash) VALUES(?, ?, ?);", -1,
-                       &addRootToMappingsStmt, NULL);
+    sqlite3_prepare_v2(ppDb,
+                       "INSERT OR REPLACE INTO mappings (chain_type, channel_index, identifier, root_hash) VALUES(?, ?, ?, ?);",
+                       -1, &addRootToMappingsStmt, NULL);
 
-    sqlite3_prepare_v2(ppDb, "select root_hash from mappings where substr(root_hash,1,?)=?;", -1, &getFullRootHashStmt, NULL);
+    sqlite3_prepare_v2(ppDb, "select root_hash from mappings where substr(root_hash,1,?)=? limit 1;", -1, &getFullRootHashStmt,
+                       NULL);
 
     sqlite3_prepare_v2(ppDb, "SELECT count(*) FROM local_messages WHERE substr(root_hash,1,?)=?;", -1, &getScratchCountStmt,
                        NULL);
@@ -1211,6 +1214,68 @@ bool SfppStore::storeRecoveredObject(const sfppframe::Replay &replay, const uint
     return true;
 }
 
+bool SfppStore::mappingRootForChannel(ChannelIndex channel_index, uint8_t *root)
+{
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(ppDb, "select root_hash from mappings where chain_type=? and channel_index=?;", -1, &stmt, nullptr) !=
+        SQLITE_OK)
+        return false;
+    sqlite3_bind_int(stmt, 1, chain_types::channel_chain);
+    sqlite3_bind_int(stmt, 2, channel_index);
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const uint8_t *blob = (const uint8_t *)sqlite3_column_blob(stmt, 0);
+        const int len = sqlite3_column_bytes(stmt, 0);
+        if (blob && len == (int)SFPP_HASH_SIZE) {
+            memcpy(root, blob, SFPP_HASH_SIZE);
+            found = true;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+void SfppStore::retireRootRows(ChannelIndex channel_index, const uint8_t *root_hash)
+{
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(ppDb,
+                           "INSERT INTO retired_channel_messages (destination, sender, packet_id, rx_time, root_hash, "
+                           "encrypted_bytes, message_hash, payload, short_id, checksum, time_basis, boot_id, age_margin, "
+                           "bucket, retired_at) SELECT destination, sender, packet_id, rx_time, root_hash, encrypted_bytes, "
+                           "message_hash, payload, short_id, checksum, time_basis, boot_id, age_margin, bucket, ? "
+                           "FROM channel_messages WHERE substr(root_hash,1,?)=?;",
+                           -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, (sqlite3_int64)getTime());
+        sqlite3_bind_int(stmt, 2, SFPP_HASH_SIZE);
+        sqlite3_bind_blob(stmt, 3, root_hash, SFPP_HASH_SIZE, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    const char *deletes[] = {
+        "DELETE FROM channel_messages WHERE substr(root_hash,1,?)=?;",
+        "DELETE FROM local_messages WHERE substr(root_hash,1,?)=?;",
+    };
+    for (const char *sql : deletes) {
+        stmt = nullptr;
+        if (sqlite3_prepare_v2(ppDb, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            continue;
+        sqlite3_bind_int(stmt, 1, SFPP_HASH_SIZE);
+        sqlite3_bind_blob(stmt, 2, root_hash, SFPP_HASH_SIZE, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    stmt = nullptr;
+    if (sqlite3_prepare_v2(ppDb, "DELETE FROM mappings WHERE chain_type=? AND channel_index=?;", -1, &stmt, nullptr) ==
+        SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, chain_types::channel_chain);
+        sqlite3_bind_int(stmt, 2, channel_index);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
 ChannelHash SfppStore::getChannelHashFromRoot(uint8_t *_root_hash, size_t _root_hash_len)
 {
     sqlite3_bind_int(getHashFromRootStmt, 1, _root_hash_len);
@@ -1221,12 +1286,13 @@ ChannelHash SfppStore::getChannelHashFromRoot(uint8_t *_root_hash, size_t _root_
     return tmp_hash;
 }
 
-void SfppStore::addRootToMappings(ChannelHash _ch_hash, uint8_t *_root_hash)
+void SfppStore::addRootToMappings(ChannelIndex channel_index, ChannelHash _ch_hash, uint8_t *_root_hash)
 {
     int type = chain_types::channel_chain;
     sqlite3_bind_int(addRootToMappingsStmt, 1, type);
-    sqlite3_bind_int(addRootToMappingsStmt, 2, _ch_hash);
-    sqlite3_bind_blob(addRootToMappingsStmt, 3, _root_hash, SFPP_HASH_SIZE, NULL);
+    sqlite3_bind_int(addRootToMappingsStmt, 2, channel_index);
+    sqlite3_bind_int(addRootToMappingsStmt, 3, _ch_hash);
+    sqlite3_bind_blob(addRootToMappingsStmt, 4, _root_hash, SFPP_HASH_SIZE, NULL);
     auto rc = sqlite3_step(addRootToMappingsStmt);
     LOG_WARN("StoreForwardpp result %u, %s", rc, sqlite3_errmsg(ppDb));
     sqlite3_reset(addRootToMappingsStmt);

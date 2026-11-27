@@ -147,7 +147,7 @@ void StoreForwardPlusPlusModule::handleLegacyClientHistory(const meshtastic_Mesh
     std::vector<Candidate> page;
 
     uint8_t root_hash[SFPP_HASH_SIZE] = {0};
-    if (getOrDeriveRootFromChannel(channels.getHash(0), root_hash) != 0) {
+    if (getOrDeriveRootFromChannel(0, root_hash) != 0) {
         const std::vector<SfppStore::LegacyRow> rows = store_.collectLegacyHistory(root_hash, requester);
         for (const auto &row : rows) {
             const RowAge age = store_.rowAge(row.time);

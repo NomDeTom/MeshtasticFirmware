@@ -189,10 +189,10 @@ class StoreForwardPlusPlusModule : public ProtobufModule<meshtastic_StoreForward
     void promoteScratchMatches(const uint8_t *root_hash, uint32_t bucket, std::vector<pinsketch::Element> &ids);
 
     // Derives the channel's root from its name and key; no node number or clock is involved.
-    bool deriveRootFromChannel(ChannelHash, uint8_t *);
+    bool deriveRootFromChannel(ChannelIndex, uint8_t *);
 
     // Returns the derived root, replacing a stale mapping from an earlier root rule or channel.
-    size_t getOrDeriveRootFromChannel(ChannelHash, uint8_t *);
+    size_t getOrDeriveRootFromChannel(ChannelIndex, uint8_t *);
 
     // Takes the decrypted MeshPacket and the encrypted packet copy, and builds a stored object.
     // Generates a message hash, but does not set the commit hash
