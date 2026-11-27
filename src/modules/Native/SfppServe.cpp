@@ -44,6 +44,11 @@ ErrorCode StoreForwardPlusPlusModule::sendSfppPacket(meshtastic_MeshPacket *p, R
             packetPool.release(p);
         return ERRNO_DISABLED;
     }
+    if (!txAllowed(false)) {
+        if (p)
+            packetPool.release(p);
+        return ERRNO_DISABLED;
+    }
     return service->sendToMesh(p, src, ccToPhone);
 }
 

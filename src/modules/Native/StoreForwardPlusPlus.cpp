@@ -11,6 +11,7 @@
 #include "SfppFrame.h"
 #include "SfppInternal.h"
 #include "UptimeClock.h"
+#include "airtime.h"
 #include "concurrency/LockGuard.h"
 #include "mesh/CryptoEngine.h"
 #include "mesh/Throttle.h"
@@ -116,6 +117,13 @@ bool StoreForwardPlusPlusModule::linkIsFresh(const stored_object &lo) const
     t.basis = kTimeBasisEpoch; // the wire's rxtime is an epoch claim; an unusable one counts as stale
     const RowAge age = store_.rowAge(t);
     return age.age + age.margin <= rebroadcastTimeout;
+}
+
+bool StoreForwardPlusPlusModule::txAllowed(bool polite)
+{
+    if (!airTime)
+        return true;
+    return airTime->isTxAllowedChannelUtil(polite) && airTime->isTxAllowedAirUtil();
 }
 
 void StoreForwardPlusPlusModule::handleEncrypted(const meshtastic_MeshPacket *mp, const meshtastic_MeshPacket *p_encrypted)

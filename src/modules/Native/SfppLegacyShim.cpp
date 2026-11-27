@@ -228,7 +228,7 @@ bool StoreForwardPlusPlusModule::sendNextLegacyHistory()
         legacyHistoryBusy = false;
         return false;
     }
-    if (!consumeServeBudget())
+    if (!txAllowed(false) || !consumeServeBudget())
         return false;
 
     legacy_history_item item = std::move(legacyHistory.front());

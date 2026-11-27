@@ -431,7 +431,9 @@ void StoreForwardPlusPlusModule::startPendingPull()
         return;
     }
     // Keep the entry: endEnumExchange() removes it on success, rememberFailedPull() advances its
-    // attempt and first-failure state on failure.
+    // attempt and first-failure state on failure. A busy channel keeps it for a later pass.
+    if (!txAllowed(true))
+        return;
 
     char rootHex[9];
     formatRootHex(root, SFPP_HASH_SIZE, rootHex);
@@ -598,7 +600,7 @@ void StoreForwardPlusPlusModule::advertiseOneBucket(uint8_t *root_hash, size_t r
         return;
     // The 4-byte tip is the advertised bucket's content count, not a chain counter.
     msg.encapsulated_rxtime = summary.count();
-    if (!sendEnumMessage(msg, NODENUM_BROADCAST, "advert", msg.message.size))
+    if (!txAllowed(true) || !sendEnumMessage(msg, NODENUM_BROADCAST, "advert", msg.message.size))
         return;
 
     bool stored = false;
@@ -669,7 +671,7 @@ void StoreForwardPlusPlusModule::advertiseWindow(uint8_t *root_hash, size_t root
     meshtastic_StoreForwardPlusPlus msg;
     if (!sfppsr::buildWindowAdvert(scope, storeScope, summary, msg))
         return;
-    if (!sendEnumMessage(msg, NODENUM_BROADCAST, "advert", msg.message.size))
+    if (!txAllowed(true) || !sendEnumMessage(msg, NODENUM_BROADCAST, "advert", msg.message.size))
         return;
 
     enumWritesSinceAdvert = 0;
@@ -753,7 +755,7 @@ void StoreForwardPlusPlusModule::handleEnumAdvert(const meshtastic_MeshPacket &m
             return;
         }
 
-        if (enumBucketSuppressed(root, bucket, advert.count, advert.checksum))
+        if (enumBucketSuppressed(root, bucket, advert.count, advert.checksum) || !txAllowed(true))
             return;
 
         beginEnumExchange(root, bucket, mp.from, advert.count, advert.checksum);
@@ -789,7 +791,7 @@ void StoreForwardPlusPlusModule::handleEnumAdvert(const meshtastic_MeshPacket &m
     {
         // A bucket that could not be repaired from this advertised summary is not pulled again until
         // a peer advertises a different one for it.
-        if (enumBucketSuppressed(root, advert.scope.bucket, advert.count, advert.checksum))
+        if (enumBucketSuppressed(root, advert.scope.bucket, advert.count, advert.checksum) || !txAllowed(true))
             return;
 
         beginEnumExchange(root, advert.scope.bucket, mp.from, advert.count, advert.checksum);

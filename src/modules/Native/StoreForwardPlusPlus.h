@@ -89,6 +89,8 @@ class StoreForwardPlusPlusModule : public ProtobufModule<meshtastic_StoreForward
     SfppStore store_;
 
     bool linkIsFresh(const stored_object &lo) const;
+    // Channel-utilisation and duty-cycle gate: polite (25%) for traffic SF++ starts, 40% for serving.
+    static bool txAllowed(bool polite);
 
     // Answers a legacy CLIENT_HISTORY from the stored texts. One text per runOnce() keeps the
     // archive inside the legacy module's pacing, which clients already expect.
